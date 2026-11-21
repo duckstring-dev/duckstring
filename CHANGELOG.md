@@ -73,6 +73,14 @@ its Ponds, and code calling an API the new version removed failed only when its 
 
 ### Fixes
 
+- **A Ripple's error was replaced by "stuck" 30 seconds after its Run gave up.** The Ripples below the failed one
+  kept waiting for the Run, so the Duck never went idle, its watchdog reported the Run as stuck, and that message
+  replaced the Ripple's own error on the Pond. They now stop waiting when the Run gives up; Runs pipelined behind
+  it carry on.
+- **A fix deployed while the broken code was retrying left the Pond failed.** A Duck on a version a redeploy
+  replaced kept spending its retries on the old code, then failed the Pond after the redeploy had cleared it. It now
+  gives a failing Run up at once, and the Catchment records the attempt and runs the Pond again on the new
+  version, without failing it or alerting.
 - **Change points inside combined files were skipped.** Once a Source's small per-Run files were combined, its
   change points (`/api/ponds/{name}/changes`, `--next-change`, a copied Puddle's history) named only each combined
   file's two ends, so a dev Catchment stepped from one end of a week of Runs to the other. The Runs inside are read

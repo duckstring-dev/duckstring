@@ -177,4 +177,27 @@ def fail_ripple(
             rs.demand.append(f)  # retry the same Ripple, same Run
         return s, None
     s.immediate_left.pop(f, None)
+    for below in _cut_off(s, name):
+        s.states[below].demand = [t for t in s.states[below].demand if t > f]
     return s, RunFailed(f, name)
+
+
+def _cut_off(s: WorkerState, name: str) -> set[str]:
+    """The Ripples that can't run past ``name`` while it is stuck: those with ``name`` above them through a
+    required parent, or through every parent when all are optional (``source_f``'s rule). When a Run gives up at
+    ``name``, their demand for it goes: left, the Duck never went idle and its watchdog reported the Run as stuck,
+    replacing the Ripple's error (attention FINDINGS 17). Demand from later Runs stays."""
+    cut = {name}
+    changed = True
+    while changed:
+        changed = False
+        for ripple, parents in s.parents.items():
+            if ripple in cut or not parents:
+                continue
+            opt = s.optional.get(ripple, set())
+            req = [p for p in parents if p not in opt]
+            if any(p in cut for p in req) if req else all(p in cut for p in parents):
+                cut.add(ripple)
+                changed = True
+    cut.discard(name)
+    return cut

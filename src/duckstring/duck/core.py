@@ -97,6 +97,7 @@ class DuckCore:
         self._previous_f: dict[datetime, datetime] = {}  # Pond Run freshness → the prior run's freshness
         self._rebuilds: set[datetime] = set()  # Pond Runs that read their Sources in full (a Rebuild)
         self.contract: dict | None = None  # the major line's additive schema contract (gated at publish)
+        self.replaced = False  # a redeploy replaced this Duck's version (a shutdown job's ``replaced``)
         # No-change tracking (plans/no-change-skip.md), keyed by Pond Run freshness so concurrent Runs
         # don't cross-contaminate. ``_skipped`` holds Runs a Ripple marked no-change via ``pond.skip()``;
         # ``_sources_changed`` is the engine's verdict (exposed to Ripples as ``pond.sources_changed()``).
@@ -268,7 +269,9 @@ class DuckCore:
         any remain; otherwise the Run gives up — record it and buffer a ``failed`` event for the
         Catchment. ``error``/``traceback`` are the failure message + stack (surfaced in the UI).
         Returns any Ripple names to (re)launch."""
-        self.state, rf = worker.fail_ripple(self.state, name, now)
+        # A replaced Duck (its version redeployed) gives up at once: retrying the old code is wasted time, and the
+        # Catchment runs the Run again on the new version (attention FINDINGS 8).
+        self.state, rf = worker.fail_ripple(self.state, name, now, retry=not self.replaced)
         ledger.record_ripple_failed(self.con, name)
         attempt = self.attempts.get(name, 0)
         if rf is None:  # retried within budget — log the failed attempt, the Run continues

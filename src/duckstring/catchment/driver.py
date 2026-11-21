@@ -2876,8 +2876,11 @@ class Driver(TapsMixin, PuddlesMixin):
                     self._process(now)
             elif kind == "failed":
                 # The Pond Run gave up at this Ripple's freshness: fail the Pond (and block downstream), unless
-                # it ran out of memory and gets one retry with every slot (plans/memory-budget.md).
-                if not (_out_of_memory(payload.get("error")) and self._retry_for_memory(pond, payload, now)):
+                # it was a Run of a version since redeployed, or it ran out of memory and gets one retry with
+                # every slot (plans/memory-budget.md).
+                if self._rerun_on_new_version(pond, payload, now):
+                    pass
+                elif not (_out_of_memory(payload.get("error")) and self._retry_for_memory(pond, payload, now)):
                     if _out_of_memory(payload.get("error")) and self._memory_gated(pond):
                         payload = {**payload, "error": f"{payload.get('error')} (it ran out of memory with every "
                                                       "memory slot on the machine to itself)"}
@@ -2946,9 +2949,32 @@ class Driver(TapsMixin, PuddlesMixin):
         retry), and the caller fails the Pond as usual."""
         if not self._memory_gated(pond) or pond in self._memory_retry:
             return False
+        note = f"{error or (payload or {}).get('error') or 'out of memory'}; retrying with every memory slot"
+        self._abandon_and_wake(pond, payload, now, note)
+        self.state.pond_states[pond].slot_exclusive = True
+        self._memory_retry.add(pond)
+        self._process(now)
+        return True
+
+    def _rerun_on_new_version(self, pond: str, payload: dict, now: datetime) -> bool:
+        """A Run of a version a redeploy has since replaced gave up (its Duck is finishing on the old code). The
+        redeploy already cleared the Pond's failures, so failing it now would leave a fix deployed while the
+        broken code retried with the Pond failed (attention FINDINGS 8): the attempt is recorded, and the Pond
+        runs again on the new version, without failing or alerting. False for a Run of the selected version."""
+        f = payload.get("f")
+        meta = self.meta.get(pond)
+        if not f or meta is None or self._run_version_id(pond, f) == meta["version_id"]:
+            return False
+        note = f"{payload.get('error') or 'failed'}; running again on version {meta['version']}"
+        self._abandon_and_wake(pond, payload, now, note)
+        self._process(now)
+        return True
+
+    def _abandon_and_wake(self, pond: str, payload: dict | None, now: datetime, note: str) -> None:
+        """Record the given-up Run (``payload``, else the Pond's Run in flight) as failed with ``note``, abandon
+        it without keeping a failure or blocking anything, and wake the Pond for another Run."""
         ps = self.state.pond_states[pond]
         f = (payload or {}).get("f") or (_iso(ps.start_f) if ps.start_f > ps.end_f else None)
-        note = f"{error or (payload or {}).get('error') or 'out of memory'}; retrying with every memory slot"
         if f:
             self._fail_pond_run(pond, f, now, note, (payload or {}).get("traceback"))
         if payload is not None and payload.get("ripple"):
@@ -2966,10 +2992,6 @@ class Driver(TapsMixin, PuddlesMixin):
             self.state = fail_pond(self.state, pond, now)
         self.state = clear_pond(self.state, pond, now)  # ...then abandon it: no failure kept, nothing blocked
         self.state = wake_pond(self.state, pond, now)
-        self.state.pond_states[pond].slot_exclusive = True
-        self._memory_retry.add(pond)
-        self._process(now)
-        return True
 
     def _fail_at_ripple(self, pond: str, payload: dict, now: datetime, alert_kind: str = "failure") -> None:
         """A Pond Run gave up at one Ripple (``payload``: a ``failed`` or ``contract_failed`` event): fail
@@ -3020,11 +3042,14 @@ class Driver(TapsMixin, PuddlesMixin):
             self.last_seen[pond] = _now()  # the Duck is alive — it just polled
             self._awaiting_first_contact.discard(pond)
             selected = self.meta.get(pond, {}).get("version")
-            if (version is not None and selected is not None and version != selected) or pond in self._outdated_ducks:
+            replaced = version is not None and selected is not None and version != selected
+            if replaced or pond in self._outdated_ducks:
                 self._outdated_ducks.add(pond)
                 if hasattr(self.launcher, "release"):
                     self.launcher.release(pond)
-                return [{"kind": "shutdown"}]
+                # ``replaced``: its code was redeployed (not just moved), so a failing Ripple gives up its Run at
+                # once and the Run goes again on the new version (_rerun_on_new_version).
+                return [{"kind": "shutdown", "replaced": True} if replaced else {"kind": "shutdown"}]
             jobs = self.jobs.get(pond, [])
             self.jobs[pond] = []
             if any(j.get("kind") == "begin_run" for j in jobs):
