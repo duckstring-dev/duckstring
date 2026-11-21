@@ -716,6 +716,7 @@ class Driver(TapsMixin, PuddlesMixin):
             self._configure_slots()
             self._load_taps(pondid_to_key)
             self._load_puddles()
+            self._restore_read_at()
             # Recompute blocked from the freshly-loaded topology: a Source that is absent now (or has
             # since become present, e.g. a duct was added) flips has_missing_source, so the persisted
             # is_blocked may be stale. Re-derive for every Pond (propagates to Sinks).
@@ -865,6 +866,28 @@ class Driver(TapsMixin, PuddlesMixin):
         self.db.commit()
         for pid in self.state.pond_states:
             derive_blocked(self.state, pid)
+
+    def _restore_read_at(self) -> None:
+        """Where each Pond's Runs at or after its ``end_f`` read their Sources up to (``PondState.read_at``, the
+        position-aware pass test), from ``pond_run.read_positions``. A Run recorded without them (before read
+        positions) is left out, so the test falls back to its freshness."""
+        for key, pond in self.state.ponds.items():
+            if not pond.sources or key not in self.meta:
+                continue
+            ps = self.state.pond_states[key]
+            by_name = {self.meta[sk]["name"]: sk for sk in pond.sources if sk in self.meta}
+            meta = self.meta[key]
+            for f, raw in self.db.execute(
+                    "SELECT pr.f, pr.read_positions FROM pond_run pr JOIN pond_version pv ON pv.id = pr.pond_version_id "
+                    "JOIN pond_name pn ON pn.id = pv.pond_name_id WHERE pn.name = ? AND pv.major = ? AND pr.f >= ? "
+                    "AND pr.read_positions IS NOT NULL AND pr.status IN ('success', 'running')",
+                    (meta["name"], meta["major"], _iso(ps.end_f))):
+                try:
+                    positions = json.loads(raw)
+                except ValueError:
+                    continue
+                ps.read_at[datetime.fromisoformat(f)] = {
+                    by_name[n]: datetime.fromisoformat(v) for n, v in positions.items() if n in by_name and v}
 
     def _load_pond_state(self, pond_id: int) -> PondState:
         row = first_row(self.db.execute(

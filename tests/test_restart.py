@@ -157,3 +157,23 @@ def test_sleep_clears_demand_keeps_ripple_demand(tmp_path):
     d.sleep("p@1")
     assert not d.state.pond_states["p@1"].demand
     assert d.state.ripple_states["p@1.r2"].demand == [far]   # kept so the run completes
+
+
+def test_restart_restores_where_the_last_run_read_its_sources(tmp_path):
+    """The position-aware pass test needs where the newest Run read each Source up to (``PondState.read_at``): a
+    restarted Catchment loads it from ``pond_run.read_positions``, keyed by the Source line."""
+    db = _make_db(tmp_path)
+    sink = {**_CFG, "sources": {"p": "1.0.0"}, "kind": "pond"}
+    _register(db, "s", "1.0.0", "pond", "ponds/s/1.0.0", sink, [{"func": "g", "name": "g", "parents": []}])
+    d = Driver(db, tmp_path, "http://x", NoopLauncher())
+    d.refresh_now("s@1")
+    _complete_run(d)
+    f = d.state.pond_states["s@1"].start_f
+    assert d.state.pond_states["s@1"].read_at[f] == {"p@1": d.state.pond_states["p@1"].changed_f}
+    fi = f.isoformat()
+    d.on_event("s@1", {"kind": "ripple", "f": fi, "ripple": "g", "status": "success"})
+    d.on_event("s@1", {"kind": "run_completed", "f": fi})
+    assert d.state.pond_states["s@1"].end_f == f
+
+    d2 = Driver(d.db, tmp_path, "http://x", NoopLauncher())
+    assert d2.state.pond_states["s@1"].read_at == {f: {"p@1": d.state.pond_states["p@1"].changed_f}}

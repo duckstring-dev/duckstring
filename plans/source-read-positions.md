@@ -109,7 +109,8 @@ Size: L. No engine or Playground change.
 
 ## As built (2026-11-20)
 
-Decisions taken at the start (the author's): accept the one extra Run below; drop "a Ripple with no completed Run
+Decisions taken at the start (the author's): accept the one extra Run below (removed 2026-11-21: the pass test
+compares each Source against where the prior Run read it, `PondState.read_at`; see CLAUDE.md "No-change skip"); drop "a Ripple with no completed Run
 reads in full" (`pond.is_new` covers hand-written code, the builder checks its own output); rename now.
 
 - **Catchment.** Migration `038` renames `pond_run.source_pins` to `read_positions` and clears every value: Runs

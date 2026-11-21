@@ -586,24 +586,39 @@ def can_start_pond(s: EngineState, pid: PondId, now: datetime) -> bool:
     return ready
 
 
-def _pond_sources_changed(s: EngineState, pid: PondId, prior_f: datetime) -> bool:
-    """Did any Source change its output since this Pond last ran (at ``prior_f``)? The content-aware
-    skip test (plans/no-change-skip.md): ``max(Source.changedF) > prior_f`` over **all** Sources read
-    (required ∪ optional — optional never triggers a run, but a triggered run still folds in whatever
-    optional changed). Compared with strict ``>`` against the Pond's *prior* run freshness — a Source
-    that changed exactly at ``prior_f`` was already incorporated. Sound (never misses a change); the
-    only imprecision is a redundant run from a fresher non-binding Source, which is accepted.
+def _source_changed_f(s: EngineState, sp: PondId) -> datetime:
+    """A Source's content mark. One with ``changed_f == NEVER`` but a real ``end_f`` (an under-initialised /
+    pre-backfill state — production always stamps ``changed_f`` on the first completion) falls back to
+    ``end_f``, so it reads as changed rather than spuriously passing."""
+    sps = s.pond_states[sp]
+    return sps.changed_f if sps.changed_f > NEVER else sps.end_f
 
-    A Source with ``changed_f == NEVER`` but a real ``end_f`` (an under-initialised / pre-backfill
-    state — production always stamps ``changed_f`` on the first completion) falls back to ``end_f``, so
-    we assume changed rather than spuriously pass."""
-    cfs = []
+
+def _read_positions_now(s: EngineState, pid: PondId) -> dict[PondId, datetime]:
+    """Where a Run starting now reads each Source up to: its content mark (the Duck's read positions)."""
+    return {sp: _source_changed_f(s, sp) for sp in s.ponds[pid].sources if sp in s.pond_states}
+
+
+def _pond_sources_changed(s: EngineState, pid: PondId, prior_f: datetime,
+                          prior_positions: dict[PondId, datetime] | None = None) -> bool:
+    """Did any Source change its output since this Pond last read it? The content-aware skip test
+    (plans/no-change-skip.md), over **all** Sources read (required ∪ optional — optional never triggers a
+    run, but a triggered run still folds in whatever optional changed), with strict ``>``: a change exactly
+    where the prior Run read was already incorporated.
+
+    Position-aware: a Run reads each Source as far as it had got (read positions), which can be past the Run's
+    own freshness (stamped by its oldest Source). So each Source's content mark is compared against where the
+    prior Run read it (``prior_positions``; a Source missing from them was read nowhere, so any change counts).
+    Without recorded positions (a Run from before they were kept, or lost to a restart), the prior Run's
+    freshness ``prior_f`` stands for all of them, which is sound but runs once more after a Source that ran
+    ahead. Never misses a change: one after where the prior Run read is a content mark past its position."""
     for sp in s.ponds[pid].sources:
-        sps = s.pond_states.get(sp)
-        if sps is None:
+        if sp not in s.pond_states:
             continue
-        cfs.append(sps.changed_f if sps.changed_f > NEVER else sps.end_f)
-    return bool(cfs) and max(cfs) > prior_f
+        read = prior_f if prior_positions is None else prior_positions.get(sp, NEVER)
+        if _source_changed_f(s, sp) > read:
+            return True
+    return False
 
 
 def _prior_f(ps: PondState) -> datetime:
@@ -612,9 +627,15 @@ def _prior_f(ps: PondState) -> datetime:
     return ps.end_f if ps.is_failed else ps.start_f
 
 
+def _prior_positions(ps: PondState) -> dict[PondId, datetime] | None:
+    """Where the Run a new Run builds on (see :func:`_prior_f`) read its Sources up to, if recorded."""
+    return ps.read_at.get(_prior_f(ps))
+
+
 def _would_pass(s: EngineState, pid: PondId) -> bool:
     """Would a Run starting now be a pass: no reason to run regardless, and no Source changed since its prior?"""
-    return not _must_run(s, pid) and not _pond_sources_changed(s, pid, _prior_f(s.pond_states[pid]))
+    ps = s.pond_states[pid]
+    return not _must_run(s, pid) and not _pond_sources_changed(s, pid, _prior_f(ps), _prior_positions(ps))
 
 
 def _pass_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
@@ -750,6 +771,7 @@ def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
     ps = s.pond_states[pid]
     pond = s.ponds[pid]
     prior_f = _prior_f(ps)  # the freshness this Run builds on (captured before the reset below)
+    prior_positions = _prior_positions(ps)
     f, window_d = pond_source_f(s, pid, now)
     assert f is not None
 
@@ -757,6 +779,8 @@ def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
     # for: a request is a lower bound, and the Run can only start once ``now`` has reached it.
     ps.start_f = f
     ps.demand = [t for t in ps.demand if t > ps.start_f]
+    if pond.sources:
+        ps.read_at[f] = _read_positions_now(s, pid)
 
     if not s.ponds[pid].sources:
         ps.d = window_d
@@ -778,7 +802,7 @@ def start_pond_run(s: EngineState, pid: PondId, now: datetime) -> None:
     # an Inlet (determines change by content, the engine can't), a Force/Rebuild/repair (recompute by
     # intent), an ``always_run`` side-effecting Pond, or a Draw/Spout (run off-Duck by the poller/egress
     # worker). Otherwise dispatch a BeginRun for the Duck (force = recompute; rebuild = cold rebuild).
-    sources_changed = _pond_sources_changed(s, pid, prior_f)
+    sources_changed = _pond_sources_changed(s, pid, prior_f, prior_positions)
     if pond.is_app:  # an App has nothing to compute: its Run completes at once
         _pass_pond_run(s, pid, now)
     elif _must_run(s, pid) or sources_changed:
@@ -817,6 +841,7 @@ def _complete_pond_run(s: EngineState, pid: PondId, new_end: datetime, now: date
     ``changed`` advances ``changed_f`` only when the Run actually produced new output — a pass holds it."""
     ps = s.pond_states[pid]
     ps.end_f = new_end
+    ps.read_at = {f: p for f, p in ps.read_at.items() if f >= new_end}  # what later Runs can build on
     if not s.ponds[pid].async_persist:
         # The publish is already durable at completion (no cloud / a remote Duck writing the plane
         # directly) — the persist watermark tracks end_f exactly. An async_persist Pond's advances via

@@ -25,6 +25,10 @@ that started it, where before they waited for the next one. The Catchment record
 (migration `038`); the first Run after upgrading goes on from its previous Run's freshness, as before. `pond run
 --incremental` reads the same way.
 
+A Pond skips a Run when none of its Sources changed after where its last Run read them, rather than after that
+Run's freshness. A Run reading a Source past its own stamp used to run once more after that Source went quiet (on
+every Refresh, while a windowed Source's window was open), reading empty changes.
+
 ### Many small Runs
 
 A Pond that runs often on small tables slowed with every Run: about half a millisecond more per Run in the transit

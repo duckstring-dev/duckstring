@@ -311,11 +311,17 @@ class PondState:
     slots: int = 0
     slot_wait_since: datetime | None = None
     slot_exclusive: bool = False
+    # Where each Run read its Sources up to, by the Run's freshness: ``{f: {source: changed_f}}``, recorded when the
+    # Run starts (the read positions its Duck is handed in the same step). The pass test compares against the Run
+    # it builds on (``catchment._prior_positions``). Only Runs at or after ``end_f`` are kept; the Driver restores
+    # them from ``pond_run.read_positions`` on reload.
+    read_at: dict[datetime, dict[PondId, datetime]] = field(default_factory=dict)
 
     def copy(self) -> PondState:
         return replace(
             self,
             demand=list(self.demand),
+            read_at={f: dict(p) for f, p in self.read_at.items()},
             gen_start_times=dict(self.gen_start_times),
             completion_times=list(self.completion_times),
             throttle=self.throttle.copy() if self.throttle is not None else None,
