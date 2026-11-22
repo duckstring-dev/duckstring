@@ -67,3 +67,19 @@ def test_a_failed_compaction_keeps_the_registry(tmp_path, monkeypatch):
     assert con.execute("SELECT count(*) FROM ev").fetchall() == [(100_000,)]
     con.close()
     assert sorted(p.name for p in tmp_path.iterdir()) == ["registry.duckdb"]
+
+
+def test_the_spill_directory_is_set_before_anything_runs(tmp_path, monkeypatch):
+    """DuckDB refuses to switch its temporary directory once a query has spilled: a Duck that ran (or compacted its
+    registry) before being told its memory limit failed its next Run setting it (the attention showcase)."""
+    monkeypatch.setattr(executor, "_COMPACT_MIN_BYTES", 1)
+    spill = tmp_path / "tmp" / "p_m1"
+    for keep in (100_000, 2_500_000):  # compacted on open, and not
+        path = tmp_path / f"r{keep}.duckdb"
+        _registry(path, keep=keep)
+        con, _ = executor.open_registry(path, spill)
+        assert con.execute("SELECT current_setting('temp_directory')").fetchall() == [(str(spill),)]
+        con.close()
+    con, recovery = executor.open_registry(tmp_path / "new.duckdb", spill)
+    assert recovery == "missing"
+    assert con.execute("SELECT current_setting('temp_directory')").fetchall() == [(str(spill),)]

@@ -88,6 +88,10 @@ table's whole history was in both: after two days of page views, 3.7 GB in the w
   was 23 GiB, 98% of it free. A Duck opening a working copy of at least 64 MiB that is at least half free copies
   the live data into a new file and swaps it in, before anything else uses it; a failure leaves the file as it was.
 - Writing to an append table with your own SQL (`INSERT INTO`) no longer works: write through `append_table`.
+- **Checking for an append table with `duckdb_tables()` no longer finds it,** since its name is a view (as a merge
+  table's already was). Use `information_schema.tables`, which lists both. `duckstring pond check` and a deploy name
+  each use of `duckdb_tables()` in a Pond's code: the attention showcase had it in six Ponds, deciding where to
+  resume, and they reloaded data they already had.
 
 ### Fixes
 
@@ -99,6 +103,8 @@ table's whole history was in both: after two days of page views, 3.7 GB in the w
   replaced kept spending its retries on the old code, then failed the Pond after the redeploy had cleared it. It now
   gives a failing Run up at once, and the Catchment records the attempt and runs the Pond again on the new
   version, without failing it or alerting.
+- **A Duck that ran a query before its first memory limit couldn't take one.** It set its spill directory with the
+  limit, which DuckDB refuses once anything has spilled, so the Run failed. It is now set as the working copy opens.
 - **A repair whose step failed stayed in progress for good.** Its Ponds waited as repairing, and another repair
   was refused. Running `control repair` again now runs the failed steps again, and a Catchment restarted during a
   repair carries it on (its Ponds stayed marked as repairing with nothing to finish them).

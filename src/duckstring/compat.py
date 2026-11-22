@@ -38,6 +38,14 @@ REMOVED: tuple[Removed, ...] = (
 )
 
 
+# Not a removal but a change that breaks a common check: since 0.9 an append table's name in a Pond's working database
+# is a view, as a merge table's already was, and duckdb_tables() lists base tables only (the attention showcase had it
+# in six Ponds, deciding where to resume, so a Pond took itself for new and reloaded its first window).
+TABLES_NOTE = ("duckdb_tables() lists base tables only: since Duckstring 0.9 an append table's name in a Pond's working "
+               "database is a view, as a merge table's already was, so a check for one there misses it. Use "
+               "information_schema.tables, which lists both")
+
+
 @dataclass
 class Finding:
     path: str  # relative to the project
@@ -63,6 +71,8 @@ def check_source(source: str, path: str = "<code>") -> list[Finding]:
         return []
     out = []
     for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and "duckdb_tables(" in node.value:
+            out.append(Finding(path, node.lineno, node.col_offset + 1, TABLES_NOTE))
         if not isinstance(node, ast.Call):
             continue
         name = _method(node)

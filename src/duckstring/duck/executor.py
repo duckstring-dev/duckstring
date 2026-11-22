@@ -160,17 +160,28 @@ def _is_unreadable(exc: BaseException) -> bool:
     return "lock" not in msg and any(m in msg for m in _UNREADABLE_MARKERS)
 
 
-def open_registry(path: Path):
+def open_registry(path: Path, spill_dir: Path | None = None):
     """Open a Pond's registry, returning ``(connection, recovery)``: ``recovery`` is ``"missing"`` when
     the file didn't exist, ``"unreadable"`` when it existed but this DuckDB can't open it (it is renamed
     aside with its WAL, kept for inspection, and a fresh registry is created), else ``None``. Either
-    recovery means the caller should rebuild the registry from published state."""
+    recovery means the caller should rebuild the registry from published state.
+
+    ``spill_dir`` is set as DuckDB's temporary directory on every connection opened here, before anything runs:
+    DuckDB refuses to switch it once a query has spilled, and a Duck that ran (or compacted its registry) before
+    being told its memory limit failed its next Run setting it (the attention showcase, 2026-11-22)."""
     import duckdb
 
+    def connect():
+        con = duckdb.connect(str(path))
+        if spill_dir is not None:
+            spill_dir.mkdir(parents=True, exist_ok=True)
+            con.execute(f"SET temp_directory = '{spill_dir}'")
+        return con
+
     if not path.exists():
-        return duckdb.connect(str(path)), "missing"
+        return connect(), "missing"
     try:
-        return _compact_if_mostly_free(duckdb.connect(str(path)), path), None
+        return _compact_if_mostly_free(connect(), path, connect), None
     except duckdb.Error as exc:
         if not _is_unreadable(exc):
             raise
@@ -178,7 +189,7 @@ def open_registry(path: Path):
     aside = _set_aside(path, "unreadable")
     print(f"[executor] registry {path} is unreadable ({reason}); moved it to {aside.name} and rebuilding",
           flush=True)
-    return duckdb.connect(str(path)), "unreadable"
+    return connect(), "unreadable"
 
 
 # A DuckDB file never shrinks: deleted rows leave free blocks it reuses but doesn't hand back. Once an append table's
@@ -199,7 +210,7 @@ def _copy_database(con, tmp: Path) -> None:
         con.execute("DETACH _ds_compact")
 
 
-def _compact_if_mostly_free(con, path: Path):
+def _compact_if_mostly_free(con, path: Path, connect=None):
     """``con`` on ``path``, rewritten first when the file is mostly free blocks: the live data is copied into a new
     file beside it, which replaces it (one rename), and a connection on that is returned. Run as a Duck opens its
     registry, before anything else uses it. Any failure leaves the registry as it was."""
@@ -207,6 +218,7 @@ def _compact_if_mostly_free(con, path: Path):
 
     import duckdb
 
+    connect = connect or (lambda: duckdb.connect(str(path)))
     try:
         _, _, block_size, total, _, free, *_ = first_row(con.execute("PRAGMA database_size"))
     except duckdb.Error:
@@ -222,7 +234,7 @@ def _compact_if_mostly_free(con, path: Path):
         con.close()
         os.replace(tmp, path)
         path.with_name(f"{path.name}.wal").unlink(missing_ok=True)  # the old file's, if any: never replayed on the new
-        compacted = duckdb.connect(str(path))
+        compacted = connect()
         size = (total - free) * block_size
         print(f"[executor] compacted registry {path}: {total * block_size / 2**30:.1f} GiB -> "
               f"{size / 2**30:.2f} GiB of data", flush=True)
@@ -235,7 +247,7 @@ def _compact_if_mostly_free(con, path: Path):
             con.execute("SELECT 1")
             return con
         except Exception:  # noqa: BLE001 — closed above: open it again
-            return duckdb.connect(str(path))
+            return connect()
 
 
 def _set_aside(path: Path, why: str) -> Path:
@@ -367,7 +379,9 @@ class RippleExecutor(RunInputs):
         # ONE registry instance for the Duck's life: ripples (and the export) each run on a `.cursor()`
         # off it. Separate `connect()`s to the same file in one process raise a "file handle conflict"
         # (a Binder error, not a transient lock) the moment two overlap — single instance avoids it.
-        self._registry, recovery = open_registry(self.registry_path)
+        # Spills go to this Duck's own directory under the root's ``tmp``, set before the registry runs anything.
+        self._spill_dir = Path(self.root) / "tmp" / f"{self.pond_name}_m{self.major}"
+        self._registry, recovery = open_registry(self.registry_path, self._spill_dir)
         if recovery is None:
             # A registry older than its published state (a state backup older than the data root) would
             # resume against old state: set it aside and rebuild, as for an unreadable one.
@@ -382,16 +396,14 @@ class RippleExecutor(RunInputs):
                 print(f"[executor] registry {self.registry_path} is behind the published state ({published}); "
                       f"moved it to {aside.name} and rebuilding", flush=True)
                 self._registry, recovery = duckdb.connect(str(self.registry_path)), "behind"
+                self._registry.execute(f"SET temp_directory = '{self._spill_dir}'")
         recover = recovery is not None
         # A containerised Duck must hit DuckDB's own limit (a catchable OutOfMemoryException,
         # with disk spill first) rather than the kernel's cgroup OOM-kill: the launcher sets
         # DUCKSTRING_MEMORY_LIMIT to ~80% of the pod cap. Absent env => DuckDB defaults, no change.
         mem_limit = os.environ.get("DUCKSTRING_MEMORY_LIMIT")
-        if mem_limit:
-            spill = Path(self.root) / "tmp"
-            spill.mkdir(parents=True, exist_ok=True)
+        if mem_limit:  # spills go to this Duck's directory, set as the registry opened
             self._registry.execute(f"SET memory_limit = '{mem_limit}'")
-            self._registry.execute(f"SET temp_directory = '{spill}'")
         # Configure the data-plane's object-store credentials on the registry INSTANCE up front (a DuckDB
         # SECRET is instance-wide, shared by every cursor), so registry-loss hydration below, cross-Pond
         # foreign reads, and the export can all reach S3/GCS. A no-op for a local data root. Without this,
@@ -557,10 +569,6 @@ class RippleExecutor(RunInputs):
 
         if limit == getattr(self, "_memory_limit", None):
             return True
-        if not getattr(self, "_spill_dir", None):
-            self._spill_dir = Path(self.root) / "tmp" / f"{self.pond_name}_m{self.major}"
-            self._spill_dir.mkdir(parents=True, exist_ok=True)
-            self._registry.execute(f"SET temp_directory = '{self._spill_dir}'")
         try:
             self._registry.execute(f"SET memory_limit = '{limit}'")
         except duckdb.Error as exc:

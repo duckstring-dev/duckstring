@@ -101,3 +101,19 @@ def test_deploy_and_status_name_a_pond_that_uses_a_removed_api(tmp_path):
     with TestClient(create_app(root)) as client:
         pond = next(x for x in client.get("/api/status").json()["ponds"] if x["name"] == "p")
         assert len(pond["compat"]) == 4
+
+
+def test_a_table_check_against_duckdb_tables_is_named(tmp_path):
+    """Since 0.9 an append table's name in a Pond's working database is a view, as a merge table's was: a check for
+    it in duckdb_tables() misses it (six attention Ponds decided where to resume that way, and reloaded)."""
+    code = """
+        from duckstring import ripple
+
+        @ripple
+        def load(pond):
+            n = pond.con.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'hour_stat'").fetchall()
+            m = pond.con.execute(f"SELECT count(*) FROM information_schema.tables WHERE table_name = '{n}'").fetchall()
+    """
+    found = check_project(_pond(tmp_path, code))
+    assert [(f.line, "information_schema.tables" in f.message) for f in found] == [(6, True)]
+    assert fix_project(tmp_path) == 0  # named, not rewritten: the replacement query differs
