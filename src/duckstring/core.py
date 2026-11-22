@@ -76,10 +76,9 @@ def ripple(func=None, *, parents=None, name=None, always_run=False, memory=None)
         name: The Ripple's name. Defaults to the function name.
         always_run: Run even when no Source has changed since the last Pond Run. If any Ripple in a Pond
             sets this, the whole Pond always runs.
-        memory: The memory the Ripple holds outside DuckDB, such as a pandas DataFrame or a model, as a size
-            (``"6GB"``) or bytes. The Catchment reserves it while the Pond runs. Work done in DuckDB needs no
-            declaration: DuckDB keeps to its share and spills to disk. Defaults to ``pond.toml``'s
-            ``[pond] memory``, else nothing.
+        memory: The memory the Pond's Runs need while this Ripple runs, DuckDB and Python together, as a size
+            (``"6GB"``) or bytes. The Catchment reserves it on the machine while the Pond runs and gives it all
+            to DuckDB as its limit. Defaults to ``pond.toml``'s ``[pond] memory``, else one memory slot.
 
     Example::
 
@@ -218,7 +217,7 @@ def load_ripples(source_dir: Path, info: dict | None = None, *, require_entry: b
         return name
 
     try:
-        default_memory = parse_size(info.get("pond", {}).get("memory"))  # Python Ripples' memory outside DuckDB
+        default_memory = parse_size(info.get("pond", {}).get("memory"))  # every Ripple's, unless it sets its own
     except ValueError as exc:
         raise RippleDeclarationError(f"pond.toml [pond] memory: {exc}") from exc
     for r in raw:
@@ -226,9 +225,10 @@ def load_ripples(source_dir: Path, info: dict | None = None, *, require_entry: b
         rows.append({"name": r["name"], "func": r["func"], "always_run": bool(r.get("always_run")),
                      "parents": [resolve(r["name"], p) for p in r["parents"]], "kind": "python",
                      "memory": memory})
-    for r in sql:  # a SQL Ripple's work is all in DuckDB
+    for r in sql:
         rows.append({"name": r.name, "func": sql_ripples.make_callable(r), "always_run": r.always_run,
-                     "parents": [resolve(r.name, p) for p in r.parents], "kind": "sql", "sql": r, "memory": None})
+                     "parents": [resolve(r.name, p) for p in r.parents], "kind": "sql", "sql": r,
+                     "memory": default_memory})
     pond = PondRipples(rows, statics)
     if len(pond.order()) != len(rows):
         stuck = sorted(set(pond.by_name) - set(pond.order()))

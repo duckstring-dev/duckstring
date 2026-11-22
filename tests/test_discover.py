@@ -47,6 +47,34 @@ def test_discovers_ripples_by_name(tmp_path):
     ]
 
 
+def test_pond_memory_reaches_every_ripple_unless_a_python_one_sets_its_own(tmp_path):
+    pond_py = """
+        from duckstring import ripple
+
+        @ripple
+        def a(pond):
+            pond.write_table("a", pond.con.sql("SELECT 1 AS x"))
+
+        @ripple(memory="1GB")
+        def b(pond):
+            pond.write_table("b", pond.con.sql("SELECT 1 AS x"))
+    """
+    toml = _TOML + 'memory = "6GB"\n\n[ripples.c]\nsql = "sql/c.sql"\n'
+    (tmp_path / "sql").mkdir()
+    (tmp_path / "sql" / "c.sql").write_text("SELECT 1 AS x")
+    found = discover(sys.executable, _pond(tmp_path, pond_py, toml))
+    assert {r["name"]: r["memory"] for r in found["ripples"]} == {"a": 6 * 10**9, "b": 10**9, "c": 6 * 10**9}
+
+
+def test_pond_memory_reaches_every_dbt_model(tmp_path, monkeypatch):
+    import duckstring.discover as disc
+
+    monkeypatch.setattr(disc, "_dbt_ripples", lambda source_dir, info: [{"name": "m", "parents": []}])
+    (tmp_path / "pond.toml").write_text(_TOML + 'memory = "2GB"\ndbt_project = "dbt/"\n')
+    found = disc.run({"source_dir": str(tmp_path)})
+    assert found["ripples"] == [{"name": "m", "parents": [], "always_run": False, "memory": 2 * 10**9}]
+
+
 def test_import_error_is_reported_with_its_traceback(tmp_path):
     with pytest.raises(DiscoveryError) as err:
         discover(sys.executable, _pond(tmp_path, "import not_a_real_package_xyz\n"))

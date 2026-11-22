@@ -126,15 +126,20 @@ def _dbt_ripples(source_dir: Path, info: dict) -> list[dict]:
 
 def run(spec: dict) -> dict:
     """Discover the Pond described by ``spec`` (see the module docstring), in this process."""
-    from .core import load_ripples, read_pond_toml
+    from .core import load_ripples, parse_size, read_pond_toml
     from .dbt_mode import dbt_project_subpath
 
     source_dir = Path(spec["source_dir"])
     info = read_pond_toml(source_dir)
     if dbt_project_subpath(info):
+        try:
+            memory = parse_size(info.get("pond", {}).get("memory"))  # every model's: dbt has no per-model one
+        except ValueError as exc:
+            raise DiscoveryError(f"pond.toml [pond] memory: {exc}") from exc
         rows = _dbt_ripples(source_dir, info)  # names already, no functions
         return {"ripples": [{"name": r["name"], "parents": list(r["parents"]),
-                             "always_run": bool(r.get("always_run"))} for r in rows], "lineage": []}
+                             "always_run": bool(r.get("always_run")), "memory": memory} for r in rows],
+                "lineage": []}
 
     # Python and SQL Ripples together, parents resolved and each SQL Ripple's query checked against its
     # declaration; a RippleDeclarationError here is a failed deploy with the reason.

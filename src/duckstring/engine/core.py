@@ -167,7 +167,7 @@ class Pond:
     # tracks ``end_f`` and cross-Pool visibility never lags.
     async_persist: bool = False
     # Memory slots (plans/memory-budget.md): how many of its machine's slots this Pond's Duck needs when it
-    # goes from idle to busy (more when a Ripple declares memory outside DuckDB). Used only when the
+    # goes from idle to busy (more when a Ripple declares more memory than one slot holds). Used only when the
     # Pond's ``pool`` has a slot capacity (``EngineState.slot_capacity``).
     slot_need: int = 1
 

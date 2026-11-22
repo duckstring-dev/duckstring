@@ -74,7 +74,7 @@ _log = logging.getLogger("duckstring.catchment")
 # nothing in flight drops to DUCKSTRING_IDLE_MEMORY, which releases DuckDB's cache.
 _DEFAULT_RUN_SLOTS = 4
 _DEFAULT_IDLE_MEMORY = "256MB"
-_MIN_DUCKDB_GRANT = 256 * 10**6  # never set DuckDB below this, whatever a Ripple declares outside it
+_MIN_DUCKDB_GRANT = 256 * 10**6  # never set DuckDB below this
 # An App's memory (plans/apps.md): while its instance runs, an App on the Catchment's machine sets aside its
 # `[pond] memory`, the whole App's, DuckDB included, and the slots divide the budget that is left. Running Apps may
 # set aside at most this share of the budget, so Pond Runs always keep the rest. An App that declares nothing sets
@@ -432,9 +432,8 @@ class Driver(TapsMixin, PuddlesMixin):
         # (and stays) or it exits first and _replace_departed_ducks gives the Run to a fresh Duck.
         self._departing_ducks: set[str] = set()
         # Memory slots (plans/memory-budget.md): how many, the machine's budget, and the memory each Pond's
-        # Ripples declare outside DuckDB (the largest; it decides the Pond's slot need and is left out of
-        # DuckDB's share). ``_memory_retry``: Ponds retried with every slot after running out of memory, until
-        # a Run succeeds.
+        # Ripples declare (the largest, DuckDB and Python together; it decides the Pond's slot need).
+        # ``_memory_retry``: Ponds retried with every slot after running out of memory, until a Run succeeds.
         self.run_slots = _run_slots()
         self.memory_budget = _memory_budget()
         self.idle_memory = os.environ.get("DUCKSTRING_IDLE_MEMORY") or _DEFAULT_IDLE_MEMORY
@@ -767,8 +766,8 @@ class Driver(TapsMixin, PuddlesMixin):
 
     def _configure_slots(self) -> None:
         """Gate the Ducks on the Catchment's own machine on memory slots (plans/memory-budget.md): its pool's
-        capacity, each Pond's need (one slot for DuckDB, plus enough for what its Ripples declare outside it),
-        and, after a reload, the slots the Runs still in flight hold."""
+        capacity, each Pond's need (the slots that cover the largest memory its Ripples declare, else one), and,
+        after a reload, the slots the Runs still in flight hold."""
         if self.run_slots <= 0:
             self.state.slot_capacity = {}
             return
@@ -776,17 +775,16 @@ class Driver(TapsMixin, PuddlesMixin):
         slot = self._slot_bytes()
         for key, pond in self.state.ponds.items():
             declared = 0 if pond.is_app else self.declared_memory.get(key, 0)
-            pond.slot_need = min(self.run_slots, 1 + -(-declared // slot)) if declared else 1
+            pond.slot_need = min(self.run_slots, max(1, -(-declared // slot)))
         restore_slots(self.state)
 
     def _memory_grant(self, pond: str) -> str | None:
-        """DuckDB's limit for this Pond's Duck: its slots' worth, less what its Ripples declare outside DuckDB.
-        ``None`` when the Pond isn't gated (another machine, or no slots configured)."""
+        """DuckDB's limit for this Pond's Duck: its slots' worth, all of it (a declared ``memory`` is the whole
+        Run's, DuckDB included). ``None`` when the Pond isn't gated (another machine, or no slots configured)."""
         slots = self.state.pond_states[pond].slots
         if not slots:
             return None
-        grant = slots * self._slot_bytes() - self.declared_memory.get(pond, 0)
-        return f"{max(grant, _MIN_DUCKDB_GRANT) // 10**6}MB"
+        return f"{max(slots * self._slot_bytes(), _MIN_DUCKDB_GRANT) // 10**6}MB"
 
     def _reconcile_lost_publishes(self) -> None:
         """Pool-loss rollback (plans/persist.md phase 4): make each async_persist Pond's freshness claims
@@ -3643,8 +3641,8 @@ class Driver(TapsMixin, PuddlesMixin):
                     killed = "The Duck was killed (SIGKILL), most likely by the kernel for memory"
                     if self._retry_for_memory(pond, None, now, error=killed):
                         continue
-                    reason = (f"{killed}. If a Ripple holds data outside DuckDB (pandas, a model), declare it with "
-                              "@ripple(memory=...).")
+                    reason = (f"{killed}. The Run needs more memory than this machine gives it: hold less in "
+                              "Python, or run the Pond on a larger machine (duckstring duck set).")
                 self._fail_whole_pond(pond, now, reason or "Duck process is not running (it crashed or exited)")
             elif silent:
                 # A remote Duck that launched but never (or no longer) dials back: ask its backend what the

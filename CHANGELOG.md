@@ -134,6 +134,18 @@ count of 9 read as `9.0` downstream, and anything above 2^53 (about 9×10^15) wa
   from published state (a fresh cloud Duck, or after losing it) carries on summing exactly. It came back as
   `DOUBLE`, and a sum above 2^53 lost its last digits.
 
+### Declared memory is the whole Run's (breaking)
+
+`@ripple(memory=)` and `[pond] memory` declared the memory a Ripple held outside DuckDB, and the Catchment took
+it out of DuckDB's limit. Read as "this Ripple needs 12 GB", which is how it reads, it shrank DuckDB's limit
+instead, and a Run that needed more than one memory slot for DuckDB failed the same way.
+
+- **`memory` is now what the Pond's Runs need, DuckDB and Python together.** On the Catchment's own machine the
+  Pond waits for the slots that cover it (one by default), and DuckDB's limit is all of them.
+- **`[pond] memory` applies to SQL Ripples and dbt models too.** Before, only Python Ripples took it.
+- A Pond that declared memory outside DuckDB now takes one slot fewer. Add what DuckDB needs to keep the old size.
+- An App's `[pond] memory` already meant the whole App and is unchanged.
+
 ### One conflict rule for append tables (breaking)
 
 `fail_on_conflict=False` meant two things: on `append_table` it skipped the key check and appended every row,

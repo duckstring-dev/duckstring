@@ -88,7 +88,7 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
     from .core import parse_size
 
     try:
-        memory = parse_size(pond.get("memory"))  # held outside DuckDB: sizes the App's memory slots
+        memory = parse_size(pond.get("memory"))  # the whole App's, DuckDB included
     except ValueError as exc:
         raise ValueError(f"pond.toml [pond] memory: {exc}") from exc
     return {

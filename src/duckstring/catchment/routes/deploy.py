@@ -237,7 +237,7 @@ APP_RIPPLE = "serve"
 def _prepare(root: Path, staging: Path, db_catalog: dict, *, app: dict | None = None) -> tuple[Path, dict]:
     """Build the staged Pond's environment and discover its Ripples in it. Runs in a worker thread. An App
     (``app``, its config) has no Ripples to discover, only its environment to build; its synthetic Ripple
-    carries ``[pond] memory``, what its process holds outside DuckDB, for its memory slots."""
+    carries ``[pond] memory``, the whole App's, DuckDB included."""
     from ...discover import discover
     from ...environments import ensure_env
 
