@@ -17,6 +17,8 @@ follow-up. Snapshot consistency rides the data plane's ``f`` stamp (reads are of
 
 from __future__ import annotations
 
+import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..trickle_io import first_row
@@ -51,6 +53,117 @@ def _temp_dir(driver, sandboxed: bool) -> str:
     return str(spill)
 
 
+# ── a merge table's change log, consolidated once per published snapshot ─────────────────────────────────
+#
+# A merge table is reconstructed on read: its base, less the keys its change log changed, plus the surviving
+# images. Over a view, every query consolidated the change log twice (the reconstruction reads it for the
+# anti-join and for the images), and the data viewer sends a count and then each page: on a table with 246M rows
+# above its base, about 8 s each time. The consolidation is written once per snapshot as a Parquet file under
+# ``.serving-cache`` (outside the sandbox's spill directory, which its SQL may read), named by the snapshot's
+# files, so it survives the connection rebuilt on every publish and a table that didn't change keeps its file.
+# A sandboxed connection materialises its tables when it is built; the operator's connection consolidates a table
+# the first time a query reads it.
+
+_CACHE_DIR = ".serving-cache"
+
+
+@dataclass
+class _Merge:
+    names: tuple  # the (schema, table) names a query may reach it by
+    view: tuple  # (schema, table) of the view to repoint
+    base_sql: str | None
+    clog_sql: str
+    f_base: object
+    pk: tuple
+    key: str  # the snapshot's name
+    done: bool = False
+
+
+def _merge_parts(data_dir, table: str) -> tuple | None:
+    """A merge table's base read, change log read, fold watermark, key and snapshot name, or ``None`` for any other
+    table (or a merge table with no change above its base, which reads as its base alone)."""
+    import hashlib
+
+    from ..dataplane import _as_storage, _clog_select, _read_parquet_files, merge_snapshot
+    from ..trickle.io import load_sidecar
+
+    store = _as_storage(data_dir)
+    sidecar = load_sidecar(store)
+    meta = sidecar.get(table) or {}
+    if meta.get("mode") != "merge":
+        return None
+    snap = merge_snapshot(store, table, sidecar)
+    if not (snap["bands"] or snap["hot"]):
+        return None
+    base_sql = _read_parquet_files(snap["base"]) if snap["base"] else None
+    ident = repr((sorted(snap["base"]), sorted(snap["bands"]), sorted(snap["hot"]), snap["f_base"],
+                  snap.get("hot_after"), tuple(meta.get("pk", ()))))
+    key = hashlib.sha256(ident.encode()).hexdigest()[:32]
+    return base_sql, _clog_select(snap), snap["f_base"], tuple(meta.get("pk", ())), key
+
+
+_consolidating: dict[str, threading.Lock] = {}
+_consolidating_lock = threading.Lock()
+
+
+def _consolidation(con, root: Path, m: _Merge) -> tuple[str, str]:
+    """The files holding ``m``'s change log consolidated, written on ``con`` if this snapshot has none yet: the
+    surviving images (``{key}.parquet``) and the keys whose base image was retracted (``{key}.retract.parquet``),
+    the only base rows a change replaces (every write pairs an update's new image with the old one's retraction).
+    Kept apart, a table whose changes only add keys reads as its base and its new images, with no anti-join: on
+    246M images above a 329M-row base, a page in 0.04 s and a count in 0.9 s, after 8 s once."""
+    from ..trickle.io import D_COL, _q, consolidate_sql
+
+    d = Path(root) / _CACHE_DIR
+    images, retracted = d / f"{m.key}.parquet", d / f"{m.key}.retract.parquet"
+    with _consolidating_lock:
+        lock = _consolidating.setdefault(m.key, threading.Lock())
+    with lock:
+        if not images.exists():
+            d.mkdir(parents=True, exist_ok=True)
+            cur = con.cursor()
+            tmp = f"_ds_consol_{m.key}"
+            keys = ", ".join(_q(c) for c in m.pk)
+            try:
+                cur.execute(f"CREATE TEMP TABLE {tmp} AS {consolidate_sql(m.clog_sql, m.f_base)}")
+                cur.execute(f"COPY (SELECT DISTINCT {keys} FROM {tmp} WHERE {_q(D_COL)} < 0) "
+                            f"TO '{retracted}.tmp' (FORMAT parquet)")
+                cur.execute(f"COPY (SELECT * EXCLUDE ({_q(D_COL)}) FROM {tmp} WHERE {_q(D_COL)} > 0) "
+                            f"TO '{images}.tmp' (FORMAT parquet)")
+            finally:
+                cur.execute(f"DROP TABLE IF EXISTS {tmp}")
+            Path(f"{retracted}.tmp").replace(retracted)
+            Path(f"{images}.tmp").replace(images)  # last: its presence marks the pair complete
+    return str(images), str(retracted)
+
+
+def _consolidated_select(con, root: Path, m: _Merge) -> str:
+    """The current state of ``m`` from its consolidation files."""
+    from ..trickle.io import _key_match
+
+    images, retracted = _consolidation(con, root, m)
+    upserts = f"SELECT * FROM read_parquet('{images}')"
+    if m.base_sql is None:
+        return upserts
+    if first_row(con.cursor().execute(f"SELECT count(*) FROM read_parquet('{retracted}')"))[0] == 0:
+        return f"SELECT * FROM ({m.base_sql}) UNION ALL BY NAME {upserts}"
+    return (f"SELECT _b.* FROM ({m.base_sql}) AS _b ANTI JOIN read_parquet('{retracted}') AS _r "
+            f"ON {_key_match('_b', '_r', m.pk)} UNION ALL BY NAME {upserts}")
+
+
+def _prune_cache(root: Path, keep: set[str]) -> None:
+    """Remove consolidation files no cached connection uses (superseded snapshots)."""
+    d = Path(root) / _CACHE_DIR
+    if not d.is_dir():
+        return
+    for f in d.iterdir():
+        if f.name.split(".", 1)[0] not in keep:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+
 def _served_ponds(driver) -> list[tuple[str, int, list[int]]]:
     """(name, served_major, deployed_majors) for every non-spout/non-draw pond."""
     names = sorted({m["name"] for m in driver.meta.values()
@@ -63,13 +176,17 @@ def _served_ponds(driver) -> list[tuple[str, int, list[int]]]:
     return out
 
 
-def build_serving_con(driver, *, sandboxed: bool, tap=None):
+def build_serving_con(driver, *, sandboxed: bool, tap=None, merges: list | None = None):
     """A DuckDB connection presenting the Catchment's serving surface. ``sandboxed`` (read users):
     only serviceable tables, materialised local, external access locked. Not sandboxed (full/ops):
     every output table, as views, external access open.
 
     ``tap`` (a :class:`~.auth.TapScope`, always sandboxed) narrows it to one Tap: its Pond line only, and only
-    the Tap's tables, as ``{pond}_v{major}``, ``{pond}`` and bare names (so an app needn't name the schema)."""
+    the Tap's tables, as ``{pond}_v{major}``, ``{pond}`` and bare names (so an app needn't name the schema).
+
+    A merge table reads a consolidation file (see ``_consolidation``): a sandbox writes it as it materialises the
+    table; the operator's connection reads the reconstruction until a query first needs the table, and ``merges``
+    (when given) collects those tables for :func:`prepare_merges`."""
     import duckdb
 
     from ..dataplane import get_data_plane
@@ -113,8 +230,18 @@ def build_serving_con(driver, *, sandboxed: bool, tap=None):
             for t in sorted(tables):
                 try:
                     sel = dp.read_select(data_dir, t)
+                    parts = _merge_parts(data_dir, t)
                 except FileNotFoundError:
                     continue  # table declared/deployed but not yet published (pond never ran)
+                if parts is not None:
+                    names = ((schema, t),) + (((name, t),) if major == served else ()) + (
+                        ((None, t),) if tap is not None else ())
+                    m = _Merge(names, (schema, t), *parts)
+                    if sandboxed:
+                        sel = _consolidated_select(con, root, m)
+                    if merges is not None:
+                        m.done = sandboxed
+                        merges.append(m)
                 verb = "TABLE" if sandboxed else "VIEW"  # materialise for the sandbox; view for ops
                 con.execute(f"CREATE {verb} {_qi(schema)}.{_qi(t)} AS {sel}")
             # The bare `{pond}` schema aliases the SERVED major (views onto the local _vN objects — no
@@ -150,8 +277,33 @@ class ServingCache:
 
     def __init__(self):
         self._cache: dict[object, tuple[int, object]] = {}
+        self._merges: dict[object, list[_Merge]] = {}
 
-    def connection(self, driver, *, sandboxed: bool, tap=None):
+    def connection(self, driver, *, sandboxed: bool, tap=None, sql: str | None = None):
+        """The warm connection for this caller. With ``sql``, the merge tables it reads are consolidated first
+        (once per snapshot; a sandboxed connection already has them)."""
+        con = self._connection(driver, sandboxed=sandboxed, tap=tap)
+        slot = ("tap", tap.pond, tap.name) if tap is not None else sandboxed
+        pending = [m for m in self._merges.get(slot, []) if not m.done]
+        if sql and pending:
+            self._prepare(con, Path(driver.root), pending, sql)
+        return con
+
+    def _prepare(self, con, root: Path, pending: list, sql: str) -> None:
+        from ..remote_source import NotAQuery, query_references
+
+        try:
+            refs = {(s.lower() if s else None, t.lower()) for s, t in query_references(con, sql)}
+        except (NotAQuery, Exception):  # noqa: BLE001 — the query itself reports what's wrong with it
+            return
+        for m in pending:
+            if not any((s.lower() if s else None, t.lower()) in refs for s, t in m.names):
+                continue
+            sel = _consolidated_select(con, root, m)
+            con.cursor().execute(f"CREATE OR REPLACE VIEW {_qi(m.view[0])}.{_qi(m.view[1])} AS {sel}")
+            m.done = True
+
+    def _connection(self, driver, *, sandboxed: bool, tap=None):
         # Keyed on data_version (bumps on publish / catalog change), NOT state_version (bumps every engine
         # tick) — so the warm connection isn't rebuilt (read users: re-materialised from S3) on every query.
         version = driver.data_version
@@ -170,13 +322,17 @@ class ServingCache:
                 entry[1].close()
             except Exception:
                 pass
-        con = build_serving_con(driver, sandboxed=sandboxed, tap=tap)
+        merges: list[_Merge] = []
+        con = build_serving_con(driver, sandboxed=sandboxed, tap=tap, merges=merges)
         self._cache[slot] = (version, con)
+        self._merges[slot] = merges
+        _prune_cache(Path(driver.root), {m.key for ms in self._merges.values() for m in ms})
         return con
 
     def drop(self, slot) -> None:
         """Close and forget one cached connection (a removed Tap's)."""
         entry = self._cache.pop(slot, None)
+        self._merges.pop(slot, None)
         if entry is not None:
             try:
                 entry[1].close()
@@ -190,6 +346,7 @@ class ServingCache:
             except Exception:
                 pass
         self._cache.clear()
+        self._merges.clear()
 
 
 def _cache(driver) -> ServingCache:
@@ -203,7 +360,7 @@ def _cache(driver) -> ServingCache:
 def serving_query(driver, sql: str, *, sandboxed: bool = True, tap=None) -> dict:
     """Run a read-only query against the (warm) serving surface. Returns {columns, rows}. Read users get
     the sandboxed connection (serviceable-only, no external access); full users get the ops connection."""
-    cur = _cache(driver).connection(driver, sandboxed=sandboxed, tap=tap).cursor()
+    cur = _cache(driver).connection(driver, sandboxed=sandboxed, tap=tap, sql=sql).cursor()
     cur.execute(sql)
     columns = [d[0] for d in cur.description] if cur.description else []
     rows = cur.fetchall()
@@ -220,7 +377,7 @@ def _json_safe(v):
 def serving_count(driver, sql: str, *, sandboxed: bool = True) -> int:
     """Total rows of a cross-pond serving query — sizes the data viewer's virtual scroll."""
     inner = sql.strip().rstrip(";")
-    cur = _cache(driver).connection(driver, sandboxed=sandboxed).cursor()
+    cur = _cache(driver).connection(driver, sandboxed=sandboxed, sql=inner).cursor()
     (n,) = first_row(cur.execute(f"SELECT count(*) FROM ({inner}) AS _ds_count"))
     return int(n)
 
@@ -232,7 +389,7 @@ def serving_page(driver, sql: str, *, sandboxed: bool = True, limit: int = 200, 
     fetched to flag ``has_more`` without a separate count."""
     inner = sql.strip().rstrip(";")
     order = f" ORDER BY {_qi(order_by)} {'DESC' if order_desc else 'ASC'}" if order_by else ""
-    cur = _cache(driver).connection(driver, sandboxed=sandboxed).cursor()
+    cur = _cache(driver).connection(driver, sandboxed=sandboxed, sql=inner).cursor()
     rel = cur.execute(f"SELECT * FROM ({inner}) AS _ds_page{order} LIMIT {limit + 1} OFFSET {offset}")
     cols = [d[0] for d in rel.description] if rel.description else []
     fetched = rel.fetchall()

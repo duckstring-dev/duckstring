@@ -577,36 +577,38 @@ def _merge_f_base(request: Request, body, major: int):
     return (_sidecar(request, body.pond, major).get(body.table) or {}).get("f_base")
 
 
-def _base_sql(body, *, f_base=None) -> str:
-    """The query a count/page operates on: a Trickle's windowed/consolidated view (its changelog read clamped
-    to ``> f_base``), a custom ``sql``, or a plain ``SELECT *`` of a table. The reconstructed merge main is
-    referenced as a view — never materialised — so the pager's Top-N streams it instead of spilling a
-    gigabyte-scale copy to temp."""
+def _merge_log(request: Request, body, major: int):
+    """The default view of a merge table (no freshness window): its log, newest first (:mod:`..browse`)."""
+    if body.trickle != "merge" or not body.pk or body.f_lo or body.f_hi:
+        return None
+    from ..browse import merge_log
+
+    return merge_log(_data_dir(request, body.pond, major), body.table, _sidecar(request, body.pond, major), body.pk)
+
+
+def _append_ref(request: Request, body, major: int) -> str | None:
+    """An append table's files newest first, for its browse (``None``: read the Pond's view of it)."""
+    if body.trickle != "append":
+        return None
+    from ..browse import append_newest_first
+
+    sel = append_newest_first(_data_dir(request, body.pond, major), body.table, _sidecar(request, body.pond, major))
+    return f"({sel})" if sel else None
+
+
+def _base_sql(body, *, f_base=None, main_ref=None) -> str:
+    """The query a count/page operates on: a Trickle's windowed view (its changelog read clamped to ``> f_base``),
+    an append table's parts (``main_ref``: newest first), a custom ``sql``, or a plain ``SELECT *`` of a table."""
     if body.trickle in ("append", "merge"):
         return _trickle_base_sql(
-            body.pond, body.table, body.trickle, body.pk or [], body.f_lo, body.f_hi, f_base=f_base
+            body.pond, body.table, body.trickle, body.pk or [], body.f_lo, body.f_hi, f_base=f_base,
+            main_ref=main_ref,
         )
     if body.sql:
         return body.sql
     if body.table:
         return f"SELECT * FROM {_qi(body.pond)}.{_qi(body.table)}"
     return f"SELECT * FROM {_qi(body.pond)}"
-
-
-def _merge_deleted_count_sql(pond: str, table: str, pk: list, f_base) -> str:
-    """Count the deleted tombstones the browse shows — distinct PKs in the hot changelog above ``f_base`` whose
-    latest event (freshness desc, retractions last) is a retraction ``d < 0`` — matching :func:`_trickle_base_sql`'s
-    ``_deleted``. A small scan of the post-base changelog (not the base)."""
-    from ...trickle_io import changelog_name
-
-    clog = f"{_qi(pond)}.{_qi(changelog_name(table))}"
-    fcol, dcol = _qi(_F), _qi(_D)
-    part = ", ".join(_qi(c) for c in pk)
-    where = f" WHERE {fcol} > {_ts_lit(f_base)}" if f_base else ""
-    return (
-        f"SELECT count(*) FROM (SELECT {dcol}, row_number() OVER (PARTITION BY {part} "
-        f"ORDER BY {fcol} DESC, {dcol} DESC) AS _ds_rn FROM {clog}{where}) WHERE _ds_rn = 1 AND {dcol} < 0"
-    )
 
 
 @router.post("/query/count", dependencies=[auth.read])
@@ -620,10 +622,9 @@ def query_count(body: CountRequest, request: Request,
     use. A per-pond ``table``/``trickle`` browse stays on the Pond's own exported snapshot (and is
     serviceable-gated for non-full callers).
 
-    The **unwindowed current state of a merge** main is counted *without scanning the base*: the active count is
-    ``count(cold base)`` (metadata) + the changelog's net Z-set weight (:meth:`DataPlane.consolidated_count_select`),
-    plus the small deleted-tombstone count — so the scrollbar sizes near-instantly even at hundreds of millions of
-    rows. A *windowed* merge count falls through to the (already small) windowed changelog query."""
+    A merge table's default view (its log, :mod:`..browse`) is counted without scanning the base: the base's rows
+    (metadata) plus the change images above it (a scan of the weight column), so the scrollbar sizes near-instantly
+    at hundreds of millions of rows. A *windowed* merge count falls through to the windowed changelog query."""
     full = principal.level >= auth.Level.FULL
     if body.sql:
         from ..serving import serving_count
@@ -636,15 +637,10 @@ def query_count(body: CountRequest, request: Request,
     _require_serviceable(request, body.pond, m, body.table, full)
     con = _open_pond(request, body.pond, m)
     try:
-        if body.trickle == "merge" and body.pk and not (body.f_lo or body.f_hi):
-            from ...dataplane import get_data_plane
-
-            meta = _sidecar(request, body.pond, m).get(body.table) or {}
-            active_sql = get_data_plane().consolidated_count_select(_data_dir(request, body.pond, m), body.table, meta)
-            active = first_row(con.execute(active_sql))[0]
-            deleted = first_row(con.execute(_merge_deleted_count_sql(body.pond, body.table, body.pk, meta.get("f_base"))))[0]
-            return {"count": int(active) + int(deleted)}
-        base = _base_sql(body, f_base=_merge_f_base(request, body, m))
+        log = _merge_log(request, body, m)
+        if log is not None:  # the log view: its regions' row counts, metadata and a weight-column scan
+            return {"count": int(first_row(con.execute(log.count_sql()))[0])}
+        base = _base_sql(body, f_base=_merge_f_base(request, body, m), main_ref=_append_ref(request, body, m))
         (count,) = first_row(con.execute(f"SELECT COUNT(*) FROM ({base}) AS _ds_count"))
         return {"count": count}
     except Exception as exc:
@@ -715,14 +711,18 @@ def query_page(body: PageRequest, request: Request,
     # MESSAGE to the caller (a 400), never a bare, opaque 500. The connection spills to disk (`_tune_read_con`)
     # so a large merge reconstruction is slow, not fatal.
     #
-    # A merge main's default view reconstructs latest-per-PK over base ⊎ changelog — an aggregate a LIMIT can't
-    # push past — but the changelog is clamped to `> f_base` (the rest is already folded into the base), so a
-    # checkpointed table reads only its small hot tier + a LIMIT-pushed base scan. With no ORDER BY the
-    # LIMIT/OFFSET pushes to the Parquet scan (O(page)); an explicit column sort pays the Top-N it needs.
+    # A merge table's default view is its log (newest changes, then the base), paged region by region with its
+    # page's keys looked up for their status, so it never consolidates the change log. A windowed view of a merge
+    # table is the records changed in the window. With no ORDER BY the LIMIT/OFFSET pushes to the Parquet scan
+    # (O(page)); an explicit column sort pays the Top-N it needs.
     con = None
     try:
         con = _open_pond(request, body.pond, m)
-        base = _base_sql(body, f_base=_merge_f_base(request, body, m))
+        log = _merge_log(request, body, m)
+        if log is not None:
+            rel = log.page(con, offset, limit + 1, order_by=body.order_by, desc=body.order_desc)
+            return _page(rel)
+        base = _base_sql(body, f_base=_merge_f_base(request, body, m), main_ref=_append_ref(request, body, m))
         return _page(con.execute(f"SELECT * FROM ({base}) AS _ds_page{order} LIMIT {limit + 1} OFFSET {offset}"))
     except HTTPException:
         raise

@@ -168,3 +168,94 @@ def test_full_connection_sees_all_tables(tmp_path, monkeypatch):
     d = mk()
     # An ops (full) connection sees every output table, not just the serviceable ones.
     assert serving_query(d, "SELECT count(*) FROM sales.secret_internal", sandboxed=False)["rows"] == [(3,)]
+
+
+def _publish_merge(tmp_path, name, major, table, runs):
+    """Publish a merge Trickle run by run, as a Duck does (one export per Run)."""
+    from datetime import datetime
+
+    from duckstring import trickle_io
+    from duckstring.dataplane import ParquetDataPlane
+
+    data_dir = pond_data_dir(tmp_path, name, major, None)
+    data_dir.mkdir()
+    reg = tmp_path / f"{name}_registry.duckdb"
+    con = duckdb.connect(str(reg))
+    con.execute("SET TimeZone='UTC'")
+    for f_iso, rows in runs:
+        con.execute("CREATE OR REPLACE TEMP TABLE _s(id BIGINT, v BIGINT)")
+        con.executemany("INSERT INTO _s VALUES (?, ?)", rows)
+        f = datetime.fromisoformat(f_iso)
+        trickle_io.merge_table(con, table, con.sql("SELECT * FROM _s"), f, ("id",))
+        ParquetDataPlane().export(con, data_dir, f=f)
+    con.close()
+
+
+def test_a_merge_table_is_consolidated_once_per_snapshot(tmp_path, monkeypatch):
+    """Over the operator's connection, a query reconsolidated a merge table's change log twice, and the data viewer
+    sends a count and every page. Now the first query that reads it writes one consolidation file, later queries
+    and connections rebuilt for other publishes reuse it, and a new publish of the table replaces it."""
+    db, mk = _driver(tmp_path)
+    _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(serve_tables=["t"]), _RIPPLES)
+    _add_output_tables(db, _pv_id(db, "sales", "1.0.0"), ["t"])
+    _publish_merge(tmp_path, "sales", 1, "t", [
+        ("2026-01-01T00:00:00+00:00", [(1, 10), (2, 20), (3, 30)]),
+        ("2026-01-02T00:00:00+00:00", [(1, 11), (3, 30), (4, 40)]),
+    ])
+    d = mk()
+    cache = tmp_path / ".serving-cache"
+    q = "SELECT id, v FROM sales.t ORDER BY id"
+    assert not cache.exists() or not any(cache.iterdir())
+    assert serving_query(d, "SELECT 1", sandboxed=False)["rows"] == [(1,)]  # a query that reads no merge table
+    assert not cache.exists() or not any(cache.iterdir())
+    assert serving_query(d, q, sandboxed=False)["rows"] == [(1, 11), (3, 30), (4, 40)]
+    first = sorted(cache.iterdir())
+    assert len(first) == 2  # the images and the retracted keys
+    assert serving_query(d, "SELECT count(*) FROM sales_v1.t", sandboxed=False)["rows"] == [(3,)]
+    d.data_version += 1  # another Pond published: the connection is rebuilt
+    assert serving_query(d, q, sandboxed=False)["rows"] == [(1, 11), (3, 30), (4, 40)]
+    assert sorted(cache.iterdir()) == first
+
+    _publish_merge(tmp_path, "sales", 1, "t", [("2026-01-03T00:00:00+00:00", [(1, 12), (4, 40)])])
+    d.data_version += 1
+    assert serving_query(d, q, sandboxed=False)["rows"] == [(1, 12), (4, 40)]
+    assert len(list(cache.iterdir())) == 2 and not set(cache.iterdir()) & set(first)  # the old snapshot's are gone
+
+    # A read user's sandbox materialises from the same file, and can't read the cache directory itself.
+    assert serving_query(d, q)["rows"] == [(1, 12), (4, 40)]
+    with pytest.raises(duckdb.Error):
+        serving_query(d, f"SELECT * FROM read_parquet('{cache}/*.parquet')")
+
+
+@pytest.mark.timeout(60)
+def test_a_consolidated_merge_table_reads_as_its_reconstruction(tmp_path, monkeypatch):
+    """Random updates, deletes, re-adds and writes back to an earlier value, through folds and compactions: the
+    current state the serving surface reads from its consolidation files is the data plane's reconstruction."""
+    import random
+
+    from duckstring.dataplane import ParquetDataPlane
+
+    monkeypatch.setenv("DUCKSTRING_COMPACT_THRESHOLD", "1024")
+    rng = random.Random(3)
+    state = {i: rng.randint(0, 3) for i in range(1500)}
+    runs = []
+    for run in range(30):
+        for k in rng.sample(range(1520), 15):
+            if k in state and rng.random() < 0.3:
+                del state[k]
+            else:
+                state[k] = rng.randint(0, 3)  # often the value it had: an update that changes nothing
+        runs.append((f"2026-01-{1 + run // 24:02d}T{run % 24:02d}:00:00+00:00", sorted(state.items())))
+    db, mk = _driver(tmp_path)
+    _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(serve_tables=["t"]), _RIPPLES)
+    _add_output_tables(db, _pv_id(db, "sales", "1.0.0"), ["t"])
+    _publish_merge(tmp_path, "sales", 1, "t", runs)
+    d = mk()
+    data_dir = pond_data_dir(tmp_path, "sales", 1, None)
+    expected = sorted(duckdb.sql(ParquetDataPlane().read_select(data_dir, "t")).fetchall())
+    assert sorted((k, v) for k, v, *_ in expected) == sorted(state.items())
+    for sandboxed in (False, True):
+        got = serving_query(d, "SELECT * FROM sales.t", sandboxed=sandboxed)
+        assert sorted(got["rows"]) == expected
+    retracted = duckdb.sql(f"SELECT count(*) FROM '{tmp_path}/.serving-cache/*.retract.parquet'").fetchall()[0][0]
+    assert retracted > 0  # the anti-join path, not only new keys

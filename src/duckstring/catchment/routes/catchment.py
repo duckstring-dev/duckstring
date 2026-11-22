@@ -38,7 +38,7 @@ _SERVING_TMP = ".serving-tmp"  # the sandbox's private spill dir (see serving._t
 # Top-level dirs rebuilt on demand, never shipped: Pond environments and uv's cache
 # (plans/pond-environments.md). Hundreds of MB, and an environment only works at the path and with the
 # interpreter it was built for, so a copy elsewhere is useless; deploys and Ducks rebuild them.
-_REBUILT_DIRS = {"envs", "uv-cache"}
+_REBUILT_DIRS = {"envs", "uv-cache", ".serving-cache"}  # .serving-cache: serving.consolidation files
 
 
 def _db(request: Request) -> sqlite3.Connection:

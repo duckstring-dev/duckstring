@@ -278,11 +278,11 @@ class PgWireServer:
             conn.sendall(_auth_ok())          # password accepted
         return conn, principal
 
-    def _cursor(self, principal: auth.Principal):
+    def _cursor(self, principal: auth.Principal, sql: str | None = None):
         from .serving import _cache
 
         sandboxed = principal.tap is not None or principal.level < auth.Level.FULL
-        return _cache(self.driver).connection(self.driver, sandboxed=sandboxed, tap=principal.tap).cursor()
+        return _cache(self.driver).connection(self.driver, sandboxed=sandboxed, tap=principal.tap, sql=sql).cursor()
 
     def _run(self, principal: auth.Principal, sql: str, params=None, *, gate: bool = False) -> _Result:
         """Run one statement. ``gate`` (an executed query, not a Describe) applies a Tap's policy first."""
@@ -294,7 +294,7 @@ class PgWireServer:
         canned = catalog_answer(sql)
         if canned is None and gate and principal.tap is not None:
             apply_tap(self.driver, principal.tap)
-        cur = self._cursor(principal)
+        cur = self._cursor(principal, sql)
         cur.execute(_values_sql(*canned) if canned else sql, (params or []) if canned is None else [])
         if not cur.description:
             return _Result(sql)
@@ -310,7 +310,7 @@ class PgWireServer:
             return _Shape.of(canned[0], ["VARCHAR"] * len(canned[0]))
         if nparams == 0:
             try:
-                rel = self._cursor(principal).sql(sql)
+                rel = self._cursor(principal, sql).sql(sql)
                 return _Shape.of(rel.columns, rel.types) if rel is not None else None
             except Exception:
                 pass

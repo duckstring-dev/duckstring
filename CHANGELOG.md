@@ -255,6 +255,23 @@ Ripple can now say it, and Duckstring carries it downstream.
   other Catchments through Ducts and survive a lost registry. A dbt-mode Pond passes its Sources' reports on.
   Nothing in orchestration reads them, and a pipeline that never reports writes nothing.
 
+### Large tables in the web UI
+
+Opening a merge table in the data viewer consolidated its whole change log for every page: on a 575M-row table
+with 246M rows changed since its last compaction, each page took 30 seconds to 3 minutes.
+
+- **The viewer shows a merge table newest first,** as its log: the rows written by recent runs, then the rest, with
+  rows a later write replaced in grey and deleted rows in red. A page reads only its own rows and looks up their
+  keys, so on the same table it takes under a second, and the row count is instant. A freshness window still shows
+  the rows changed in it, and the exact current state is what a query of the table reads.
+- **An append table is shown newest run first.**
+- **Sorting a table of more than 100M rows asks first,** since a sort reads all of it.
+- **A query consolidates a merge table once per published version** of it, where every query did it twice (and
+  the viewer sends a count and then each page). The Catchment writes the consolidation beside its data, in
+  `.serving-cache` (left out of `catchment download`), and keeps the changed keys apart from the new images, so
+  a table that only gains rows reads as its base plus them. On the same table: 8 seconds the first time, then a
+  count in under a second and a page in 0.04 s, where each took 8 to 12 seconds.
+
 ### Other changes
 
 - **Queries as of a time:** `duckstring query --pond POND --at TIME` (and `at=` on the Python client's `query`,

@@ -94,6 +94,9 @@ each Run still copies them). Holding every table the `ChangeLedger` didn't see w
 `pond.con` is invisible to the ledger, so a table written that way would silently stop publishing. Leave as is, or
 hold unwritten tables only when every Ripple of the Pond writes through the handle?
 
+**Closed 2026-11-22: left as is** (the author's call). Retention bounds the copies, and a table written with raw SQL
+must never silently stop publishing.
+
 Tests: 2,000 skipped Runs leave one marker per table and one version per plain table; a skipped Run after a real one
 leaves the published state byte-identical apart from the run stamp.
 

@@ -302,13 +302,14 @@ def test_the_ops_serving_surface_is_rebuilt_when_the_token_is_reminted(monkeypat
     class _Driver:
         data_version = 7
         data_root = "gs://bucket/p"
+        root = "/nonexistent-catchment-root"
 
     class _Con:
         def close(self):
             pass
 
     built = []
-    monkeypatch.setattr(serving, "build_serving_con", lambda driver, sandboxed, tap=None: built.append(sandboxed)
+    monkeypatch.setattr(serving, "build_serving_con", lambda driver, sandboxed, tap=None, merges=None: built.append(sandboxed)
                         or _Con())
     generation = [1]
     monkeypatch.setattr(storage, "credential_generation", lambda location: generation[0])

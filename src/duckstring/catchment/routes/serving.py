@@ -117,7 +117,7 @@ def _query_file(driver, sql: str, fmt: str, sandboxed: bool, tap) -> bytes:
     from ..serving import _cache
     from .data import _copy_bytes
 
-    result = _cache(driver).connection(driver, sandboxed=sandboxed, tap=tap).cursor().execute(sql).to_arrow_table()
+    result = _cache(driver).connection(driver, sandboxed=sandboxed, tap=tap, sql=sql).cursor().execute(sql).to_arrow_table()
     out = duckdb.connect()
     try:
         out.register("_ds_result", result)

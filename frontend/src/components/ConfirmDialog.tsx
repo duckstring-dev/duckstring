@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { THEME_BLOCKED } from '@/lib/store';
+import { THEME_BLOCKED, THEME_BRAND } from '@/lib/store';
 import { useIsMobile } from '@/lib/useIsMobile';
 
 // A destructive-confirmation request. `action` is the work to run on confirm (the dialog awaits it, then
@@ -16,6 +16,8 @@ export type ConfirmOpts = {
   // Optional rich detail rendered below the body in a scrollable box (e.g. the exact list of affected items).
   details?: React.ReactNode;
   toggle?: { label: string; hint?: string; default?: boolean };
+  // 'neutral' for a confirmation that destroys nothing (a slow operation): the brand accent, not red.
+  tone?: 'danger' | 'neutral';
   action: (toggled: boolean) => Promise<void> | void;
 };
 
@@ -128,7 +130,8 @@ export function ConfirmDialog({ opts, onClose }: { opts: ConfirmOpts; onClose: (
             onClick={go}
             disabled={!canConfirm}
             style={{
-              background: THEME_BLOCKED, border: 'none', borderRadius: 6, padding: '8px 16px',
+              background: opts.tone === 'neutral' ? THEME_BRAND : THEME_BLOCKED, border: 'none', borderRadius: 6,
+              padding: '8px 16px',
               color: canConfirm ? '#f4f4f5' : '#71717a', fontSize: 12.5, fontWeight: 700,
               cursor: canConfirm ? 'pointer' : 'default', fontFamily: 'inherit', opacity: canConfirm ? 1 : 0.6,
             }}

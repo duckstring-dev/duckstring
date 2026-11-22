@@ -24,7 +24,8 @@ const CHUNK = 400;
 const OVERSCAN = 80;
 
 // Trickle system columns surfaced by the consolidated browse view.
-const ACTIVE = '_duckstring_active'; // +1 present / -1 deleted — drives row colour, never shown
+const ACTIVE = '_duckstring_active'; // 1 current / 0 replaced / -1 deleted — drives row colour, never shown
+const SLOW_SORT_ROWS = 100_000_000; // a sort past this many rows asks first
 const FRESH = '_duckstring_f'; // most-recent run freshness
 const UPDATES = '_duckstring_updates'; // count of +1 changelog events
 const EVENT = '_duckstring_event'; // create | update | delete (per-record history)
@@ -395,8 +396,21 @@ function DataViewer({
   const [confirm, setConfirm] = useState<ConfirmOpts | null>(null);
   // Opt-in column sort (null = the efficient base order). Clicking a header cycles asc → desc → off.
   const [sort, setSort] = useState<{ col: string | null; desc: boolean }>({ col: null, desc: false });
-  const cycleSort = (col: string) =>
-    setSort((s) => (s.col !== col ? { col, desc: false } : !s.desc ? { col, desc: true } : { col: null, desc: false }));
+  const cycleSort = (col: string) => {
+    const next = sort.col !== col ? { col, desc: false } : !sort.desc ? { col, desc: true } : { col: null, desc: false };
+    // A sort reads the whole table: past SLOW_SORT_ROWS, ask first. Turning a sort off never does.
+    if (next.col && total != null && total > SLOW_SORT_ROWS) {
+      setConfirm({
+        title: `Sort ${total.toLocaleString()} rows?`,
+        body: `Sorting by ${next.col} reads the whole table, so each page can take a while.`,
+        confirmLabel: 'Sort',
+        tone: 'neutral',
+        action: () => setSort(next),
+      });
+      return;
+    }
+    setSort(next);
+  };
   const taRef = useRef<HTMLTextAreaElement>(null);
   // The selectSig nonce already consumed (the mount picks `initialTable`; later tree clicks fire here).
   const lastSig = useRef<number | undefined>(selectSig?.nonce);
@@ -1050,8 +1064,9 @@ function VirtualGrid({
           )}
           {rows.map((row, i) => {
             const idx = windowStart + i;
-            const inactive =
-              (activeIdx >= 0 && Number(row[activeIdx]) < 0) || (deltaIdx >= 0 && Number(row[deltaIdx]) < 0);
+            const active = activeIdx >= 0 ? Number(row[activeIdx]) : 1;
+            const inactive = active < 0 || (deltaIdx >= 0 && Number(row[deltaIdx]) < 0);
+            const replaced = active === 0;
             return (
               <tr
                 key={idx}
@@ -1060,10 +1075,11 @@ function VirtualGrid({
                   height: ROW_H,
                   cursor: clickable ? 'pointer' : 'default',
                   background: inactive ? `${THEME_BLOCKED}22` : idx % 2 ? '#121217' : 'transparent',
-                  color: inactive ? '#fca5a5' : undefined,
+                  color: inactive ? '#fca5a5' : replaced ? '#71717a' : undefined,
                 }}
               >
-                <td style={td({ color: '#52525b', textAlign: 'right' })}>{idx + 1}</td>
+                <td style={td({ color: '#52525b', textAlign: 'right' })}
+                  title={active < 0 ? 'Deleted' : replaced ? 'Replaced by a later write' : undefined}>{idx + 1}</td>
                 {display.map((ci) => (
                   <td key={ci} style={td({})} title={row[ci] == null ? '' : String(row[ci])}>
                     {row[ci] == null
