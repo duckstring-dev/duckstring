@@ -17,6 +17,7 @@ from pathlib import Path
 from ..catchment.registry import pond_data_dir, pond_major_dir, pond_registry_path
 from ..dataplane import KEEP_ALL
 from ..objects import STAGING_DIR
+from ..trickle_io import first_row
 
 _import_lock = threading.Lock()
 
@@ -169,7 +170,7 @@ def open_registry(path: Path):
     if not path.exists():
         return duckdb.connect(str(path)), "missing"
     try:
-        return duckdb.connect(str(path)), None
+        return _compact_if_mostly_free(duckdb.connect(str(path)), path), None
     except duckdb.Error as exc:
         if not _is_unreadable(exc):
             raise
@@ -178,6 +179,63 @@ def open_registry(path: Path):
     print(f"[executor] registry {path} is unreadable ({reason}); moved it to {aside.name} and rebuilding",
           flush=True)
     return duckdb.connect(str(path)), "unreadable"
+
+
+# A DuckDB file never shrinks: deleted rows leave free blocks it reuses but doesn't hand back. Once an append table's
+# older runs move out of the registry (dataplane.fold_append), wa_views' registry was 23 GiB with 98% of its blocks
+# free. A registry at least this large that is at least this free is rewritten when a Duck opens it.
+_COMPACT_MIN_BYTES = 64 * 2**20
+_COMPACT_FREE_SHARE = 0.5
+
+
+def _copy_database(con, tmp: Path) -> None:
+    """Copy ``con``'s database (tables, views and their comments, constraints, sequences) into a new file."""
+    name = first_row(con.execute("SELECT current_database()"))[0]
+    con.execute(f"ATTACH '{tmp}' AS _ds_compact")
+    try:
+        con.execute(f'COPY FROM DATABASE "{name}" TO _ds_compact')
+        con.execute("CHECKPOINT _ds_compact")
+    finally:
+        con.execute("DETACH _ds_compact")
+
+
+def _compact_if_mostly_free(con, path: Path):
+    """``con`` on ``path``, rewritten first when the file is mostly free blocks: the live data is copied into a new
+    file beside it, which replaces it (one rename), and a connection on that is returned. Run as a Duck opens its
+    registry, before anything else uses it. Any failure leaves the registry as it was."""
+    import os
+
+    import duckdb
+
+    try:
+        _, _, block_size, total, _, free, *_ = first_row(con.execute("PRAGMA database_size"))
+    except duckdb.Error:
+        return con
+    if total * block_size < _COMPACT_MIN_BYTES or free < total * _COMPACT_FREE_SHARE:
+        return con
+    tmp = path.with_name(f"{path.name}.compact")
+    for leftover in (tmp, tmp.with_name(f"{tmp.name}.wal")):
+        leftover.unlink(missing_ok=True)
+    try:
+        con.execute("CHECKPOINT")  # the WAL into the file, so the copy and the rename see everything
+        _copy_database(con, tmp)
+        con.close()
+        os.replace(tmp, path)
+        path.with_name(f"{path.name}.wal").unlink(missing_ok=True)  # the old file's, if any: never replayed on the new
+        compacted = duckdb.connect(str(path))
+        size = (total - free) * block_size
+        print(f"[executor] compacted registry {path}: {total * block_size / 2**30:.1f} GiB -> "
+              f"{size / 2**30:.2f} GiB of data", flush=True)
+        return compacted
+    except Exception as exc:  # noqa: BLE001 — a compaction is an economy; the registry stays as it was
+        print(f"[executor] couldn't compact registry {path} ({exc}); keeping it as it is", flush=True)
+        for leftover in (tmp, tmp.with_name(f"{tmp.name}.wal")):
+            leftover.unlink(missing_ok=True)
+        try:
+            con.execute("SELECT 1")
+            return con
+        except Exception:  # noqa: BLE001 — closed above: open it again
+            return duckdb.connect(str(path))
 
 
 def _set_aside(path: Path, why: str) -> Path:

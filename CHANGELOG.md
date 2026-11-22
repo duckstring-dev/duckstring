@@ -82,8 +82,11 @@ table's whole history was in both: after two days of page views, 3.7 GB in the w
 - **Reads are unchanged.** The table's name is now a view over the published files and the rows still held
   locally, so Ripple SQL, conflict checks (`on_conflict="keep_prior"` and `"fail"`) and recomputes see the whole
   history. A Pond that rebuilds its working copy brings back only the recent Runs.
-- An existing append table changes to this layout at its next write. The working copy's file doesn't shrink on
-  its own (DuckDB reuses the space); a Rebuild, or deleting an idle Pond's working copy, starts it small.
+- An existing append table changes to this layout at its next write.
+- **A working copy that is mostly free space is rewritten when its Duck starts.** A DuckDB file never shrinks:
+  deleted rows leave space it reuses but doesn't give back. Once its older Runs had moved out, `wa_views`' file
+  was 23 GiB, 98% of it free. A Duck opening a working copy of at least 64 MiB that is at least half free copies
+  the live data into a new file and swaps it in, before anything else uses it; a failure leaves the file as it was.
 - Writing to an append table with your own SQL (`INSERT INTO`) no longer works: write through `append_table`.
 
 ### Fixes
