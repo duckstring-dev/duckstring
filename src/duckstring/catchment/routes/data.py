@@ -577,32 +577,28 @@ def _merge_f_base(request: Request, body, major: int):
     return (_sidecar(request, body.pond, major).get(body.table) or {}).get("f_base")
 
 
-def _merge_log(request: Request, body, major: int):
-    """The default view of a merge table (no freshness window): its log, newest first (:mod:`..browse`)."""
+def _log(request: Request, body, major: int):
+    """The data viewer's paged view of a Trickle table (:mod:`..browse`): an append table newest Run first (within
+    a freshness window when set), a merge table's log when no window is set. ``None`` for the other views."""
+    from datetime import datetime
+
+    from ..browse import append_log, merge_log
+
+    if body.trickle == "append":
+        at = lambda iso: datetime.fromisoformat(iso.replace("Z", "+00:00")) if iso else None  # noqa: E731
+        return append_log(_data_dir(request, body.pond, major), body.table, _sidecar(request, body.pond, major),
+                          at(body.f_lo), at(body.f_hi))
     if body.trickle != "merge" or not body.pk or body.f_lo or body.f_hi:
         return None
-    from ..browse import merge_log
-
     return merge_log(_data_dir(request, body.pond, major), body.table, _sidecar(request, body.pond, major), body.pk)
 
 
-def _append_ref(request: Request, body, major: int) -> str | None:
-    """An append table's files newest first, for its browse (``None``: read the Pond's view of it)."""
-    if body.trickle != "append":
-        return None
-    from ..browse import append_newest_first
-
-    sel = append_newest_first(_data_dir(request, body.pond, major), body.table, _sidecar(request, body.pond, major))
-    return f"({sel})" if sel else None
-
-
-def _base_sql(body, *, f_base=None, main_ref=None) -> str:
+def _base_sql(body, *, f_base=None) -> str:
     """The query a count/page operates on: a Trickle's windowed view (its changelog read clamped to ``> f_base``),
-    an append table's parts (``main_ref``: newest first), a custom ``sql``, or a plain ``SELECT *`` of a table."""
+    a custom ``sql``, or a plain ``SELECT *`` of a table."""
     if body.trickle in ("append", "merge"):
         return _trickle_base_sql(
-            body.pond, body.table, body.trickle, body.pk or [], body.f_lo, body.f_hi, f_base=f_base,
-            main_ref=main_ref,
+            body.pond, body.table, body.trickle, body.pk or [], body.f_lo, body.f_hi, f_base=f_base
         )
     if body.sql:
         return body.sql
@@ -637,10 +633,10 @@ def query_count(body: CountRequest, request: Request,
     _require_serviceable(request, body.pond, m, body.table, full)
     con = _open_pond(request, body.pond, m)
     try:
-        log = _merge_log(request, body, m)
-        if log is not None:  # the log view: its regions' row counts, metadata and a weight-column scan
-            return {"count": int(first_row(con.execute(log.count_sql()))[0])}
-        base = _base_sql(body, f_base=_merge_f_base(request, body, m), main_ref=_append_ref(request, body, m))
+        log = _log(request, body, m)
+        if log is not None:  # its files' row counts: footers, and a count where a file is filtered
+            return {"count": log.count(con)}
+        base = _base_sql(body, f_base=_merge_f_base(request, body, m))
         (count,) = first_row(con.execute(f"SELECT COUNT(*) FROM ({base}) AS _ds_count"))
         return {"count": count}
     except Exception as exc:
@@ -718,11 +714,10 @@ def query_page(body: PageRequest, request: Request,
     con = None
     try:
         con = _open_pond(request, body.pond, m)
-        log = _merge_log(request, body, m)
+        log = _log(request, body, m)
         if log is not None:
-            rel = log.page(con, offset, limit + 1, order_by=body.order_by, desc=body.order_desc)
-            return _page(rel)
-        base = _base_sql(body, f_base=_merge_f_base(request, body, m), main_ref=_append_ref(request, body, m))
+            return _page(log.page(con, offset, limit + 1, order_by=body.order_by, desc=body.order_desc))
+        base = _base_sql(body, f_base=_merge_f_base(request, body, m))
         return _page(con.execute(f"SELECT * FROM ({base}) AS _ds_page{order} LIMIT {limit + 1} OFFSET {offset}"))
     except HTTPException:
         raise

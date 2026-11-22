@@ -681,3 +681,26 @@ def test_merge_log_view_agrees_with_the_current_state_through_folds_and_compacti
     assert gone and not gone & set(state)
     assert (data_dir / "t__band").is_dir() and any((data_dir / "t__changelog").iterdir())  # every region
     assert rows[0][2] == max(r[2] for r in rows)  # newest first
+
+
+def test_pages_are_placed_by_file_and_read_only_the_files_they_fall_in(catchment_client, tmp_path, monkeypatch):
+    """A page is placed from each file's row count, so a page deep in a large table reads only its own file or two.
+    Paged in odd steps across many files, with and without a freshness window, it gives the rows the whole read
+    gives, in the same order."""
+    runs = [(f"2026-01-01T{h:02d}:00:00+00:00", [(h * 100 + i, float(i)) for i in range(h % 4 + 1)]) for h in range(12)]
+    _seed_append_trickle(tmp_path, "p", "events", runs)
+    for window in ({}, {"f_lo": "2026-01-01T03:00:00+00:00", "f_hi": "2026-01-01T08:00:00+00:00"}):
+        body = {"pond": "p", "table": "events", "trickle": "append", "pk": ["id"], **window}
+        whole = catchment_client.post("/api/query/page", json={**body, "limit": 1000}).json()
+        idx = whole["columns"].index("id")
+        ids = [r[idx] for r in whole["rows"]]
+        hours = [i // 100 for i in ids]
+        assert hours == sorted(hours, reverse=True)
+        expected = [h for h in range(12) if not window or 3 <= h <= 8]
+        assert sorted(set(hours), reverse=True) == sorted(expected, reverse=True)
+        assert catchment_client.post("/api/query/count", json=body).json()["count"] == len(ids)
+        paged = []
+        for offset in range(0, len(ids) + 3, 3):
+            page = catchment_client.post("/api/query/page", json={**body, "limit": 3, "offset": offset}).json()
+            paged += [r[idx] for r in page["rows"]]
+        assert paged == ids
