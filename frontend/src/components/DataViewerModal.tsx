@@ -9,7 +9,7 @@ import {
   type Catalog, type CatalogTable, UnauthorizedError,
 } from '@/lib/api';
 import { ConfirmDialog, type ConfirmOpts } from './ConfirmDialog';
-import { useIsMobile } from '@/lib/useIsMobile';
+import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
 
 // The unified Catalog (plans/data-serving.md): one modal that IS the Data Viewer. Opened from Options →
 // Catalog (no preselection) or a Pond's table icon (that Pond+Major preselected). A collapsible left
@@ -383,8 +383,11 @@ function DataViewer({
   const [mode, setMode] = useState<'browse' | 'query'>('browse');
   const [sqlText, setSqlText] = useState('');
   const [activeSql, setActiveSql] = useState('');
+  // On a phone, either way up, the freshness window and the SQL box fold behind one bar (rarely used, and they took
+  // most of the screen).
   const isMobile = useIsMobile();
-  // On a phone the freshness window and the SQL box fold behind one bar (rarely used, and they took most of the screen).
+  const isShort = useIsShort();
+  const foldTools = isMobile || isShort;
   const [toolsOpen, setToolsOpen] = useState(false);
   const [runSeq, setRunSeq] = useState(0); // bumps on Run, so the same SQL runs again (after a cancel, say)
   const [expanded, setExpanded] = useState(false);
@@ -646,7 +649,7 @@ function DataViewer({
         <button onClick={onClose} title="Close (Esc)" style={{ ...chip, position: 'absolute', top: 10, right: 14 }}>✕</button>
       </div>
 
-      {isMobile && view === 'tables' && (
+      {foldTools && view === 'tables' && (
         <div
           onClick={() => setToolsOpen((o) => !o)}
           style={{ padding: '8px 14px', borderBottom: '1px solid #27272a', cursor: 'pointer', userSelect: 'none',
@@ -662,12 +665,12 @@ function DataViewer({
       )}
 
       {/* Freshness window — only for a Trickle table being browsed */}
-      {(!isMobile || toolsOpen) && view === 'tables' && mode === 'browse' && trickle && (
+      {(!foldTools || toolsOpen) && view === 'tables' && mode === 'browse' && trickle && (
         <FreshnessWindow freshness={freshness} floor={floor} fLo={fLo} fHi={fHi} setLo={setFLo} setHi={setFHi} />
       )}
 
       {/* SQL box — hand-written SQL runs cross-pond (serving core); browse names are pre-filled per major */}
-      {(!isMobile || toolsOpen) && view === 'tables' && (
+      {(!foldTools || toolsOpen) && view === 'tables' && (
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '10px 14px', borderBottom: '1px solid #27272a', flexShrink: 0 }}>
           <textarea
             ref={taRef}

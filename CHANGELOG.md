@@ -304,7 +304,8 @@ with 246M rows changed since its last compaction, each page took 30 seconds to 3
 - **Sorting a table of more than 100M rows asks first,** since a sort reads all of it.
 - **A long query can be cancelled.** After a second, the viewer offers Cancel, which stops the query on the
   Catchment as well (`POST /api/query/cancel`).
-- **The web UI on a phone:** the data viewer's top row wraps, keeping its close button and row count on screen, and
+- **The web UI on a phone:** the data viewer's freshness window and SQL box fold behind one bar (closed to start,
+  noting when a window or query is set), its top row wraps, keeping its close button and row count on screen, and
   held landscape, the run panels fold behind a bar and the sidebar into a strip (opening when you select a Pond),
   so the graph has the screen.
 - **The web UI is served with caching headers,** so a browser picks up a new UI on its next load. Without them a
