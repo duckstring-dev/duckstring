@@ -268,6 +268,8 @@ with 246M rows changed since its last compaction, each page took 30 seconds to 3
 - **Sorting a table of more than 100M rows asks first,** since a sort reads all of it.
 - **The web UI on a phone:** the data viewer's top row wraps, keeping its close button and row count on screen, and
   held landscape, the run panels fold behind a bar so the graph has the screen.
+- **The web UI is served with caching headers,** so a browser picks up a new UI on its next load. Without them a
+  phone kept the old one after an upgrade.
 - **A query consolidates a merge table once per published version** of it, where every query did it twice (and
   the viewer sends a count and then each page). The Catchment writes the consolidation beside its data, in
   `.serving-cache` (left out of `catchment download`), and keeps the changed keys apart from the new images, so

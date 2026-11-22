@@ -19,6 +19,19 @@ from .routes import router
 _STATIC_DIR = Path(__file__).parent / "static"
 
 
+class _UIFiles(StaticFiles):
+    """The web UI's files, with caching browsers can't get wrong. Without a ``Cache-Control`` header a browser
+    guesses how long to keep the page, and after an upgrade kept running the old UI. The page and its data files
+    are checked on every load (``no-cache``: a 304 when unchanged); the build's assets are content-hashed, so
+    they never change under their name and are kept for good."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        immutable = path.replace("\\", "/").startswith("_next/static/")
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable" if immutable else "no-cache"
+        return response
+
+
 async def _scheduler(driver: Driver) -> None:
     """Drive clock processes (recurring Refreshes, window boundaries) at next_wake."""
     while True:
@@ -303,6 +316,6 @@ def create_app(
     app.include_router(app_proxy_router)
 
     if _STATIC_DIR.exists():
-        app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="frontend")
+        app.mount("/", _UIFiles(directory=_STATIC_DIR, html=True), name="frontend")
 
     return app
