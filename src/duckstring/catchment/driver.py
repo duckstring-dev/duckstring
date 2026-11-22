@@ -1530,6 +1530,10 @@ class Driver(TapsMixin, PuddlesMixin):
         with self.lock:
             now = _now()
             if self._repair is not None:
+                retried = self._retry_stalled_repair(now)
+                if retried:
+                    return {"scope": _topo_order(self._repair["scope"], self._repair["parents"]),
+                            "downstream": downstream, "retried": retried}
                 raise ValueError("a repair is already in progress on this Catchment")
             seeds = [self.resolve(n, m, None) for n, m in ponds]
             children = self._children_graph()
@@ -1559,6 +1563,23 @@ class Driver(TapsMixin, PuddlesMixin):
                     self._release_repair(k, now)
             self._process(now)
             return {"scope": order, "downstream": downstream}
+
+    def _retry_stalled_repair(self, now: datetime) -> list[str]:
+        """The repair in progress has stalled when every step it released and hasn't finished has failed (or been
+        killed): nothing would ever release the rest. Release those steps again and return them (``[]`` when the
+        repair is still making progress). Before, a failed step left the repair in progress for good, its scope
+        waiting as repairing and every other repair refused (the attention showcase, 2026-11-22: a Rebuild that ran
+        out of disk)."""
+        r = self._repair
+        waiting = [k for k in r["released"] - r["done"]]
+        stuck = [k for k in waiting if self.state.pond_states[k].is_failed or self.state.pond_states[k].is_killed]
+        if not stuck or len(stuck) < len(waiting):
+            return []
+        for k in sorted(stuck):
+            self.state = clear_pond(self.state, k, now)
+            self._release_repair(k, now)
+        self._process(now)
+        return sorted(stuck)
 
     def _release_repair(self, key: str, now: datetime) -> None:
         self.state = repair_pond(self.state, key, now)  # force + rebuild: a cold rebuild at current f

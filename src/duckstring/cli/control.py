@@ -266,7 +266,11 @@ def repair(
     cfg = _cfg(catchment)
     targets = select(cfg, ponds, all_, tree, between, False, major)
     body = {"ponds": [{"name": n, "major": m} for n, m, _ in targets], "downstream": downstream}
-    order = _http.post(f"{cfg['url']}/api/repair", auth=cfg, json=body).json().get("scope", [])
+    plan = _http.post(f"{cfg['url']}/api/repair", auth=cfg, json=body).json()
+    if plan.get("retried"):  # a stalled repair: its failed steps run again
+        typer.echo(f"Retrying the repair's failed step(s): {', '.join(plan['retried'])}")
+        return
+    order = plan.get("scope", [])
     typer.echo(f"Repairing {len(order)} Pond(s) in order: {' → '.join(order)}")
 
 

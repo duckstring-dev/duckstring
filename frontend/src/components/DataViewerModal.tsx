@@ -9,6 +9,7 @@ import {
   type Catalog, type CatalogTable, UnauthorizedError,
 } from '@/lib/api';
 import { ConfirmDialog, type ConfirmOpts } from './ConfirmDialog';
+import { useIsMobile } from '@/lib/useIsMobile';
 
 // The unified Catalog (plans/data-serving.md): one modal that IS the Data Viewer. Opened from Options →
 // Catalog (no preselection) or a Pond's table icon (that Pond+Major preselected). A collapsible left
@@ -382,6 +383,9 @@ function DataViewer({
   const [mode, setMode] = useState<'browse' | 'query'>('browse');
   const [sqlText, setSqlText] = useState('');
   const [activeSql, setActiveSql] = useState('');
+  const isMobile = useIsMobile();
+  // On a phone the freshness window and the SQL box fold behind one bar (rarely used, and they took most of the screen).
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [runSeq, setRunSeq] = useState(0); // bumps on Run, so the same SQL runs again (after a cancel, say)
   const [expanded, setExpanded] = useState(false);
   const [total, setTotal] = useState<number | null>(null);
@@ -642,13 +646,28 @@ function DataViewer({
         <button onClick={onClose} title="Close (Esc)" style={{ ...chip, position: 'absolute', top: 10, right: 14 }}>✕</button>
       </div>
 
+      {isMobile && view === 'tables' && (
+        <div
+          onClick={() => setToolsOpen((o) => !o)}
+          style={{ padding: '8px 14px', borderBottom: '1px solid #27272a', cursor: 'pointer', userSelect: 'none',
+            fontSize: 11, fontWeight: 700, color: '#a1a1aa', letterSpacing: '0.06em', flexShrink: 0 }}
+        >
+          {toolsOpen ? '▾' : '▸'} {mode === 'browse' && trickle ? 'FRESHNESS & SQL' : 'SQL'}
+          {!toolsOpen && (mode === 'query' || fLo || fHi) && (
+            <span style={{ color: '#ee9333', fontWeight: 400, marginLeft: 8, letterSpacing: 0 }}>
+              {mode === 'query' ? 'custom query' : 'window set'}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Freshness window — only for a Trickle table being browsed */}
-      {view === 'tables' && mode === 'browse' && trickle && (
+      {(!isMobile || toolsOpen) && view === 'tables' && mode === 'browse' && trickle && (
         <FreshnessWindow freshness={freshness} floor={floor} fLo={fLo} fHi={fHi} setLo={setFLo} setHi={setFHi} />
       )}
 
       {/* SQL box — hand-written SQL runs cross-pond (serving core); browse names are pre-filled per major */}
-      {view === 'tables' && (
+      {(!isMobile || toolsOpen) && view === 'tables' && (
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '10px 14px', borderBottom: '1px solid #27272a', flexShrink: 0 }}>
           <textarea
             ref={taRef}

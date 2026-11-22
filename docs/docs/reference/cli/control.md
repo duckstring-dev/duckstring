@@ -61,7 +61,7 @@ Marks each Pond so its next run rebuilds from scratch: its working database is d
 duckstring control repair POND... [--downstream]
 ```
 
-Rebuilds a set of Ponds now, in dependency order, each reading its parents' rebuilt output. The set must be connected: if two selected Ponds are linked through a third, the third must be selected too (`--between` adds it). `--downstream` adds everything downstream of the selection. While repairing, the Ponds don't respond to other demand.
+Rebuilds a set of Ponds now, in dependency order, each reading its parents' rebuilt output. The set must be connected: if two selected Ponds are linked through a third, the third must be selected too (`--between` adds it). `--downstream` adds everything downstream of the selection. While repairing, the Ponds don't respond to other demand. One repair runs at a time; if a step fails, running `repair` again runs the failed steps again.
 
 ## Stopping
 

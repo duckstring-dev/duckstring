@@ -884,6 +884,25 @@ def test_repair_releases_children_as_parents_finish(tmp_path):
     assert d._repair is None  # the whole scope rebuilt
 
 
+def test_a_stalled_repair_runs_its_failed_steps_again_when_asked(tmp_path):
+    """A repair step that failed (a Rebuild that ran out of disk, in the attention showcase) left the repair "in
+    progress" for good: its scope waited as repairing, and another repair was refused. Asking again now retries the
+    failed steps; a repair still making progress is refused as before."""
+    d = _diamond(tmp_path)
+    d.repair([("A", 1)], downstream=True)
+    f = d.state.pond_states["A@1"].start_f.isoformat()
+    d.on_event("A@1", {"kind": "failed", "f": f, "ripple": "r1", "status": "failed", "error": "No space left"})
+    assert d.state.pond_states["A@1"].is_failed
+    again = d.repair([("A", 1)], downstream=True)
+    assert again["retried"] == ["A@1"]
+    ps = d.state.pond_states["A@1"]
+    assert not ps.is_failed and ps.repairing and ps.start_f > ps.end_f  # rebuilding again
+    with pytest.raises(ValueError, match="in progress"):
+        d.repair([("A", 1)], downstream=True)  # it is running now: not stalled
+    d._advance_repair("A@1", _now())
+    assert d._repair["released"] >= {"B@1", "C@1"}
+
+
 # ─── Draw versions: [sources] pins on a drawn Pond check against the upstream's real version ──────────
 
 
