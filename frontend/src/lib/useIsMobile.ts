@@ -17,3 +17,16 @@ export function useIsMobile(): boolean {
   // Server snapshot is false → desktop markup on first paint, corrected at hydration.
   return useSyncExternalStore(subscribe, () => window.matchMedia(QUERY).matches, () => false);
 }
+
+// A short screen (a phone held landscape): the desktop layout, but the bottom panels fold away.
+const SHORT = '(max-height: 560px)';
+
+function subscribeShort(onChange: () => void): () => void {
+  const mql = window.matchMedia(SHORT);
+  mql.addEventListener('change', onChange);
+  return () => mql.removeEventListener('change', onChange);
+}
+
+export function useIsShort(): boolean {
+  return useSyncExternalStore(subscribeShort, () => window.matchMedia(SHORT).matches, () => false);
+}

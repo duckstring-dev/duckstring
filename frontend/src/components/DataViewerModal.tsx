@@ -560,8 +560,9 @@ function DataViewer({
 
   return (
     <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
-      {/* Top row: [◂ tree] pond · Promote | table select | Delete | rows | ✕ */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderBottom: '1px solid #27272a', flexShrink: 0 }}>
+      {/* Top row: [◂ tree] pond · Promote | table select | Delete | rows | ✕. It wraps on a narrow screen, with ✕
+          pinned top-right so the viewer can always be closed. */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, padding: '10px 52px 10px 14px', borderBottom: '1px solid #27272a', flexShrink: 0, position: 'relative' }}>
         <button onClick={onToggleLeft} title={leftCollapsed ? 'Show ponds' : 'Hide ponds'} style={chip}>
           {leftCollapsed ? '›' : '‹'}
         </button>
@@ -636,7 +637,7 @@ function DataViewer({
             {total == null ? '' : `${total.toLocaleString()} row${total === 1 ? '' : 's'}`}
           </span>
         )}
-        <button onClick={onClose} title="Close (Esc)" style={{ ...chip, marginLeft: 'auto' }}>✕</button>
+        <button onClick={onClose} title="Close (Esc)" style={{ ...chip, position: 'absolute', top: 10, right: 14 }}>✕</button>
       </div>
 
       {/* Freshness window — only for a Trickle table being browsed */}
