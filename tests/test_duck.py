@@ -228,6 +228,34 @@ def test_a_replaced_duck_gives_up_without_retrying(tmp_path):
 
 
 @pytest.mark.timeout(5)
+def test_a_replaced_duck_hands_back_the_runs_it_has_not_started(tmp_path):
+    """A redeploy left a busy Duck working through every Run it had taken, on the old code (attention FINDINGS 5).
+    Told it was replaced, it keeps the Run in progress and hands back the ones no Ripple has started."""
+    con = ledger.connect(tmp_path / "pond.db")
+    core = DuckCore("sales", con, SALES)
+    fs = [T0 + timedelta(minutes=i) for i in range(4)]
+    for f in fs:
+        core.begin_run(f, T0)
+    core.ripple_completed("daily", T0)
+    core.ripple_completed("tiers", T0)  # the Run at fs[0] is in progress (join); fs[1] has started daily and tiers
+    started = {s.start_f for s in core.state.states.values()}
+    assert fs[1] in started and fs[2] not in started
+    core.events.clear()
+    assert core.release_unstarted(T0) == fs[2:]
+    assert [(e.kind, e.f) for e in core.events] == [("released", f) for f in fs[2:]]
+    assert all(t <= fs[1] for s in core.state.states.values() for t in s.demand)
+    core.ripple_completed("join", T0)  # fs[0] done; fs[1] goes on to the end, and then the Duck is idle
+    for name in ("daily", "tiers", "join"):
+        if core.state.states[name].is_running:
+            core.ripple_completed(name, T0)
+    core.ripple_completed("join", T0) if core.state.states["join"].is_running else None
+    assert core.idle()
+    assert [e.f for e in core.events if e.kind == "run_completed"] == fs[:2]
+    # A restarted old Duck doesn't pick the handed-back Runs up from its ledger.
+    assert not [f for f in fs[2:] if f in ledger.load_state(con, SALES).states["daily"].demand]
+
+
+@pytest.mark.timeout(5)
 def test_retry_on_lock_queues_then_raises():
     import duckdb
 

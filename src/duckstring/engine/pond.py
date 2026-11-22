@@ -109,6 +109,12 @@ def record_pond_run_finish(con: sqlite3.Connection, f: datetime, now: datetime, 
     con.commit()
 
 
+def forget_pond_run(con: sqlite3.Connection, f: datetime) -> None:
+    """Drop the Run at ``f`` from the ledger: it was handed back unstarted (a replaced Duck), to run elsewhere."""
+    con.execute("DELETE FROM pond_run WHERE f = ?", (_iso(f),))
+    con.commit()
+
+
 def load_state(con: sqlite3.Connection, parents: dict[str, list[str]], optional=None,
                version: str | None = None) -> WorkerState:
     """Build a :class:`WorkerState` for the given topology, seeding per-Ripple freshness from the

@@ -315,6 +315,30 @@ class DuckCore:
             ledger.record_ripple_start(self.con, name, self.state.states[name].start_f, self.version)
         return launched
 
+    def release_unstarted(self, now: datetime) -> list[datetime]:
+        """Hand back the Pond Runs no Ripple has started: a replaced Duck (its version redeployed) finishes only the
+        Run in progress, and the Catchment gives the rest to a Duck on the new version. Before this it worked
+        through every Run it had taken, on the old code (attention FINDINGS 5: five Runs of several minutes each).
+
+        A Ripple runs its Runs in order, so a Run is untouched exactly when it is newer than every Ripple's start;
+        those are the Runs handed back, each reported as ``released``. Returns their freshnesses, oldest first."""
+        started = max((s.start_f for s in self.state.states.values()), default=NEVER)
+        released = sorted({t for s in self.state.states.values() for t in s.demand if t > started})
+        if not released:
+            return []
+        s = self.state.clone()
+        for rs in s.states.values():
+            rs.demand = [t for t in rs.demand if t <= started]
+        for f in released:
+            s.immediate_left.pop(f, None)
+            ledger.forget_pond_run(self.con, f)
+            for held in (self._previous_f, self._positions, self._previous_positions, self._sources_changed):
+                held.pop(f, None)
+            self._rebuilds.discard(f)
+            self.events.append(Event(kind="released", f=f))
+        self.state = s
+        return released
+
     def idle(self) -> bool:
         """True when no Ripple is running and no demand is outstanding — the Pond has quiesced and the
         Duck may shut down (once its event buffer has drained)."""

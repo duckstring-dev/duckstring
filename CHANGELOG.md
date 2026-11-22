@@ -81,6 +81,10 @@ its Ponds, and code calling an API the new version removed failed only when its 
   replaced kept spending its retries on the old code, then failed the Pond after the redeploy had cleared it. It now
   gives a failing Run up at once, and the Catchment records the attempt and runs the Pond again on the new
   version, without failing it or alerting.
+- **A redeploy waited for every Run a busy Duck had already taken.** A Duck on the replaced version worked through
+  all of them on the old code (five Runs of several minutes each in the attention showcase), and switching at once
+  meant a Kill. It now finishes only the Run in progress and hands the others back, and they run on the new
+  version.
 - **Change points inside combined files were skipped.** Once a Source's small per-Run files were combined, its
   change points (`/api/ponds/{name}/changes`, `--next-change`, a copied Puddle's history) named only each combined
   file's two ends, so a dev Catchment stepped from one end of a week of Runs to the other. The Runs inside are read

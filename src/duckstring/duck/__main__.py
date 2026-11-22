@@ -169,6 +169,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                         shutdown_requested = True
                         if data.get("replaced"):
                             core.replaced = True  # a failing Ripple gives up its Run rather than retry old code
+                            core.release_unstarted(_now())  # the Runs it hasn't started go to the new version
                         # Going idle: trim the overwrite versions no Sink still reads, so a large table
                         # isn't left on disk twice. Only when no Run is in flight (its publish prunes).
                         if "retain_from" in data and core.idle():

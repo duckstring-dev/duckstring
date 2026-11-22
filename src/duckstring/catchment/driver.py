@@ -2883,6 +2883,8 @@ class Driver(TapsMixin, PuddlesMixin):
                         payload = {**payload, "error": f"{payload.get('error')} (it ran out of memory with every "
                                                       "memory slot on the machine to itself)"}
                     self._fail_at_ripple(pond, payload, now)
+            elif kind == "released":
+                self._hand_to_new_version(pond, f, now)
             elif kind == "missing_source":
                 # A Ripple read a Source asset that isn't published (deleted, or not produced yet). Park the
                 # Pond blocked-with-a-reason — NOT failed: no retry-budget burn, no failure alert. It
@@ -2967,6 +2969,26 @@ class Driver(TapsMixin, PuddlesMixin):
         self._abandon_and_wake(pond, payload, now, note)
         self._process(now)
         return True
+
+    def _hand_to_new_version(self, pond: str, f: str | None, now: datetime) -> None:
+        """A replaced Duck handed back a Run no Ripple of it had started (``DuckCore.release_unstarted``): queue it
+        for a Duck on the selected version, at the read positions it was dispatched with, and drop its record on
+        the old version (nothing ran there). The new Duck starts once the old one has gone
+        (``_replace_outdated_ducks``). Before, the old Duck worked through every Run it had taken on the old code
+        (attention FINDINGS 5). A replay, or a Run the engine no longer has in flight, changes nothing."""
+        meta = self.meta.get(pond)
+        if not f or meta is None:
+            return
+        old = self._run_version_id(pond, f)
+        if old == meta["version_id"]:
+            return
+        ps = self.state.pond_states[pond]
+        at = datetime.fromisoformat(f)
+        if ps.is_killed or ps.is_failed or not (ps.end_f < at <= ps.start_f):
+            return
+        self._dispatch_begin_run(pond, at, now)
+        self.db.execute("DELETE FROM pond_run WHERE pond_version_id = ? AND f = ?", (old, f))
+        self.db.commit()
 
     def _abandon_and_wake(self, pond: str, payload: dict | None, now: datetime, note: str) -> None:
         """Record the given-up Run (``payload``, else the Pond's Run in flight) as failed with ``note``, abandon
@@ -3728,7 +3750,7 @@ class Driver(TapsMixin, PuddlesMixin):
             # it now killed it with that Run taken, so the new Duck waited for a job that never came (the Run
             # showed running for good; found on Azure, 2026-11-07). Hand over as for a redeploy instead.
             self._outdated_ducks.add(pond)
-        else:
+        elif pond not in self._outdated_ducks:  # an outdated Duck's replacement starts once it has gone
             self.launcher.ensure(pond, meta["version"], meta["source_path"], duck=duck_cfg)
         self.last_seen[pond] = now  # grace clock: a freshly (re)spawned Duck isn't immediately stale
         self._awaiting_first_contact.add(pond)  # until it speaks, judge it by the spawn grace (see below)

@@ -194,3 +194,42 @@ def test_a_failure_on_the_selected_version_still_fails_the_pond(tmp_path):
     d.on_event("p@1", {"kind": "ripple", "f": f, "ripple": "r1", "status": "success"})
     d.on_event("p@1", {"kind": "failed", "f": f, "ripple": "r2", "status": "failed", "error": "boom"})
     assert d.status()["ponds"][0]["is_failed"]
+
+
+def test_runs_a_replaced_duck_hands_back_go_to_the_new_version(tmp_path):
+    """A replaced Duck hands back the Runs it hasn't started (attention FINDINGS 5): each runs on the new version,
+    at the read positions it was dispatched with, and no record of it is left on the old version."""
+    import time
+
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "p", "1.0.0", "inlet", "ponds/p/1.0.0", _CFG, _RIPPLES)
+    launcher = _OneDuck()
+    d = Driver(db, tmp_path, "http://x", launcher)
+    d.refresh_now("p@1")
+    f1 = d.take_jobs("p@1", version="1.0.0")[0]["f"]
+    d.on_event("p@1", {"kind": "ripple", "f": f1, "ripple": "r1", "status": "success"})
+    time.sleep(0.01)
+    d.refresh_now("p@1")  # a second Run pipelines behind the first, as under a continuous Refresh
+    second = d.take_jobs("p@1", version="1.0.0")
+    assert [j["kind"] for j in second] == ["begin_run"]
+    f2, positions = second[0]["f"], second[0]["read_positions"]
+    assert f2 > f1
+
+    _register(db, "p", "1.0.1", "inlet", "ponds/p/1.0.1", _CFG, _RIPPLES)
+    d.reload()
+    assert d.take_jobs("p@1", version="1.0.0")[0]["replaced"]
+    d.on_event("p@1", {"kind": "released", "f": f2})  # the Duck hands back the Run it hasn't started
+    assert [r[:2] for r in _runs(db)] == [("1.0.0", "running"), ("1.0.1", "running")]
+    assert d.take_jobs("p@1", version="1.0.0") == [{"kind": "shutdown", "replaced": True}]  # not for the old Duck
+    d.on_event("p@1", {"kind": "released", "f": f2})  # a replayed event changes nothing
+    _finish(d, f1)  # the old Duck finishes the Run in progress, on its own version
+
+    del launcher.running["p@1"]
+    d.scheduler_tick()
+    assert launcher.spawned[-1] == ("p@1", "1.0.1")
+    jobs = d.take_jobs("p@1", version="1.0.1")
+    assert [(j["kind"], j["f"]) for j in jobs] == [("begin_run", f2)] and jobs[0]["read_positions"] == positions
+    _finish(d, f2)
+    assert [r[:2] for r in _runs(db)] == [("1.0.0", "success"), ("1.0.1", "success")]
+    assert not d.status()["ponds"][0]["is_failed"]
