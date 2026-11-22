@@ -716,6 +716,7 @@ class Driver(TapsMixin, PuddlesMixin):
             self._load_taps(pondid_to_key)
             self._load_puddles()
             self._restore_read_at()
+            self._resume_repair()
             self._check_compat()
             # Recompute blocked from the freshly-loaded topology: a Source that is absent now (or has
             # since become present, e.g. a duct was added) flips has_missing_source, so the persisted
@@ -1546,23 +1547,39 @@ class Driver(TapsMixin, PuddlesMixin):
                     f"disconnected repair set: '{gap[0]}' reaches '{gap[1]}' only through unselected Ponds "
                     f"— include the connecting Pond(s) or pass downstream=true"
                 )
-            parents = {k: {p for p in self.state.ponds[k].sources if p in scope} for k in scope}
-            order = _topo_order(scope, parents)
-            for k in scope:  # quiesce: block normal demand, abandon any in-flight run cleanly
-                ps = self.state.pond_states[k]
-                if ps.start_f > ps.end_f:
-                    self.launcher.terminate(k)
-                    self.jobs[k] = []
-                    ps.start_f = ps.end_f
-                ps.repairing = True
-            for k in scope:
-                derive_blocked(self.state, k)
-            self._repair = {"scope": scope, "parents": parents, "done": set(), "released": set()}
-            for k in scope:  # release the roots (no in-scope parent)
-                if not parents[k]:
-                    self._release_repair(k, now)
+            order = self._start_repair(scope, now)
             self._process(now)
             return {"scope": order, "downstream": downstream}
+
+    def _start_repair(self, scope: set[str], now: datetime) -> list[str]:
+        """Plan and start a repair over ``scope``: mark it repairing, abandon its Runs in flight, and release the
+        Ponds with no parent in it. Returns the scope in dependency order."""
+        parents = {k: {p for p in self.state.ponds[k].sources if p in scope} for k in scope}
+        order = _topo_order(scope, parents)
+        for k in scope:  # quiesce: block normal demand, abandon any in-flight run cleanly
+            ps = self.state.pond_states[k]
+            if ps.start_f > ps.end_f:
+                self.launcher.terminate(k)
+                self.jobs[k] = []
+                ps.start_f = ps.end_f
+            ps.repairing = True
+        for k in scope:
+            derive_blocked(self.state, k)
+        self._repair = {"scope": scope, "parents": parents, "done": set(), "released": set()}
+        for k in scope:  # release the roots (no in-scope parent)
+            if not parents[k]:
+                self._release_repair(k, now)
+        return order
+
+    def _resume_repair(self) -> None:
+        """A restart keeps each Pond's ``repairing`` mark but not the plan, so the Ponds a repair hadn't finished
+        waited as repairing for good. Repair them again: the ones still marked, each once its marked parents are
+        done (a parent that finished before the restart is no longer marked)."""
+        scope = {k for k, ps in self.state.pond_states.items() if ps.repairing}
+        if scope and self._repair is None:
+            for k in scope:
+                self.state.pond_states[k].is_failed = False
+            self._start_repair(scope, _now())
 
     def _retry_stalled_repair(self, now: datetime) -> list[str]:
         """The repair in progress has stalled when every step it released and hasn't finished has failed (or been

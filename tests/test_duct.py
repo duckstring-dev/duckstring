@@ -963,3 +963,14 @@ def test_poller_records_the_upstream_version(tmp_path):
     asyncio.run(poll_once(d, tmp_path, client))
     asyncio.run(client.aclose())
     assert _draw_version(d) == "1.6.2"
+
+
+def test_a_restart_resumes_the_repair_it_interrupted(tmp_path):
+    """The repair plan lived only in memory: after a restart its Ponds stayed marked repairing, blocked for good."""
+    d = _diamond(tmp_path)
+    d.repair([("A", 1)], downstream=True)
+    d._advance_repair("A@1", _now())  # A rebuilt; B and C under way, D waiting
+    d2 = Driver(d.db, tmp_path, "http://x", NoopLauncher())
+    assert d2._repair is not None and d2._repair["scope"] == {"B@1", "C@1", "D@1"}
+    assert d2._repair["released"] == {"B@1", "C@1"}
+    assert not d2.state.pond_states["A@1"].repairing

@@ -100,7 +100,8 @@ table's whole history was in both: after two days of page views, 3.7 GB in the w
   gives a failing Run up at once, and the Catchment records the attempt and runs the Pond again on the new
   version, without failing it or alerting.
 - **A repair whose step failed stayed in progress for good.** Its Ponds waited as repairing, and another repair
-  was refused. Running `control repair` again now runs the failed steps again.
+  was refused. Running `control repair` again now runs the failed steps again, and a Catchment restarted during a
+  repair carries it on (its Ponds stayed marked as repairing with nothing to finish them).
 - **A redeploy waited for every Run a busy Duck had already taken.** A Duck on the replaced version worked through
   all of them on the old code (five Runs of several minutes each in the attention showcase), and switching at once
   meant a Kill. It now finishes only the Run in progress and hands the others back, and they run on the new
