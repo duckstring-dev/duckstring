@@ -117,6 +117,12 @@ WARM_SUFFIX = "__band"
 # then a view over the published band files (plans/s3-resident-state.md), so the warm tier is never copied
 # into a fresh registry. Reserved prefix: never published as a table of its own.
 WARM_PENDING_PREFIX = "_duckstring_band_"
+# An append table's rows are written to ``{HOT_PREFIX}{table}`` and read through a view under the table's own name
+# (:func:`append_store`), so a host can move its older rows out to where they are published and keep reading them
+# there (the view then unions the published files with the rows still local). The reserved prefix keeps the hot
+# table out of the publish set: the history is published under the table's name.
+HOT_PREFIX = "_duckstring_hot_"
+APPEND_VIEW_COMMENT = "duckstring:append-history"
 # A plain overwrite table is published as **versions**: one immutable file per run under ``{table}__v/``,
 # named by the run's freshness (:func:`part_name`), so a Sink run pinned to a Source version keeps reading
 # it while the Source publishes the next one. Retention trims superseded versions (see the data plane).
@@ -253,6 +259,11 @@ def warm_pending_name(table: str) -> str:
     return f"{WARM_PENDING_PREFIX}{table}"
 
 
+def hot_name(table: str) -> str:
+    """The registry table holding append table ``table``'s rows that are still local (see :func:`append_store`)."""
+    return f"{HOT_PREFIX}{table}"
+
+
 def base_chunks(data_dir, table: str) -> list[str]:
     """The published base chunk **names** of a merge main ``table`` (in its ``{table}__base/`` directory),
     sorted; ``[]`` when the base has not been chunk-published (no checkpoint yet, or a legacy single-file
@@ -340,6 +351,33 @@ def _table_exists(con, name: str) -> bool:
         "SELECT 1 FROM duckdb_tables() WHERE table_name = ? "
         "UNION ALL SELECT 1 FROM duckdb_views() WHERE view_name = ? LIMIT 1", [name, name]
     )) is not None
+
+
+def _is_base_table(con, name: str) -> bool:
+    return first_row(con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ? AND schema_name = 'main' "
+                                 "AND database_name = current_database()", [name])) is not None
+
+
+def append_store(con, name: str, columns_sql: str | None = None) -> str:
+    """The table append table ``name``'s rows are written to: :func:`hot_name`, with ``name`` a view that reads it
+    (and whatever the host has moved out to published files; see the data plane's ``fold_append``). Converts an
+    append table written as a plain table, at its own write, so nothing else is writing it. With ``columns_sql``
+    (a ``SELECT`` giving the columns, no rows), creates a new table's store and view. Returns the store's name."""
+    hot = hot_name(name)
+    if _table_exists(con, hot):
+        return hot
+    with _DDL_LOCK:
+        if _table_exists(con, hot):
+            return hot
+        if _is_base_table(con, name):
+            con.execute(f"ALTER TABLE {_q(name)} RENAME TO {_q(hot)}")
+        elif columns_sql is not None:
+            con.execute(f"CREATE TABLE {_q(hot)} AS {columns_sql}")
+        else:
+            return name
+        con.execute(f"CREATE VIEW {_q(name)} AS SELECT * FROM {_q(hot)}")
+        con.execute(f"COMMENT ON VIEW {_q(name)} IS '{APPEND_VIEW_COMMENT}'")
+    return hot
 
 
 def _drop_relation(con, name: str) -> None:
@@ -432,7 +470,7 @@ def _retain_merge(con, name: str, f, retain_t, retain_n) -> None:
         fold_warm(con, name, target)
 
 
-def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
+def _apply_retention(con, table: str, f, retain_t, retain_n, store: str | None = None) -> None:
     """Bound a history/changelog table's retained window at write time — a **lag SLA**, not a
     correctness control (a consumer behind the retained window falls back to a full read of the clean
     state; see :func:`read_delta`). Both are opt-in (``None`` keeps everything):
@@ -441,18 +479,22 @@ def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
     - ``retain_n`` (a count): keep only the newest ``retain_n`` distinct ``_duckstring_f`` runs.
 
     Returns the **cutoff** it applied (the oldest freshness still retained) so the caller can raise the
-    published ``floor`` to it — a consumer behind the cutoff then coverage-misses and full-reads."""
+    published ``floor`` to it — a consumer behind the cutoff then coverage-misses and full-reads.
+
+    ``store`` is the table rows are deleted from when ``table`` is read through a view (an append table's,
+    :func:`append_store`): rows its host moved out to published files leave the view as the floor passes them."""
+    store = store or table
     cutoff = None
     if retain_t is not None:
         cutoff = f - retain_t
-        con.execute(f'DELETE FROM {_q(table)} WHERE {_q(F_COL)} < {_ts(cutoff)}')
+        con.execute(f'DELETE FROM {_q(store)} WHERE {_q(F_COL)} < {_ts(cutoff)}')
     if retain_n is not None and retain_n >= 1:
         kept_min = first_row(con.execute(
             f'SELECT min(g) FROM (SELECT DISTINCT {_q(F_COL)} AS g FROM {_q(table)} '
             f'ORDER BY g DESC LIMIT {int(retain_n)})'
         ))[0]
         if kept_min is not None:
-            con.execute(f'DELETE FROM {_q(table)} WHERE {_q(F_COL)} < {_ts(kept_min)}')
+            con.execute(f'DELETE FROM {_q(store)} WHERE {_q(F_COL)} < {_ts(kept_min)}')
             cutoff = kept_min if cutoff is None else max(cutoff, kept_min)
     return cutoff
 
@@ -546,7 +588,7 @@ def drop_table(con, name: str) -> None:
     Trickle that is the base/main + ``__changelog`` + warm ``__band`` + ``__droplog`` + the aggregate/scan
     state companions + the meta row/floor; for a plain overwrite table just the one table. Idempotent."""
     for t in (
-        name, cold_base_name(name), changelog_name(name), warm_name(name), warm_pending_name(name),
+        name, hot_name(name), cold_base_name(name), changelog_name(name), warm_name(name), warm_pending_name(name),
         f"{name}{DROPLOG_SUFFIX}",
         f"{AGG_STATE_PREFIX}{name}", f"{AGG_DROP_PREFIX}{name}", f"{ACC_STATE_PREFIX}{name}",
     ):
@@ -1005,18 +1047,14 @@ def append_table(
     temp_view(con, relation, src)
     sel_cols = ", ".join(_q(c) for c in cols)
     n_src = first_row(con.execute(f'SELECT count(*) FROM {_q(src)}'))[0]
-    if first:
-        con.execute(
-            f'CREATE TABLE {_q(name)} AS '
-            f'SELECT {sel_cols}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(src)} LIMIT 0'
-        )
-    con.execute(f'DELETE FROM {_q(name)} WHERE {_q(F_COL)} = {_ts(f)}')  # idempotent replay
+    store = append_store(con, name, f'SELECT {sel_cols}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(src)} LIMIT 0')
+    con.execute(f'DELETE FROM {_q(store)} WHERE {_q(F_COL)} = {_ts(f)}')  # idempotent replay
     con.execute(
-        f'INSERT INTO {_q(name)} ({sel_cols}, {_q(F_COL)}) '
+        f'INSERT INTO {_q(store)} ({sel_cols}, {_q(F_COL)}) '
         f'SELECT {sel_cols}, {_ts(f)} FROM {_q(src)}'
     )
     _record_meta(con, name, "append", pk)
-    cutoff = _apply_retention(con, name, f, retain_t, retain_n)
+    cutoff = _apply_retention(con, name, f, retain_t, retain_n, store=store)
     _advance_floor(con, name, bootstrap_f=(f if first else None), cutoff=cutoff)
     return n_src > 0 and not replay
 
@@ -1078,7 +1116,7 @@ def append_zset(
     # Idempotent replay: drop this Run's prior attempt (rows stamped f), so the history read below is the
     # pre-f state and a retry derives the same result.
     if not first:
-        con.execute(f'DELETE FROM {_q(name)} WHERE {_q(F_COL)} = {_ts(f)}')
+        con.execute(f'DELETE FROM {_q(append_store(con, name))} WHERE {_q(F_COL)} = {_ts(f)}')
 
     key = list(pk) or user  # with no pk, the whole row is the key
 
@@ -1154,24 +1192,20 @@ def append_zset(
                     f"them, or .merge() to track changes."
                 )
 
-    if first:
-        con.execute(
-            f'CREATE TABLE {_q(name)} AS '
-            f'SELECT {sel}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(consol)} LIMIT 0'
-        )
+    store = append_store(con, name, f'SELECT {sel}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(consol)} LIMIT 0')
     new_view = unique_name("appn")
     con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(new_view)} AS {new_rows}')
     n_new = first_row(con.execute(f'SELECT coalesce(sum({d}), 0) FROM {_q(new_view)}'))[0]
     # Every copy of a row the batch holds more than once (skip_check), else one.
     rows = (f'SELECT {sel} FROM (SELECT {sel}, unnest(range({d})) FROM {_q(new_view)})' if copies
             else f'SELECT {sel} FROM {_q(new_view)}')
-    con.execute(f'INSERT INTO {_q(name)} ({sel}, {_q(F_COL)}) SELECT {sel}, {_ts(f)} FROM ({rows})')
+    con.execute(f'INSERT INTO {_q(store)} ({sel}, {_q(F_COL)}) SELECT {sel}, {_ts(f)} FROM ({rows})')
 
     if log_drops:
         _log_drops(con, name, dropped, user, f)
 
     _record_meta(con, name, "append", pk)
-    cutoff = _apply_retention(con, name, f, retain_t, retain_n)
+    cutoff = _apply_retention(con, name, f, retain_t, retain_n, store=store)
     _advance_floor(con, name, bootstrap_f=(f if first else None), cutoff=cutoff)
     return n_new > 0
 

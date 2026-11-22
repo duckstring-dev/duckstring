@@ -90,7 +90,8 @@ def test_writes_leave_no_views_in_the_database(tmp_path):
             .merge("top", pk="g")
         c.close()
         prev = f
-    assert _stored_views(con) == ["per_g", "top"]  # the merge tables' current-state views, nothing else
+    # The tables' own views (merge: its current state; append: its history), nothing else.
+    assert _stored_views(con) == ["obs", "per_g", "top", "wide"]
     assert len(rows(con, "wide")) == 50
 
 

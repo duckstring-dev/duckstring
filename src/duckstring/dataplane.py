@@ -702,13 +702,23 @@ def registry_tables(con) -> list[str]:
     as a same-named *view* so SQL can ``FROM table`` it — those must NOT be published (``SHOW TABLES``
     lists views too, so this filtered ``duckdb_tables()`` query is what stops a Pond from re-exporting a
     full copy of every Source it reads). Only the registry's own database counts: a database a Ripple
-    attaches to read from (another DuckDB file, SQLite, Postgres) is never republished."""
-    return [
+    attaches to read from (another DuckDB file, SQLite, Postgres) is never republished.
+
+    An append table is the exception: its rows sit in a hidden table and its name is a view over them and the
+    rows moved out to published files (``trickle.io.append_store``), so its view counts."""
+    from . import trickle_io as trickle
+
+    tables = {
         t for (t,) in con.execute(
             "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main' "
-            "AND database_name = current_database() ORDER BY table_name"
+            "AND database_name = current_database()"
         ).fetchall() if not t.startswith(RESERVED_PREFIX)
-    ]
+    }
+    tables |= {t for (t,) in con.execute(
+        "SELECT view_name FROM duckdb_views() WHERE schema_name = 'main' AND database_name = current_database() "
+        "AND NOT temporary AND comment = ?", [trickle.APPEND_VIEW_COMMENT]).fetchall()
+        if not t.startswith(RESERVED_PREFIX)}
+    return sorted(tables)
 
 
 def validate_publish(con, table: str) -> None:
@@ -1003,6 +1013,9 @@ class ParquetDataPlane(DataPlane):
                 # Before the commit, so the registry is never behind its sidecar.
                 retry_on_lock(lambda: record_published(con, f))
             publish_plan(con, data_dir, f, held=kept)  # commit: every file it declares is in place
+            for table in tables:
+                if (meta.get(table) or {}).get("mode") == "append":
+                    fold_append(con, data_dir, table)  # its older runs read from the files just committed
             if retain_from is not KEEP_ALL:
                 prune_versions(data_dir, retain_from)  # after the new version is in place
             gc_tiers(data_dir, retain_from)  # superseded tiers no in-flight read can use
@@ -1123,7 +1136,11 @@ def _export_parts(con, data_dir, table: str, f, *, chunk: bool = False) -> None:
     # A Z-set part's row order means nothing, so DuckDB may write it in any order: 30% quicker for a 13.4M-row
     # change (0.84 s against 0.60 s, 2026-10-25). An append history keeps its order.
     unordered = table.endswith((trickle.CHANGELOG_SUFFIX, trickle.WARM_SUFFIX, trickle.DROPLOG_SUFFIX))
-    reg_fs = {r[0] for r in con.execute(f'SELECT DISTINCT "{trickle.F_COL}" FROM "{table}"').fetchall()
+    # The runs the registry holds: an append table's local rows (its older runs are published, and read through
+    # its view from those files), any other table's own.
+    hot = trickle.hot_name(table)
+    src = hot if chunk and trickle._table_exists(con, hot) else table  # never converts: the Ripple's write does
+    reg_fs = {r[0] for r in con.execute(f'SELECT DISTINCT "{trickle.F_COL}" FROM "{src}"').fetchall()
               if r[0] is not None}
     existing: dict = {}  # freshness -> its part's file names (more than one when chunked)
     unions = []  # (lo, hi) of each union of parts (plans/showcase-fixes.md item 4): every freshness inside is published
@@ -1150,7 +1167,7 @@ def _export_parts(con, data_dir, table: str, f, *, chunk: bool = False) -> None:
     if f is not None and f in reg_fs and not in_union(f):
         to_write.add(f)
     for fi in to_write:
-        select = _out(con, f'SELECT * FROM "{table}" WHERE "{trickle.F_COL}" = {trickle._ts(fi)}',
+        select = _out(con, f'SELECT * FROM "{src}" WHERE "{trickle.F_COL}" = {trickle._ts(fi)}',
                       table=trickle.base_table_name(table))
         written = _write_part_chunks(con, part_store, fi, select) if chunk else []
         if not written:
@@ -1654,6 +1671,7 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
     plane = ParquetDataPlane()  # hydration reads the flat layer (every backend also writes it)
     sidecar = trickle.load_sidecar(store)
     hydrated: list[str] = []
+    append_cut: dict = {}  # an append table's cut: its runs at or below it are read from their files
     for table, entry in trickle.sidecar_tables(sidecar).items():
         if tables is not None and table not in tables:
             continue
@@ -1675,7 +1693,24 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
                 trickle._drop_relation(con, cold)
                 con.execute(f'CREATE VIEW {trickle._q(cold)} AS {sql}')
                 loaded = True
-        else:  # append parts dir, or an overwrite table's newest version (or the earlier single file)
+        elif mode == "append" and trickle.table_parts(store, table):
+            # Only the recent runs come back into the registry, by compaction's rule; the view reads the rest from
+            # their published files, as after a publish (fold_append).
+            names = parts_snapshot(store, table, sidecar)
+            f_cold = _cold_cut(store, table, names, None, _compact_threshold())
+            hot_names = [n for n in names if f_cold is None or trickle.part_f(n) > f_cold]
+            uris = [store.uri(table, n) for n in (hot_names or names[:1] or trickle.table_parts(store, table)[:1])]
+            sql = _read_parquet_files(uris, since=_parts_since(sidecar, table, hot_names))
+            if f_cold is not None:
+                sql = f'SELECT * FROM ({sql}) WHERE "{trickle.F_COL}" > {trickle._ts(f_cold)}'
+            if not hot_names:
+                sql += " LIMIT 0"
+            trickle._drop_relation(con, table)
+            con.execute(f'CREATE OR REPLACE TABLE {trickle._q(trickle.hot_name(table))} AS {sql}')
+            _set_append_view(con, table, _cold_select(store, table, sidecar, names, f_cold) if f_cold else None)
+            append_cut[table] = f_cold
+            loaded = True
+        else:  # an overwrite table's newest version (or the earlier single file)
             if (trickle.table_versions(store, table) or trickle.table_parts(store, table)
                     or store.exists(f"{table}.parquet")):
                 sql = plane._raw_read_select(store, table)
@@ -1717,6 +1752,7 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
                 trickle._set_f_base(con, table, f_base)
             # The warm watermark is the newest band still above the base (a band at or below it is stale).
             f_warm = max(trickle.part_f(n) for n in bands) if bands else f_base
+            f_warm = append_cut.get(table, f_warm)
             if f_warm is not None:
                 trickle._set_f_warm(con, table, f_warm)
             if mode == "merge":
@@ -2009,6 +2045,90 @@ def _file_f(name: str, part_f) -> "datetime | None":  # noqa: F821 - forward ref
         return part_f(stem)
     except Exception:
         return None
+
+
+# ─── an append table's older runs read from where they are published (attention FINDINGS 9) ──────────────────
+#
+# An append table's history was kept whole in the registry as well as published: 3.7 GB in a registry beside 3.2 GB
+# published after two days of page views. Its rows are written to a hidden table behind a view
+# (``trickle.io.append_store``); by compaction's rule (a merge main's warm fold), a publish moves its oldest runs out
+# of the registry, leaving about one threshold of recent runs local, and repoints the view at the published files for
+# the rest. The cut, ``f_cold``, is kept as the table's ``f_warm``. Whatever reads the table (a conflict check, a
+# recompute, Ripple SQL) reads its whole history through the view; only writes go to the local rows, and they are
+# always newer than the cut.
+
+
+def _cold_cut(store, table: str, names: list[str], f_cold, threshold: int):
+    """Where append table ``table``'s registry rows should start, by compaction's rule: when the published runs above
+    ``f_cold`` outgrow twice the threshold, the oldest of them go, leaving about one threshold, and never the newest
+    Run. Returns the new cut (``f_cold`` when nothing moves)."""
+    from . import trickle_io as trickle
+
+    part_store = store.child(table)
+    sizes: dict = {}
+    for n in names:
+        fi = trickle.part_f(n)
+        if f_cold is None or fi > f_cold:
+            sizes[fi] = sizes.get(fi, 0) + part_store.size(n)
+    remaining = sum(sizes.values())
+    if remaining < 2 * threshold:
+        return f_cold
+    cut = f_cold
+    for fi in sorted(sizes)[:-1]:  # oldest first; never the newest run, which a caught-up reader's delta needs
+        if remaining <= threshold:
+            break
+        remaining -= sizes[fi]
+        cut = fi
+    return cut
+
+
+def _cold_select(store, table: str, sidecar: dict, names: list[str], f_cold) -> str | None:
+    """The published rows of append table ``table`` at or below ``f_cold``: every file holding one (a union reaching
+    past the cut keeps only its rows at or below it), at or above the floor. ``None`` when there are none."""
+    from . import trickle_io as trickle
+
+    cold = [n for n in names if trickle.part_lo(n) <= f_cold]
+    if not cold:
+        return None
+    sel = _read_parquet_files([store.uri(table, n) for n in cold], since=_parts_since(sidecar, table, cold))
+    return f'SELECT * FROM ({sel}) WHERE "{trickle.F_COL}" <= {trickle._ts(f_cold)}'
+
+
+def _set_append_view(con, table: str, cold_sql: str | None) -> None:
+    from . import trickle_io as trickle
+
+    q = trickle._q
+    hot = q(trickle.hot_name(table))
+    sql = f"SELECT * FROM ({cold_sql}) UNION ALL BY NAME SELECT * FROM {hot}" if cold_sql else f"SELECT * FROM {hot}"
+    con.execute(f"CREATE OR REPLACE VIEW {q(table)} AS {sql}")
+    con.execute(f"COMMENT ON VIEW {q(table)} IS '{trickle.APPEND_VIEW_COMMENT}'")
+
+
+def fold_append(con, data_dir, table: str) -> None:
+    """After a publish, move append table ``table``'s older runs out of the registry by compaction's rule (see the
+    section note), and point its view at the files now holding them. Repointed on every publish once a cut exists,
+    so the view follows the files a union or retention leaves. One transaction: a concurrent read sees the rows
+    once. Nothing to do for a table written before its rows had a store of their own (its next write converts it)."""
+    from . import trickle_io as trickle
+
+    if not trickle._table_exists(con, trickle.hot_name(table)):
+        return
+    store = _as_storage(data_dir)
+    sidecar = trickle.load_sidecar(store)
+    names = parts_snapshot(store, table, sidecar)
+    f_cold = _cold_cut(store, table, names, trickle._f_warm(con, table), _compact_threshold(con, table))
+    if f_cold is None:
+        return
+    con.execute("BEGIN")
+    try:
+        con.execute(f'DELETE FROM {trickle._q(trickle.hot_name(table))} '
+                    f'WHERE "{trickle.F_COL}" <= {trickle._ts(f_cold)}')
+        _set_append_view(con, table, _cold_select(store, table, sidecar, names, f_cold))
+        trickle._set_f_warm(con, table, f_cold)
+        con.execute("COMMIT")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
 
 
 def _compact_threshold(con=None, main=None) -> int:

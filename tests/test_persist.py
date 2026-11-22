@@ -500,7 +500,7 @@ def test_export_keeps_unhydrated_parts_and_prunes_only_below_floor(tmp_path):
     assert len(list((data_dir / "ev").glob("*.parquet"))) == 3
 
     # Simulate partial hydration: the registry loses the f1/f2 rows WITHOUT retention (floor unmoved).
-    con.execute("DELETE FROM ev WHERE id IN (1, 2)")
+    con.execute(f"DELETE FROM {T.hot_name('ev')} WHERE id IN (1, 2)")  # its rows; 'ev' is a view over them
     ParquetDataPlane().export(con, data_dir, f=ts(3))
     assert len(list((data_dir / "ev").glob("*.parquet"))) == 3, \
         "registry absence must NOT prune published parts (partial hydration is not retention)"

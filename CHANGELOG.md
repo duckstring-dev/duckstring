@@ -71,6 +71,21 @@ its Ponds, and code calling an API the new version removed failed only when its 
 - **The Catchment runs the same check** on every deployed Pond when it starts (so after an upgrade), logs what it
   finds and lists it on the Pond's status (`compat`). `pond deploy` reports it as a warning.
 
+### Append tables kept once
+
+A Pond keeps its working copy of its tables in its own DuckDB database and publishes them as Parquet. An append
+table's whole history was in both: after two days of page views, 3.7 GB in the working copy beside 3.2 GB published.
+
+- **A publish moves an append table's older Runs out of the working copy** by the same rule that compacts a merge
+  table: once the Runs still held locally outgrow twice the compaction threshold (`DUCKSTRING_COMPACT_THRESHOLD`,
+  256 MiB by default), the oldest go, leaving about one threshold. They are read from their published files.
+- **Reads are unchanged.** The table's name is now a view over the published files and the rows still held
+  locally, so Ripple SQL, conflict checks (`on_conflict="keep_prior"` and `"fail"`) and recomputes see the whole
+  history. A Pond that rebuilds its working copy brings back only the recent Runs.
+- An existing append table changes to this layout at its next write. The working copy's file doesn't shrink on
+  its own (DuckDB reuses the space); a Rebuild, or deleting an idle Pond's working copy, starts it small.
+- Writing to an append table with your own SQL (`INSERT INTO`) no longer works: write through `append_table`.
+
 ### Fixes
 
 - **A Ripple's error was replaced by "stuck" 30 seconds after its Run gave up.** The Ripples below the failed one
