@@ -362,7 +362,8 @@ whose Source reads (`_source_relation`, `read_delta`, `count_table`, `source_col
 the RemoteSource at the read positions (a delta = the query's change from `since`; trimmed → full read). Copied: the
 query's result written at the point (`write_data`) and each change point's change applied (`apply_change`). A
 Source whose definitions also write data of their own is copied, not live. Run reports are read by name
-(`routes/data._queryable`).
+(`routes/data._queryable`), and served by `GET /api/ponds/{name}/reports` (own reports newest first; with `f`, the
+Run's own and the upstream rows it carried, stamped `_duckstring_f = f`), `runs --reports` and Run Detail's Reports.
 
 **Puddles on a Catchment (2026-11-21, `catchment/puddles.py`, `puddle_build.py`, migration `039`).** A Puddle IS
 the Source line `name@major` on a (dev) Catchment: a `pond` row like a Draw's (`is_draw` + `is_puddle`, version
