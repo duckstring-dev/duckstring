@@ -40,6 +40,9 @@ class FakeCatchment:
             return _Resp({"ponds": [step], "edges": []})
         if url.endswith("/api/runs"):
             return _Resp({"runs": self.runs_after if self.posted else self.runs_before})
+        if url.endswith("/reports"):
+            self.reports_asked = getattr(self, "reports_asked", 0) + 1
+            return _Resp({"reports": [{"f": T1, "reports": {"newest_hour": "05:00", "rows": 12}}]})
         raise AssertionError(url)
 
     def post(self, url, auth=None, **kw):
@@ -157,3 +160,17 @@ def test_runs_shows_a_superseded_run_as_neither_failed_nor_an_error(runner, fake
     result = runner.invoke(app, ["runs", "reports"])
     assert result.exit_code == 0, result.output
     assert "superseded by the Run at 2026-11-15 05:00:10" in result.output and "failed" not in result.output
+
+
+def test_runs_shows_what_each_run_reported(runner, fake):
+    run = _run("reports@1", T1, "success")
+    run["major"] = 1
+    older = _run("reports@1", T0, "success")
+    older["major"] = 1
+    cat = fake([_entry("idle")], [run, older], [])
+    result = runner.invoke(app, ["runs", "reports", "--reports"])
+    assert result.exit_code == 0, result.output
+    assert "newest_hour=05:00, rows=12" in result.output
+    data = json.loads(runner.invoke(app, ["runs", "reports", "--reports", "--json"]).output)
+    assert data[0]["reports"] == {"newest_hour": "05:00", "rows": 12} and data[1]["reports"] is None
+    assert cat.reports_asked == 2  # one request per Pond line, per command

@@ -30,7 +30,7 @@ Shows every Pond's state (running, queued, idle, failed, blocked or killed), fre
 ## `runs`
 
 ```bash
-duckstring runs [POND] [--upstream] [--ripples] [--limit N] [-m N] [--json]
+duckstring runs [POND] [--upstream] [--ripples] [--reports] [--limit N] [-m N] [--json]
 ```
 
 Lists recent Pond Runs, newest first: the Pond and version, the Run's freshness, its status, when it started, how long it took and its error. A Run is `running`, `success`, `failed`, `killed` or `superseded`: a superseded Run never finished because a later Run did its work, and its detail names that Run.
@@ -40,6 +40,7 @@ Lists recent Pond Runs, newest first: the Pond and version, the Run's freshness,
 | `POND` | every Pond | Only this Pond's Runs. |
 | `--upstream` | | With `POND`, also the Runs of the Ponds upstream of it. |
 | `--ripples` | | List each Run's Ripple Runs under it, one row per attempt, with retries and errors. |
+| `--reports` | | Show what each Run reported with [`pond.report()`](../python/pond.md), from [`GET /api/ponds/{name}/reports`](../http_api.md). With `--json`, each Run gains `reports`. |
 | `--limit`, `-n` | `20` | How many Pond Runs, at most 1000. |
 | `--json` | | Print the Runs as JSON, as [`GET /api/runs`](../http_api.md) gives them. Tracebacks are included for a full-access key. |
 

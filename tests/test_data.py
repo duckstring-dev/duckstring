@@ -704,3 +704,53 @@ def test_pages_are_placed_by_file_and_read_only_the_files_they_fall_in(catchment
             page = catchment_client.post("/api/query/page", json={**body, "limit": 3, "offset": offset}).json()
             paged += [r[idx] for r in page["rows"]]
         assert paged == ids
+
+
+def _seed_reports(root, pond, rows_by_run):
+    """Publish a Pond's Run reports as the export does: per Run ``f``, rows ``(pond_key, run_f, {reports})``."""
+    import json
+    from datetime import datetime
+
+    import duckdb
+
+    from duckstring import trickle_io
+    from duckstring.dataplane import ParquetDataPlane
+    from duckstring.reports import PK, REPORTS_TABLE
+
+    data_dir = root / "ponds" / pond / "m1" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    for f_iso, rows in rows_by_run:
+        f = datetime.fromisoformat(f_iso)
+        con.execute("CREATE OR REPLACE TEMP TABLE _r(pond VARCHAR, run_f TIMESTAMPTZ, reports VARCHAR)")
+        con.executemany("INSERT INTO _r VALUES (?, ?, ?)", [(k, datetime.fromisoformat(rf), json.dumps(r))
+                                                            for k, rf, r in rows])
+        trickle_io.append_table(con, REPORTS_TABLE, con.sql("SELECT * FROM _r"), f, PK, on_conflict="keep_prior")
+        ParquetDataPlane().export(con, data_dir, f=f)
+    con.close()
+
+
+def test_a_ponds_run_reports_are_served(catchment_client, tmp_path, monkeypatch):
+    """pond.report() facts were readable only by querying a hidden table by name. The reports route lists a Pond's
+    own reports, newest first, and gives one Run's own report with the upstream ones it read."""
+    t1, t2 = "2026-01-01T01:00:00+00:00", "2026-01-01T02:00:00+00:00"
+    _seed_reports(tmp_path, "p", [
+        (t1, [("p@1", t1, {"rows": 10}), ("src@1", "2026-01-01T00:30:00+00:00", {"newest_hour": "00:00"})]),
+        (t2, [("p@1", t2, {"rows": 12}), ("src@1", "2026-01-01T01:30:00+00:00", {"newest_hour": "01:00"}),
+              ("src@1", "2026-01-01T01:45:00+00:00", {"newest_hour": "01:00"})]),
+    ])
+    out = catchment_client.get("/api/ponds/p/reports").json()
+    assert [(r["f"][:19], r["reports"]) for r in out["reports"]] == [
+        ("2026-01-01T02:00:00", {"rows": 12}), ("2026-01-01T01:00:00", {"rows": 10})]
+    run = catchment_client.get("/api/ponds/p/reports", params={"f": t2}).json()
+    assert run["reports"] == {"rows": 12}
+    assert [(u["pond"], u["f"][:19], u["reports"]) for u in run["upstream"]] == [
+        ("src@1", "2026-01-01T01:30:00", {"newest_hour": "01:00"}),
+        ("src@1", "2026-01-01T01:45:00", {"newest_hour": "01:00"})]
+    assert catchment_client.get("/api/ponds/p/reports", params={"limit": 1}).json()["reports"][0]["reports"] == {"rows": 12}
+    # A Pond that never reported: nothing, not an error.
+    _seed_append_trickle(tmp_path, "q", "events", [("2026-01-01T00:00:00+00:00", [(1, 1.0)])])
+    assert catchment_client.get("/api/ponds/q/reports").json() == {"reports": []}
+    assert catchment_client.get("/api/ponds/q/reports", params={"f": t1}).json() == {
+        "f": t1, "reports": None, "upstream": []}

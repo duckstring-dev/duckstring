@@ -1,5 +1,7 @@
 'use client';
 
+import { useEffect, useState } from 'react';
+import { fetchRunReports, type RunReports } from '@/lib/api';
 import { useLiveStore, parseTs, THEME_AMBER, THEME_DANGER } from '@/lib/store';
 import type { PondRun, RippleRun } from '@/lib/types';
 import { clock, durationOf, STATUS_COLOR } from './RunHistory';
@@ -132,6 +134,40 @@ function Empty() {
   );
 }
 
+const facts = (r: Record<string, unknown>) =>
+  Object.entries(r).map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(', ');
+
+// What the Run reported with pond.report(), and the upstream reports it read. Shown only when there are any.
+function Reports({ run }: { run: PondRun }) {
+  const [got, setGot] = useState<{ key: string; data: RunReports | null } | null>(null);
+  const key = `${run.id}|${run.f}`;
+  useEffect(() => {
+    if (run.status !== 'success') return;
+    let live = true;
+    fetchRunReports(run.id, run.f)
+      .then((data) => live && setGot({ key, data }))
+      .catch(() => live && setGot({ key, data: null }));
+    return () => {
+      live = false;
+    };
+  }, [key, run.id, run.f, run.status]);
+  const data = got?.key === key ? got.data : null;
+  if (!data || (!data.reports && data.upstream.length === 0)) return null;
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div style={{ fontSize: 9, fontWeight: 700, color: '#52525b', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>
+        Reports
+      </div>
+      {data.reports && <div style={{ color: '#d4d4d8', fontSize: 11, wordBreak: 'break-word', marginBottom: 4 }}>{facts(data.reports)}</div>}
+      {data.upstream.map((u) => (
+        <div key={`${u.pond}|${u.f}`} style={{ color: '#a1a1aa', fontSize: 11, wordBreak: 'break-word', padding: '2px 0' }}>
+          <span style={{ color: '#71717a' }}>{u.pond} · {freshness(u.f)}</span> {facts(u.reports)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function RunDetail() {
   const run: PondRun | null = useLiveStore((s) => s.selectedRun);
 
@@ -182,6 +218,8 @@ export function RunDetail() {
               <RippleLine key={`${r.ripple}-${r.retry}`} r={r} isRetry={r.retry > 0} />
             ))
           )}
+
+          <Reports run={run} />
 
           {(() => {
             const errors = runErrors(run);

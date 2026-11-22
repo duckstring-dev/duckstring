@@ -258,6 +258,9 @@ Ripple can now say it, and Duckstring carries it downstream.
 - Reports travel with the published data (a hidden append table, `_duckstring_reports`), so they reach Ponds on
   other Catchments through Ducts and survive a lost registry. A dbt-mode Pond passes its Sources' reports on.
   Nothing in orchestration reads them, and a pipeline that never reports writes nothing.
+- **Reading them:** `GET /api/ponds/{name}/reports` lists a Pond's own reports, newest Run first, or with `f` gives
+  one Run's report and the upstream ones it read. `duckstring runs POND --reports` shows each Run's beside it, and
+  the web UI's Run Detail shows them for the selected Run.
 
 ### Large tables in the web UI
 

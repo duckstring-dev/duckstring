@@ -553,6 +553,42 @@ def table_runs(
         con.close()
 
 
+@router.get("/ponds/{name}/reports", dependencies=[auth.read])
+def pond_reports(
+    name: str, request: Request, f: Optional[str] = None, limit: int = 50,
+    major: Optional[int] = None, version: Optional[str] = None,
+):
+    """A Pond's Run reports (``pond.report()``). Without ``f``: its own reports, newest Run first (at most ``limit``,
+    up to 1000), as ``{reports: [{f, reports}]}``. With ``f``: that Run's own report and the upstream ones it read,
+    as ``{f, reports, upstream: [{pond, f, reports}]}``. A Pond that never reported has none."""
+    import json
+    from datetime import datetime
+
+    from ...reports import REPORTS_TABLE
+    from ...trickle.io import sidecar_tables
+
+    m = _resolve_major(request, name, major, version)
+    own = f"{name}@{m}"
+    if REPORTS_TABLE not in sidecar_tables(_sidecar(request, name, m)):
+        return {"reports": []} if f is None else {"f": f, "reports": None, "upstream": []}
+    con = _open_pond(request, name, m)
+    try:
+        table = f"{_qi(name)}.{_qi(REPORTS_TABLE)}"
+        if f is None:
+            rows = con.execute(f"SELECT run_f, reports FROM {table} WHERE pond = ? ORDER BY run_f DESC LIMIT ?",
+                               [own, max(1, min(limit, 1000))]).fetchall()
+            return {"reports": [{"f": rf.isoformat(), "reports": json.loads(r)} for rf, r in rows]}
+        at = datetime.fromisoformat(f.replace("Z", "+00:00"))
+        mine = con.execute(f"SELECT reports FROM {table} WHERE pond = ? AND run_f = ?", [own, at]).fetchall()
+        # The upstream reports a Run read are the ones it carried: stamped with its freshness.
+        up = con.execute(f"SELECT pond, run_f, reports FROM {table} WHERE pond <> ? AND {_qi(_F)} = ? "
+                         "ORDER BY pond, run_f", [own, at]).fetchall()
+        return {"f": f, "reports": json.loads(mine[0][0]) if mine else None,
+                "upstream": [{"pond": k, "f": rf.isoformat(), "reports": json.loads(r)} for k, rf, r in up]}
+    finally:
+        con.close()
+
+
 class CountRequest(BaseModel):
     pond: str
     major: Optional[int] = None

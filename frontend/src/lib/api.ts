@@ -1081,6 +1081,20 @@ export async function fetchFreshness(pond: string, table: string): Promise<{ fre
   return getJSON(`/ponds/${encodeURIComponent(name)}/tables/${encodeURIComponent(table)}/runs?${params}`);
 }
 
+// What a Run reported with pond.report(): its own facts, and those of the upstream Runs whose data it read.
+export interface RunReports {
+  f: string;
+  reports: Record<string, unknown> | null;
+  upstream: { pond: string; f: string; reports: Record<string, unknown> }[];
+}
+
+export async function fetchRunReports(pond: string, f: string): Promise<RunReports> {
+  const { name, major } = splitPond(pond);
+  const params = new URLSearchParams({ f });
+  if (major !== undefined) params.set('major', String(major));
+  return getJSON(`/ponds/${encodeURIComponent(name)}/reports?${params}`);
+}
+
 // The full changelog history of one record (merge Trickle), for the per-row history view.
 export async function fetchHistory(pond: string, table: string, pk: Record<string, unknown>): Promise<PageResult> {
   const { name, major } = splitPond(pond);

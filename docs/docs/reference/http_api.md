@@ -96,6 +96,7 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | GET | `/api/lineage` | read | Observed table lineage. Parameters: `pond`, `major`, `table`, `columns`. |
 | GET | `/api/ponds/{name}/trace` | read | The run that produced some rows. Parameters: `table`, `where`. |
 | GET | `/api/ponds/{name}/freshness` | read, Tap | How fresh the Pond's data is: `freshness` (the point in time it reflects), `changed` (when its output last changed), `refreshing`, and when each table and Object last changed. Read-level keys see exposed tables only; a Tap's key, its own Pond's, without Objects. |
+| GET | `/api/ponds/{name}/reports` | read | The Pond's Run reports from `pond.report()`: its own, newest Run first (`limit`, default 50); with `f`, that Run's own report and the upstream reports it read. |
 
 ### Refreshes and windows
 
