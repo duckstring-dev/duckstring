@@ -267,7 +267,8 @@ with 246M rows changed since its last compaction, each page took 30 seconds to 3
 - **An append table is shown newest run first.**
 - **Sorting a table of more than 100M rows asks first,** since a sort reads all of it.
 - **The web UI on a phone:** the data viewer's top row wraps, keeping its close button and row count on screen, and
-  held landscape, the run panels fold behind a bar so the graph has the screen.
+  held landscape, the run panels fold behind a bar and the sidebar into a strip (opening when you select a Pond),
+  so the graph has the screen.
 - **The web UI is served with caching headers,** so a browser picks up a new UI on its next load. Without them a
   phone kept the old one after an upgrade.
 - **A query consolidates a merge table once per published version** of it, where every query did it twice (and

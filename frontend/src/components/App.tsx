@@ -384,7 +384,7 @@ export function App() {
             <DagCanvas />
           </div>
         </ReactFlowProvider>
-        <Sidebar mobile={isMobile} />
+        <Sidebar mobile={isMobile} short={isShort && !isMobile} />
       </div>
       {isMobile ? (
         <MobileRunsPanel />
