@@ -988,11 +988,12 @@ function splitPond(pond: string): { name: string; major: number | undefined } {
   return { name: at === -1 ? pond : pond.slice(0, at), major: at === -1 ? undefined : Number(pond.slice(at + 1)) };
 }
 
-async function postData<T>(path: string, body: object): Promise<T> {
+async function postData<T>(path: string, body: object, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${apiBase()}${path}`, {
     method: 'POST',
     headers: authHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(body),
+    signal,
   });
   if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `${path} → ${res.status}`);
@@ -1102,16 +1103,28 @@ export async function fetchHistory(pond: string, table: string, pk: Record<strin
 }
 
 // Total rows of a query — sizes the viewer's virtual scroll.
-export async function fetchCount(q: DataQuery): Promise<number> {
-  return postData<{ count: number }>('/query/count', queryBody(q)).then((d) => d.count);
+// A request of the data viewer's: ``queryId`` names it so /query/cancel can interrupt it on the Catchment, and
+// ``signal`` aborts it here.
+export interface Cancellable {
+  queryId?: string;
+  signal?: AbortSignal;
+}
+export async function fetchCount(q: DataQuery, c: Cancellable = {}): Promise<number> {
+  return postData<{ count: number }>('/query/count', { ...queryBody(q), query_id: c.queryId }, c.signal)
+    .then((d) => d.count);
+}
+// Stop the data viewer's query ``queryId`` on the Catchment (interrupt it, or refuse it if it hasn't started).
+export async function cancelQuery(queryId: string): Promise<void> {
+  await postData('/query/cancel', { query_id: queryId });
 }
 
 // A windowed read [offset, offset+limit) for the virtual grid. The server wraps the query in a subquery
 // with LIMIT/OFFSET; a static Parquet scan is deterministic, so windows are stable.
-export async function fetchPage(q: DataQuery & { limit: number; offset: number }): Promise<PageResult> {
+export async function fetchPage(q: DataQuery & { limit: number; offset: number }, c: Cancellable = {}): Promise<PageResult> {
   return postData<PageResult>('/query/page', {
     ...queryBody(q), order_by: q.orderBy, order_desc: q.orderDesc, limit: q.limit, offset: q.offset,
-  });
+    query_id: c.queryId,
+  }, c.signal);
 }
 
 export function fetchWindows(pond: string): Promise<RawWindow[]> {

@@ -754,3 +754,32 @@ def test_a_ponds_run_reports_are_served(catchment_client, tmp_path, monkeypatch)
     assert catchment_client.get("/api/ponds/q/reports").json() == {"reports": []}
     assert catchment_client.get("/api/ponds/q/reports", params={"f": t1}).json() == {
         "f": t1, "reports": None, "upstream": []}
+
+
+@pytest.mark.timeout(30)
+def test_a_running_query_can_be_cancelled(catchment_client, tmp_path, monkeypatch):
+    """A long query in the data viewer can be stopped: its requests carry an id, and cancelling the id interrupts
+    the DuckDB query, which answers at once with an error saying so. A cancel that arrives first stops it too."""
+    import threading
+    import time
+
+    slow = "SELECT sum(range * 2) FROM range(10000000000000)"
+    for qid, path, body in (("q1", "/api/query/page", {"limit": 10}), ("q2", "/api/query/count", {})):
+        out = {}
+
+        def run(path=path, body=body, out=out, qid=qid):
+            out["r"] = catchment_client.post(path, json={"pond": "p", "sql": slow, "query_id": qid, **body})
+
+        t = threading.Thread(target=run)
+        started = time.time()
+        t.start()
+        time.sleep(0.5)
+        assert t.is_alive(), out.get("r") and out["r"].text  # still running
+        assert catchment_client.post("/api/query/cancel", json={"query_id": qid}).json() == {"cancelled": True}
+        t.join(10)
+        assert not t.is_alive() and time.time() - started < 8
+        assert out["r"].status_code == 400 and "cancelled" in out["r"].json()["detail"].lower()
+    # Cancelled before it started (the count and the page race the cancel): refused on arrival.
+    assert catchment_client.post("/api/query/cancel", json={"query_id": "q3"}).json() == {"cancelled": False}
+    r = catchment_client.post("/api/query/page", json={"pond": "p", "sql": slow, "query_id": "q3", "limit": 10})
+    assert r.status_code == 400 and "cancelled" in r.json()["detail"].lower()

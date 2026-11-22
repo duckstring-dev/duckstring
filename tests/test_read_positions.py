@@ -11,6 +11,7 @@ import random
 from datetime import datetime, timedelta, timezone
 
 import duckdb
+import pytest
 
 from duckstring import trickle_io as T
 from duckstring.core import Pond
@@ -170,6 +171,7 @@ def test_where_a_sinks_changes_start(tmp_path):
     assert pond(ts(4), {"a": ts(3)})._position("a") == ts(5)  # no position: this Run's freshness
 
 
+@pytest.mark.timeout(20)  # a randomised simulation: about 5 s, more on a busy machine
 def test_sink_runs_at_random_positions_match_a_recompute(tmp_path):
     """Sources change and Sink Runs are dispatched in random orders: each Sink Run is stamped with the oldest of
     its Sources' freshness and reads each at its position. The builder's append, merge and aggregate outputs

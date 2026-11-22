@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLiveStore, atLeast, THEME_BLOCKED, THEME_BRAND, THEME_SUCCESS } from '@/lib/store';
 import {
-  fetchTables, fetchFreshness, fetchHistory, fetchCount, fetchPage, fetchObjects, downloadObject,
+  fetchTables, fetchFreshness, fetchHistory, fetchCount, fetchPage, cancelQuery, fetchObjects, downloadObject,
   deleteTable, deleteObject, fetchCatalog, promoteServe, exposeTable,
   type DataQuery, type TableInfo, type TrickleMode, type PageResult, type ObjectInfo,
   type Catalog, type CatalogTable, UnauthorizedError,
@@ -382,6 +382,7 @@ function DataViewer({
   const [mode, setMode] = useState<'browse' | 'query'>('browse');
   const [sqlText, setSqlText] = useState('');
   const [activeSql, setActiveSql] = useState('');
+  const [runSeq, setRunSeq] = useState(0); // bumps on Run, so the same SQL runs again (after a cancel, say)
   const [expanded, setExpanded] = useState(false);
   const [total, setTotal] = useState<number | null>(null);
   const [tablesError, setTablesError] = useState<string | null>(null);
@@ -531,6 +532,7 @@ function DataViewer({
   const runQuery = () => {
     if (!sqlText.trim()) return;
     setActiveSql(sqlText);
+    setRunSeq((n) => n + 1);
     setMode('query');
     setTotal(null);
     setSort({ col: null, desc: false });
@@ -554,7 +556,7 @@ function DataViewer({
         : null;
   if (query && sort.col) query = { ...query, orderBy: sort.col, orderDesc: sort.desc };
   const queryKey =
-    (mode === 'query' ? `sql:${activeSql}` : `tbl:${table}:${trickle}:${fLo}:${fHi}`) + `:${sort.col}:${sort.desc}`;
+    (mode === 'query' ? `sql:${activeSql}` : `tbl:${table}:${trickle}:${fLo}:${fHi}`) + `:${sort.col}:${sort.desc}:${runSeq}`;
 
   const canPromote = canManage && servedMajor != null && major !== servedMajor;
 
@@ -710,7 +712,8 @@ function DataViewer({
             This Pond has no {canManage ? 'exported' : 'serviceable'} tables.{hasObjects ? ' See the Objects tab.' : ''}
           </div>
         ) : (
-          <VirtualGrid key={queryKey} query={query} onTotal={setTotal} onRowClick={setHistoryPk} sort={sort} onSort={cycleSort} />
+          <VirtualGrid key={queryKey} query={query} onTotal={setTotal} onRowClick={setHistoryPk} sort={sort} onSort={cycleSort}
+                       onRetry={() => setRunSeq((n) => n + 1)} />
         )}
       </div>
 
@@ -925,14 +928,17 @@ function FreshnessWindow({
 
 // ─── Virtual grid ──────────────────────────────────────────────────────────────
 
+const SLOW_MS = 1000; // a request in flight this long offers Cancel
+
 function VirtualGrid({
-  query, onTotal, onRowClick, sort, onSort,
+  query, onTotal, onRowClick, sort, onSort, onRetry,
 }: {
   query: DataQuery;
   onTotal: (n: number) => void;
   onRowClick: (pk: Record<string, unknown>) => void;
   sort: { col: string | null; desc: boolean };
   onSort: (col: string) => void;
+  onRetry: () => void;
 }) {
   const [total, setTotal] = useState<number | null>(null);
   const [columns, setColumns] = useState<string[]>([]);
@@ -945,6 +951,31 @@ function VirtualGrid({
   const queued = useRef<number | null>(null);
   const loaded = useRef({ start: 0, end: 0 });
   const fetchWindowRef = useRef<(start: number) => void>(() => {});
+  // Requests in flight (id → abort), so a slow one can be cancelled here and on the Catchment.
+  const pending = useRef(new Map<string, AbortController>());
+  const [slow, setSlow] = useState(false);
+  const [cancelled, setCancelled] = useState(false);
+  const cancelledRef = useRef(false);
+  const tracked = useCallback(<T,>(run: (c: { queryId: string; signal: AbortSignal }) => Promise<T>): Promise<T> => {
+    // Not crypto.randomUUID: it exists only in a secure context, and a phone on the LAN reaches the UI over http.
+    const queryId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+    const ctl = new AbortController();
+    pending.current.set(queryId, ctl);
+    const timer = setTimeout(() => setSlow(pending.current.size > 0), SLOW_MS);
+    return run({ queryId, signal: ctl.signal }).finally(() => {
+      clearTimeout(timer);
+      pending.current.delete(queryId);
+      if (pending.current.size === 0) setSlow(false);
+    });
+  }, []);
+  const cancel = () => {
+    cancelledRef.current = true;
+    setCancelled(true);
+    for (const [id, ctl] of pending.current) {
+      void cancelQuery(id).catch(() => {});
+      ctl.abort();
+    }
+  };
 
   const fetchWindow = useCallback(
     async (start: number) => {
@@ -957,14 +988,14 @@ function VirtualGrid({
       }
       inFlight.current = true;
       try {
-        const res = await fetchPage({ ...query, limit: CHUNK, offset: start });
+        const res = await tracked((c) => fetchPage({ ...query, limit: CHUNK, offset: start }, c));
         setColumns((prev) => (res.columns.length ? res.columns : prev));
         setRows(res.rows);
         setWindowStart(start);
         loaded.current = { start, end: start + res.rows.length };
       } catch (e) {
         on401(e);
-        setError(e instanceof Error ? e.message : String(e));
+        if (!cancelledRef.current) setError(e instanceof Error ? e.message : String(e));
       } finally {
         inFlight.current = false;
         // Land the most recent window scrolled to while this request was in flight.
@@ -973,7 +1004,7 @@ function VirtualGrid({
         if (next !== null && next !== loaded.current.start) void fetchWindowRef.current(next);
       }
     },
-    [query]
+    [query, tracked]
   );
   useEffect(() => {
     fetchWindowRef.current = fetchWindow;
@@ -984,12 +1015,12 @@ function VirtualGrid({
       try {
         // Always fetch the first window — the count only *sizes* the scroll; gating the page on it would
         // let a 0/stale count silently hide real rows (and suppress the /page request entirely).
-        const [c] = await Promise.all([fetchCount(query), fetchWindow(0)]);
+        const [c] = await Promise.all([tracked((cc) => fetchCount(query, cc)), fetchWindow(0)]);
         setTotal(c);
         onTotal(c);
       } catch (e) {
         on401(e);
-        setError(e instanceof Error ? e.message : String(e));
+        if (!cancelledRef.current) setError(e instanceof Error ? e.message : String(e));
       } finally {
         setLoading(false);
       }
@@ -1016,8 +1047,23 @@ function VirtualGrid({
     }
   };
 
+  const button = { background: 'transparent', border: '1px solid #3f3f46', borderRadius: 5, color: '#e4e4e7',
+    fontSize: 11.5, fontWeight: 700, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit' } as const;
+  if (cancelled) {
+    return (
+      <div style={{ padding: 16, color: '#a1a1aa', fontSize: 12.5, display: 'flex', alignItems: 'center', gap: 12 }}>
+        Query cancelled. <button onClick={onRetry} style={button}>Run again</button>
+      </div>
+    );
+  }
+  const running = slow && (
+    <div style={{ position: 'sticky', top: 0, zIndex: 2, display: 'flex', alignItems: 'center', gap: 12, padding: '6px 14px',
+      background: '#18181b', borderBottom: '1px solid #27272a', color: '#a1a1aa', fontSize: 12 }}>
+      Running… <button onClick={cancel} style={button}>Cancel</button>
+    </div>
+  );
   if (error) return <div style={{ padding: 16, color: '#ef4444', fontSize: 12.5, whiteSpace: 'pre-wrap' }}>{error}</div>;
-  if (loading) return <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>Loading…</div>;
+  if (loading) return running || <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>Loading…</div>;
   if (rows.length === 0 || columns.length === 0) return <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>No rows.</div>;
 
   // Hide the active-flag column; it drives row colour instead. Merge rows are clickable (→ history).
@@ -1035,6 +1081,7 @@ function VirtualGrid({
 
   return (
     <div ref={scrollRef} onScroll={onScroll} style={{ height: '100%', overflow: 'auto' }}>
+      {running}
       <table style={{ tableLayout: 'fixed', borderCollapse: 'collapse', width: tableWidth, fontSize: 12, color: '#d4d4d8' }}>
         <colgroup>
           <col style={{ width: NUM_W }} />

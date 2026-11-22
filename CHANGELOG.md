@@ -275,6 +275,8 @@ with 246M rows changed since its last compaction, each page took 30 seconds to 3
 - **A page is found by file:** each file's row count (from its footer) places the page, and only the file or
   two it falls in are read. A page 400M rows into a 1B-row table took 23 s; it takes 0.01 s.
 - **Sorting a table of more than 100M rows asks first,** since a sort reads all of it.
+- **A long query can be cancelled.** After a second, the viewer offers Cancel, which stops the query on the
+  Catchment as well (`POST /api/query/cancel`).
 - **The web UI on a phone:** the data viewer's top row wraps, keeping its close button and row count on screen, and
   held landscape, the run panels fold behind a bar and the sidebar into a strip (opening when you select a Pond),
   so the graph has the screen.

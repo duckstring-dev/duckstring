@@ -374,25 +374,32 @@ def _json_safe(v):
     return str(v)
 
 
-def serving_count(driver, sql: str, *, sandboxed: bool = True) -> int:
-    """Total rows of a cross-pond serving query — sizes the data viewer's virtual scroll."""
+def serving_count(driver, sql: str, *, sandboxed: bool = True, track=None) -> int:
+    """Total rows of a cross-pond serving query — sizes the data viewer's virtual scroll. ``track(cursor)``, when
+    given, is a context manager the query runs inside (the data viewer's cancel)."""
+    from contextlib import nullcontext
+
     inner = sql.strip().rstrip(";")
     cur = _cache(driver).connection(driver, sandboxed=sandboxed, sql=inner).cursor()
-    (n,) = first_row(cur.execute(f"SELECT count(*) FROM ({inner}) AS _ds_count"))
+    with track(cur) if track else nullcontext():
+        (n,) = first_row(cur.execute(f"SELECT count(*) FROM ({inner}) AS _ds_count"))
     return int(n)
 
 
 def serving_page(driver, sql: str, *, sandboxed: bool = True, limit: int = 200, offset: int = 0,
-                 order_by: str | None = None, order_desc: bool = False) -> dict:
+                 order_by: str | None = None, order_desc: bool = False, track=None) -> dict:
     """A paged read of a cross-pond serving query (the data viewer's query mode): wraps the SQL with an
     optional ORDER BY + LIMIT/OFFSET and returns {columns, rows, has_more}. One row beyond the page is
     fetched to flag ``has_more`` without a separate count."""
     inner = sql.strip().rstrip(";")
     order = f" ORDER BY {_qi(order_by)} {'DESC' if order_desc else 'ASC'}" if order_by else ""
+    from contextlib import nullcontext
+
     cur = _cache(driver).connection(driver, sandboxed=sandboxed, sql=inner).cursor()
-    rel = cur.execute(f"SELECT * FROM ({inner}) AS _ds_page{order} LIMIT {limit + 1} OFFSET {offset}")
-    cols = [d[0] for d in rel.description] if rel.description else []
-    fetched = rel.fetchall()
+    with track(cur) if track else nullcontext():
+        rel = cur.execute(f"SELECT * FROM ({inner}) AS _ds_page{order} LIMIT {limit + 1} OFFSET {offset}")
+        cols = [d[0] for d in rel.description] if rel.description else []
+        fetched = rel.fetchall()
     has_more = len(fetched) > limit
     rows = [[_json_safe(c) for c in row] for row in fetched[:limit]]
     return {"columns": cols, "rows": rows, "has_more": has_more}

@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import io
 import tempfile
+import threading
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -589,6 +591,68 @@ def pond_reports(
         con.close()
 
 
+# ── cancelling a running query ──────────────────────────────────────────────────────────────────────────────
+#
+# The data viewer names each count and page request (``query_id``, the same for the count and pages of one query) so
+# a person can stop a long one: ``POST /query/cancel`` interrupts the DuckDB connections running it. A cancel that
+# arrives before the query starts (the count and the page race it) is remembered, briefly, and refuses it.
+
+_running: dict[str, list] = {}
+_cancelled: dict[str, float] = {}
+_running_lock = threading.Lock()
+_CANCEL_KEEP_S = 60.0
+CANCELLED = "Query cancelled"
+
+
+@contextmanager
+def _tracked(query_id: Optional[str], con):
+    """Run a query on ``con`` under ``query_id`` (``None``: untracked), so a cancel can interrupt it."""
+    import time
+
+    if not query_id:
+        yield
+        return
+    with _running_lock:
+        now = time.monotonic()
+        for qid in [q for q, at in _cancelled.items() if now - at > _CANCEL_KEEP_S]:
+            del _cancelled[qid]
+        if query_id in _cancelled:
+            raise HTTPException(status_code=400, detail=CANCELLED)
+        _running.setdefault(query_id, []).append(con)
+    try:
+        yield
+    except duckdb.InterruptException as exc:
+        raise HTTPException(status_code=400, detail=CANCELLED) from exc
+    finally:
+        with _running_lock:
+            cons = _running.get(query_id, [])
+            if con in cons:
+                cons.remove(con)
+            if not cons:
+                _running.pop(query_id, None)
+
+
+class CancelRequest(BaseModel):
+    query_id: str
+
+
+@router.post("/query/cancel", dependencies=[auth.read])
+def cancel_query(body: CancelRequest):
+    """Stop the data viewer's query ``query_id``: interrupt it where it runs, and refuse it if it hasn't started.
+    ``cancelled`` says whether anything was running."""
+    import time
+
+    with _running_lock:
+        cons = list(_running.get(body.query_id, []))
+        _cancelled[body.query_id] = time.monotonic()
+    for con in cons:
+        try:
+            con.interrupt()
+        except Exception:  # noqa: BLE001 — it finished as the cancel arrived
+            pass
+    return {"cancelled": bool(cons)}
+
+
 class CountRequest(BaseModel):
     pond: str
     major: Optional[int] = None
@@ -600,6 +664,7 @@ class CountRequest(BaseModel):
     pk: Optional[list] = None
     f_lo: Optional[str] = None  # inclusive lower freshness bound (ISO), or None = unbounded
     f_hi: Optional[str] = None  # inclusive upper freshness bound (ISO), or None = unbounded
+    query_id: Optional[str] = None  # names the query so it can be cancelled (``/query/cancel``)
 
 
 def _merge_f_base(request: Request, body, major: int):
@@ -662,19 +727,25 @@ def query_count(body: CountRequest, request: Request,
         from ..serving import serving_count
 
         try:
-            return {"count": serving_count(request.app.state.driver, body.sql, sandboxed=not full)}
+            return {"count": serving_count(request.app.state.driver, body.sql, sandboxed=not full,
+                                           track=lambda cur: _tracked(body.query_id, cur))}
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     m = _resolve_major(request, body.pond, body.major, body.version)
     _require_serviceable(request, body.pond, m, body.table, full)
     con = _open_pond(request, body.pond, m)
     try:
-        log = _log(request, body, m)
-        if log is not None:  # its files' row counts: footers, and a count where a file is filtered
-            return {"count": log.count(con)}
-        base = _base_sql(body, f_base=_merge_f_base(request, body, m))
-        (count,) = first_row(con.execute(f"SELECT COUNT(*) FROM ({base}) AS _ds_count"))
-        return {"count": count}
+        with _tracked(body.query_id, con):
+            log = _log(request, body, m)
+            if log is not None:  # its files' row counts: footers, and a count where a file is filtered
+                return {"count": log.count(con)}
+            base = _base_sql(body, f_base=_merge_f_base(request, body, m))
+            (count,) = first_row(con.execute(f"SELECT COUNT(*) FROM ({base}) AS _ds_count"))
+            return {"count": count}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
@@ -695,6 +766,7 @@ class PageRequest(BaseModel):
     order_desc: bool = False
     limit: int = 200
     offset: int = 0
+    query_id: Optional[str] = None  # names the query so it can be cancelled (``/query/cancel``)
 
 
 def _json_safe(v):
@@ -725,7 +797,10 @@ def query_page(body: PageRequest, request: Request,
 
         try:
             return serving_page(request.app.state.driver, body.sql, sandboxed=not full,
-                                limit=limit, offset=offset, order_by=body.order_by, order_desc=body.order_desc)
+                                limit=limit, offset=offset, order_by=body.order_by, order_desc=body.order_desc,
+                                track=lambda cur: _tracked(body.query_id, cur))
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     m = _resolve_major(request, body.pond, body.major, body.version)
@@ -750,11 +825,12 @@ def query_page(body: PageRequest, request: Request,
     con = None
     try:
         con = _open_pond(request, body.pond, m)
-        log = _log(request, body, m)
-        if log is not None:
-            return _page(log.page(con, offset, limit + 1, order_by=body.order_by, desc=body.order_desc))
-        base = _base_sql(body, f_base=_merge_f_base(request, body, m))
-        return _page(con.execute(f"SELECT * FROM ({base}) AS _ds_page{order} LIMIT {limit + 1} OFFSET {offset}"))
+        with _tracked(body.query_id, con):
+            log = _log(request, body, m)
+            if log is not None:
+                return _page(log.page(con, offset, limit + 1, order_by=body.order_by, desc=body.order_desc))
+            base = _base_sql(body, f_base=_merge_f_base(request, body, m))
+            return _page(con.execute(f"SELECT * FROM ({base}) AS _ds_page{order} LIMIT {limit + 1} OFFSET {offset}"))
     except HTTPException:
         raise
     except Exception as exc:
