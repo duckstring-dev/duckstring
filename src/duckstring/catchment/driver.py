@@ -1531,7 +1531,7 @@ class Driver(TapsMixin, PuddlesMixin):
         with self.lock:
             now = _now()
             if self._repair is not None:
-                retried = self._retry_stalled_repair(now)
+                retried = self._retry_failed_repair_steps(now)
                 if retried:
                     return {"scope": _topo_order(self._repair["scope"], self._repair["parents"]),
                             "downstream": downstream, "retried": retried}
@@ -1581,16 +1581,15 @@ class Driver(TapsMixin, PuddlesMixin):
                 self.state.pond_states[k].is_failed = False
             self._start_repair(scope, _now())
 
-    def _retry_stalled_repair(self, now: datetime) -> list[str]:
-        """The repair in progress has stalled when every step it released and hasn't finished has failed (or been
-        killed): nothing would ever release the rest. Release those steps again and return them (``[]`` when the
-        repair is still making progress). Before, a failed step left the repair in progress for good, its scope
-        waiting as repairing and every other repair refused (the attention showcase, 2026-11-22: a Rebuild that ran
-        out of disk)."""
+    def _retry_failed_repair_steps(self, now: datetime) -> list[str]:
+        """Release again the steps of the repair in progress that failed (or were killed), and return them (``[]``
+        when none has: the repair is making progress). Steps still running carry on. Before, a failed step left the
+        repair in progress for good, its scope waiting as repairing and every other repair refused (the attention
+        showcase, 2026-11-22: a Rebuild that ran out of disk)."""
         r = self._repair
-        waiting = [k for k in r["released"] - r["done"]]
-        stuck = [k for k in waiting if self.state.pond_states[k].is_failed or self.state.pond_states[k].is_killed]
-        if not stuck or len(stuck) < len(waiting):
+        stuck = [k for k in r["released"] - r["done"]
+                 if self.state.pond_states[k].is_failed or self.state.pond_states[k].is_killed]
+        if not stuck:
             return []
         for k in sorted(stuck):
             self.state = clear_pond(self.state, k, now)
