@@ -255,11 +255,37 @@ def build_serving_con(driver, *, sandboxed: bool, tap=None, merges: list | None 
                         if tap is not None:  # one Pond: its tables by bare name too
                             con.execute(f"CREATE VIEW main.{_qi(t)} AS SELECT * FROM {_qi(schema)}.{_qi(t)}")
 
+    if tap is None:
+        _attach_records(driver, con)
+
     if sandboxed:
         con.execute(f"SET memory_limit='{DEFAULT_MEMORY_LIMIT}'")
         con.execute("SET enable_external_access=false")  # block read_parquet/read_csv/httpfs
         con.execute("SET lock_configuration=true")        # freeze it LAST so the user can't re-enable
     return con
+
+
+RECORDS_CATALOG = "records"
+
+
+def _attach_records(driver, con) -> None:
+    """Apps' Records as the catalog ``records`` (``records.feedback_v1.ratings``; plans/records-and-media.md),
+    attached read-only as the reader role before any sandbox locks the connection (the attached database keeps
+    answering after it). Everything authenticated to the Catchment reads every line's Records. Left out when no
+    line holds Records or PostgreSQL can't be reached."""
+    records = getattr(driver, "records", None)
+    if records is None:
+        return
+    try:
+        if not records.in_use():
+            return
+        url = records.reader_url()
+        con.execute("INSTALL postgres; LOAD postgres")
+        con.execute(f"ATTACH '{url}' AS {RECORDS_CATALOG} (TYPE postgres, READ_ONLY)")
+    except Exception as e:
+        import logging
+
+        logging.getLogger("duckstring.serving").warning("Records left out of the serving catalog: %s", e)
 
 
 def _relation_exists(con, schema: str, table: str) -> bool:

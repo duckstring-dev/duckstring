@@ -2733,6 +2733,10 @@ class Driver(TapsMixin, PuddlesMixin):
         """Record that the App line ``name@major`` holds Records or Media (plans/records-and-media.md): kept, with
         its state, until the data is purged, whatever happens to the line itself."""
         with self.lock:
+            before = self.db.execute("SELECT records, media FROM app_data WHERE name = ? AND major = ?",
+                                     (name, int(major))).fetchone()
+            if before is None or (records and not before[0]) or (media and not before[1]):
+                self.data_version += 1  # the serving catalog gains the line's Records
             self.db.execute(
                 "INSERT INTO app_data (name, major, records, media, created_at) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(name, major) DO UPDATE SET records = max(records, excluded.records), "

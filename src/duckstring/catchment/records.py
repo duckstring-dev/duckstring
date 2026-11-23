@@ -565,6 +565,27 @@ class Records:
     def reader_url(self, host: str | None = None, start: bool = True) -> str:
         return self.url(PONDS, host, start=start)
 
+    def tables(self, schemas: list[str]) -> dict[str, list[dict]]:
+        """Each schema's tables and views, ``{schema: [{table, kind, rows}]}``; ``rows`` is PostgreSQL's estimate
+        (``reltuples``, -1 before a table is first analysed, shown as unknown)."""
+        if not schemas:
+            return {}
+        names = ", ".join(_sql_literal(s) for s in schemas)
+        out = self.psql(f"""
+            SELECT n.nspname, c.relname, c.relkind, c.reltuples::bigint FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname IN ({names}) AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+            ORDER BY n.nspname, c.relname""")
+        found: dict[str, list[dict]] = {s: [] for s in schemas}
+        kinds = {"r": "table", "p": "table", "v": "view", "m": "view", "f": "table"}
+        for line in out.splitlines():
+            if not line.strip():
+                continue
+            schema, table, kind, rows = line.split("|")
+            found.setdefault(schema, []).append({"table": table, "kind": kinds.get(kind, "table"),
+                                                 "rows": int(rows) if int(rows) >= 0 else None})
+        return found
+
     def status(self) -> dict:
         out = {"target": "managed" if self.managed else "external", "running": False,
                "memory": self.memory if self.managed else None, "listen": self.listen if self.managed else None}

@@ -278,3 +278,62 @@ def test_an_app_writes_records_a_pond_reads_them_and_the_app_reads_its_output(ru
     assert _wait(lambda: httpx.get(f"{url}/apps/feedback/v1/summary", timeout=30.0).json().get("n") == 3,
                  timeout=30), httpx.get(f"{url}/apps/feedback/v1/summary", timeout=30.0).json()
     assert httpx.get(f"{url}/apps/feedback/v1/summary", timeout=30.0).json() == {"n": 3, "total": 11}
+
+
+def test_the_viewer_lists_lines_queries_records_and_manages_media(catchment_client):
+    client = catchment_client
+    r = _deploy(client, "feedback", {"pond.toml": _toml("feedback"), "main.py": _APP_PY})
+    assert r.status_code == 200, r.text
+    assert client.post("/apps/feedback/v1/rate/4").json() == {"ok": True}
+
+    listed = client.get("/api/app-data").json()
+    (line,) = listed["lines"]
+    assert (line["name"], line["major"], line["schema"], line["state"]) == ("feedback", 1, "feedback_v1", "live")
+    assert [t["table"] for t in line["tables"]] == ["ratings"]
+    assert line["usage"] == {"files": 1, "bytes": len("rated 4")}
+
+    # Records are the catalog `records`, read-only, beside Pond tables.
+    got = client.post("/api/serve/query", json={"sql": "SELECT sum(score) AS s FROM records.feedback_v1.ratings"})
+    assert got.status_code == 200, got.text
+    assert got.json()["columns"] == ["s"] and got.json()["rows"] == [[4]]
+    refused = client.post("/api/serve/query", json={"sql": "INSERT INTO records.feedback_v1.ratings VALUES (1)"})
+    assert refused.status_code >= 400
+
+    # Media: list, download, upload (a multipart form, as the viewer sends), delete.
+    assert [f["path"] for f in client.get("/api/app-data/feedback/1/media").json()["files"]] == ["uploads/note.txt"]
+    down = client.get("/api/app-data/feedback/1/media/file", params={"path": "uploads/note.txt"})
+    assert down.content == b"rated 4" and "note.txt" in down.headers["content-disposition"]
+    up = client.post("/api/app-data/feedback/1/media/file", params={"path": "docs/guide.pdf"},
+                     files={"file": ("guide.pdf", b"%PDF-1.7 tiny", "application/pdf")})
+    assert up.json() == {"path": "docs/guide.pdf", "size": 13}
+    assert client.get("/apps/feedback/v1/total").json()["files"] == ["docs/guide.pdf", "uploads/note.txt"]
+    raw = client.post("/api/app-data/feedback/1/media/file", params={"path": "raw.bin"}, content=b"\x00\x01")
+    assert raw.json()["size"] == 2
+    assert client.delete("/api/app-data/feedback/1/media/file", params={"path": "raw.bin"}).status_code == 200
+    assert client.delete("/api/app-data/feedback/1/media/file", params={"path": "raw.bin"}).status_code == 404
+    bad = client.post("/api/app-data/feedback/1/media/file", params={"path": "../escape"}, content=b"x")
+    assert bad.status_code == 422
+    assert client.get("/api/app-data/nothing/1/media").status_code == 404
+
+
+def test_media_uploads_need_manage_access(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from duckstring.catchment.app import create_app
+    from duckstring.catchment.auth import generate
+
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        keys = generate(app.state.driver.db)
+        full = {"Authorization": f"Bearer {keys['full']}"}
+        read = {"Authorization": f"Bearer {keys['read']}"}
+        r = _deploy(client, "feedback", {"pond.toml": _toml("feedback", extra="media = true\n"), "main.py": _APP_PY},
+                    headers=full)
+        assert r.status_code == 200, r.text
+        client.app.state.driver.note_app_data("feedback", 1, media=True)
+        client.app.state.driver.media.ensure_line("feedback", 1)
+        assert client.get("/api/app-data/feedback/1/media", headers=read).status_code == 200
+        assert client.post("/api/app-data/feedback/1/media/file", params={"path": "a.txt"}, content=b"x",
+                           headers=read).status_code == 403
+        assert client.post("/api/app-data/feedback/1/media/file", params={"path": "a.txt"}, content=b"x",
+                           headers=full).status_code == 200

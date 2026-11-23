@@ -69,3 +69,140 @@ def put_media(request: Request, body: _MediaBody):
     except MediaError as e:
         raise HTTPException(status_code=422, detail=str(e)) from None
     return {"target": media.target, "in_use": media.in_use()}
+
+
+# ─── App lines' data (the viewer and the catalog) ─────────────────────────────────
+
+
+@router.get("/app-data", dependencies=[auth.read])
+async def list_app_data(request: Request):
+    """Every App line holding Records or Media, with its state, its Records tables (``records.{name}_v{major}``
+    in the query catalog) and its Media's file count and size."""
+    driver = request.app.state.driver
+    lines = driver.app_data()
+    records, media = _records(request), _media(request)
+    schemas = [f"{d['name']}_v{d['major']}" for d in lines if d["records"]]
+    tables: dict = {}
+    error = None
+    if schemas:
+        try:
+            tables = await asyncio.to_thread(records.tables, schemas)
+        except Exception as e:  # PostgreSQL unreachable: still list the lines
+            error = str(e)
+
+    def usage(d):
+        try:
+            files = media.list(d["name"], d["major"])
+        except Exception:
+            return None
+        return {"files": len(files), "bytes": sum(f["size"] for f in files)}
+
+    out = []
+    for d in lines:
+        entry = {**d, "schema": f"{d['name']}_v{d['major']}"}
+        if d["records"]:
+            entry["tables"] = tables.get(entry["schema"], [])
+        if d["media"]:
+            entry["usage"] = await asyncio.to_thread(usage, d)
+        out.append(entry)
+    return {"lines": out, "records_error": error, "catalog": "records"}
+
+
+def _line(request: Request, name: str, major: int) -> dict:
+    found = next((d for d in request.app.state.driver.app_data(name) if d["major"] == major), None)
+    if found is None:
+        raise HTTPException(status_code=404, detail=f"{name}@{major} holds no Records or Media")
+    return found
+
+
+def _media_line(request: Request, name: str, major: int) -> dict:
+    line = _line(request, name, major)
+    if not line["media"]:
+        raise HTTPException(status_code=404, detail=f"{name}@{major} has no Media")
+    return line
+
+
+@router.get("/app-data/{name}/{major}/media", dependencies=[auth.read])
+async def list_media(request: Request, name: str, major: int, prefix: str = ""):
+    from ..media import MediaError
+
+    _media_line(request, name, major)
+    try:
+        files = await asyncio.to_thread(_media(request).list, name, major, prefix)
+    except MediaError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    return {"files": files}
+
+
+@router.get("/app-data/{name}/{major}/media/file", dependencies=[auth.read])
+async def download_media(request: Request, name: str, major: int, path: str):
+    from fastapi.responses import StreamingResponse
+
+    from ..media import MediaError
+
+    _media_line(request, name, major)
+    media = _media(request)
+    try:
+        size = await asyncio.to_thread(media.size, name, major, path)
+    except MediaError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"no file {path!r}") from None
+    import mimetypes
+    from urllib.parse import quote
+
+    filename = path.rsplit("/", 1)[-1]
+    return StreamingResponse(
+        media.read(name, major, path), media_type=mimetypes.guess_type(filename)[0] or "application/octet-stream",
+        headers={"Content-Length": str(size),
+                 "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"})
+
+
+@router.post("/app-data/{name}/{major}/media/file", dependencies=[auth.full])
+async def upload_media(request: Request, name: str, major: int, path: str):
+    """Upload a file into the line's Media at ``path`` (the request body, or a multipart ``file``), replacing a
+    file there. Manage access only, so Media can't be used as a drop box."""
+    import tempfile
+
+    from ..media import MediaError
+
+    line = _media_line(request, name, major)
+    if line["state"] == "retired":
+        raise HTTPException(status_code=409, detail=f"{name}@{major} is retired: its Media is read-only")
+    media = _media(request)
+    content_type = request.headers.get("content-type", "")
+    spool = tempfile.SpooledTemporaryFile(max_size=8 << 20)
+    try:
+        if content_type.startswith("multipart/form-data"):
+            form = await request.form()
+            upload = form.get("file")
+            if upload is None or not hasattr(upload, "read"):
+                raise HTTPException(status_code=422, detail="the form needs a file")
+            while chunk := await upload.read(1 << 20):
+                spool.write(chunk)
+        else:
+            async for chunk in request.stream():
+                spool.write(chunk)
+        spool.seek(0)
+        written = await asyncio.to_thread(media.write, name, major, path, spool)
+    except MediaError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    finally:
+        spool.close()
+    return {"path": path, "size": written}
+
+
+@router.delete("/app-data/{name}/{major}/media/file", dependencies=[auth.full])
+async def delete_media(request: Request, name: str, major: int, path: str):
+    from ..media import MediaError
+
+    line = _media_line(request, name, major)
+    if line["state"] == "retired":
+        raise HTTPException(status_code=409, detail=f"{name}@{major} is retired: its Media is read-only")
+    try:
+        await asyncio.to_thread(_media(request).delete, name, major, path)
+    except MediaError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"no file {path!r}") from None
+    return {"deleted": path}
