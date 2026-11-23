@@ -12,10 +12,12 @@ Inside the App's process, :func:`pond` gives a read-only handle on its Sources::
     rel = pond.read_table("reports.monthly_summary")
 
 The process gets ``PORT`` (where to listen), ``DUCKSTRING_APP_PATH`` (the base path it serves under),
-``DUCKSTRING_APP_STATE`` (a durable directory, with ``state = "local"``) and ``DUCKSTRING_APP`` (JSON describing
-the App, read by :func:`pond`). Requests arrive with the base path removed and named in ``X-Forwarded-Prefix``
-(the convention ``uvicorn --root-path`` and WSGI servers follow), or, with ``strip_path = false``, with the full
-path (what Streamlit's ``baseUrlPath`` and Dash's path prefixes expect).
+``DUCKSTRING_APP_STATE`` (a durable directory, with ``state = "local"``), ``DUCKSTRING_RECORDS_URL`` and
+``DUCKSTRING_MEDIA_URL`` (its Records and Media, with ``records``/``media = true``; :func:`records_url`,
+:func:`media`) and ``DUCKSTRING_APP`` (JSON describing the App, read by :func:`pond`). Requests arrive with the
+base path removed and named in ``X-Forwarded-Prefix`` (the convention ``uvicorn --root-path`` and WSGI servers
+follow), or, with ``strip_path = false``, with the full path (what Streamlit's ``baseUrlPath`` and Dash's path
+prefixes expect).
 """
 
 from __future__ import annotations
@@ -29,6 +31,11 @@ from itertools import count
 from pathlib import Path
 
 ENV = "DUCKSTRING_APP"  # the JSON the runtime hands an App's process, read by pond()
+RECORDS_ENV = "DUCKSTRING_RECORDS_URL"  # the line's Records: a libpq URL signing its role in
+MEDIA_ENV = "DUCKSTRING_MEDIA_URL"  # the line's Media: a local directory or an object-store URI
+# An App with Records names a PostgreSQL schema and role ``{name}_v{major}``: a lower-case identifier that never
+# needs quoting, well inside PostgreSQL's 63-byte limit.
+RECORDS_NAME = re.compile(r"[a-z_][a-z0-9_]{0,47}")
 
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 DEFAULT_IDLE_TIMEOUT = "30m"
@@ -61,7 +68,8 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
     command = section.get("command")
     if command is not None and (not isinstance(command, str) or not command.strip()):
         raise ValueError("pond.toml [app] command: expected a command line")
-    unknown = set(section) - {"command", "static", "idle_timeout", "state", "health", "strip_path", "download"}
+    unknown = set(section) - {"command", "static", "idle_timeout", "state", "health", "strip_path", "download",
+                              "records", "media"}
     if unknown:
         raise ValueError(f"pond.toml [app]: unknown {', '.join(sorted(unknown))}")
     static = section.get("static")
@@ -82,6 +90,16 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
     strip_path = section.get("strip_path", True)
     if not isinstance(strip_path, bool):
         raise ValueError("pond.toml [app] strip_path: expected true or false")
+    # Records and Media (plans/records-and-media.md): the line's tables in the Catchment's PostgreSQL and its
+    # files, which Ponds and other Apps can read.
+    records, media = section.get("records", False), section.get("media", False)
+    for key, value in (("records", records), ("media", media)):
+        if not isinstance(value, bool):
+            raise ValueError(f"pond.toml [app] {key}: expected true or false")
+    if records:
+        if pond.get("name") is not None and not RECORDS_NAME.fullmatch(str(pond["name"])):
+            raise ValueError("pond.toml [app] records: an App with Records needs a name of lower-case letters, digits "
+                             "and underscores, starting with a letter or underscore, at most 48 characters")
     health = section.get("health")
     if health is not None and (not isinstance(health, str) or not health.startswith("/")):
         raise ValueError('pond.toml [app] health: expected a path starting with "/"')
@@ -100,6 +118,8 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
         "health": health,
         "strip_path": strip_path,
         "download": download,
+        "records": records,
+        "media": media,
     }
 
 
@@ -254,6 +274,63 @@ def pond():
         if _handle is None:
             _handle = _make_handle()
         return _handle
+
+
+def records_url() -> str:
+    """The App line's Records as a standard PostgreSQL URL: its own role and password on the Catchment's database,
+    searching its own schema first, so unqualified table names are its own. Every App line's tables are readable as
+    ``{name}_v{major}.{table}``; only its own are writable. Use it with any driver (psycopg, SQLAlchemy with
+    ``postgresql+psycopg://``, asyncpg). Needs ``[app] records = true``."""
+    url = os.environ.get(RECORDS_ENV)
+    if not url:
+        raise RuntimeError(f"{RECORDS_ENV} isn't set: declare [app] records = true in pond.toml")
+    return url
+
+
+def records(**kwargs):
+    """A psycopg connection to the App line's Records (:func:`records_url`). Needs psycopg in the App's
+    environment (``uv add 'psycopg[binary]'``); any other driver can use :func:`records_url` instead."""
+    try:
+        import psycopg
+    except ImportError:
+        raise RuntimeError("duckstring.app.records() needs psycopg in the App's environment: "
+                           "uv add 'psycopg[binary]' (or connect to records_url() with another driver)") from None
+    return psycopg.connect(records_url(), **kwargs)
+
+
+def media_url() -> str:
+    """Where the App line's Media lives: a local directory, or an object-store URI when the Catchment keeps Media
+    there. Needs ``[app] media = true``."""
+    url = os.environ.get(MEDIA_ENV)
+    if not url:
+        raise RuntimeError(f"{MEDIA_ENV} isn't set: declare [app] media = true in pond.toml")
+    return url
+
+
+def media_path() -> Path:
+    """The App line's Media as a local directory (when the Catchment keeps Media on its own disk)."""
+    url = media_url()
+    if "://" in url:
+        raise RuntimeError(f"this Catchment keeps Media in an object store ({url.split('://')[0]}://): use media()")
+    return Path(url)
+
+
+def media():
+    """An fsspec filesystem rooted at the App line's Media, the same wherever the Catchment keeps it: paths are
+    relative (``fs.open("uploads/a.png", "wb")``, ``fs.ls("uploads")``). Needs fsspec in the App's environment,
+    and the object store's own package (s3fs, gcsfs, adlfs) when Media is in one."""
+    try:
+        import fsspec
+        from fsspec.implementations.dirfs import DirFileSystem
+    except ImportError:
+        raise RuntimeError("duckstring.app.media() needs fsspec in the App's environment: uv add fsspec "
+                           "(or use media_path() for files on the Catchment's disk)") from None
+    url = media_url()
+    if "://" in url:
+        fs, path = fsspec.core.url_to_fs(url)
+    else:
+        fs, path = fsspec.filesystem("file", auto_mkdir=True), url  # parents made, as an object store needs none
+    return DirFileSystem(path, fs)
 
 
 def _make_handle():

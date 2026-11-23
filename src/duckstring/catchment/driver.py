@@ -2714,6 +2714,26 @@ class Driver(TapsMixin, PuddlesMixin):
                 self._configure_slots()
             return f"{max(declared, _MIN_DUCKDB_GRANT) // 10**6}MB"
 
+    def note_app_data(self, name: str, major: int, records: bool = False, media: bool = False) -> None:
+        """Record that the App line ``name@major`` holds Records or Media (plans/records-and-media.md): kept, with
+        its state, until the data is purged, whatever happens to the line itself."""
+        with self.lock:
+            self.db.execute(
+                "INSERT INTO app_data (name, major, records, media, created_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(name, major) DO UPDATE SET records = max(records, excluded.records), "
+                "media = max(media, excluded.media)",
+                (name, int(major), int(records), int(media), _now().isoformat()))
+            self.db.commit()
+
+    def app_data(self, name: str | None = None) -> list[dict]:
+        """The App lines holding Records or Media, with their state, by name then major."""
+        with self.lock:
+            sql = "SELECT name, major, records, media, state, created_at FROM app_data"
+            rows = (self.db.execute(sql + " WHERE name = ? ORDER BY major", (name,)) if name
+                    else self.db.execute(sql + " ORDER BY name, major")).fetchall()
+        return [{"name": r[0], "major": r[1], "records": bool(r[2]), "media": bool(r[3]), "state": r[4],
+                 "created_at": r[5]} for r in rows]
+
     def records_reserve(self, memory: int) -> None:
         """The managed Records PostgreSQL is starting: set its memory aside as an App's is (plans/records-and-
         media.md), under the same share. Raises ``ValueError`` when it doesn't fit."""

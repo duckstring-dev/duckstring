@@ -1,7 +1,8 @@
 """Serving an App locally against its Puddles (plans/apps.md): ``duckstring pond run`` in an App's directory.
 
 The App's process gets the same environment the Catchment gives it, with its handle rooted at ``puddles/`` (so
-``read_table("sales.revenue")`` reads the Puddle), its state directory at ``puddles/app/state/`` and an empty base
+``read_table("sales.revenue")`` reads the Puddle), its state directory at ``puddles/app/state/``, its Media at
+``puddles/app/media/`` and Records in a PostgreSQL of its own under ``puddles/app/records/``, and an empty base
 path, so it serves at ``http://127.0.0.1:{port}/``. A static-only App is served with Python's own file server; an
 App with both a command and ``static`` gets a front server that serves the files and forwards the rest, as the
 Catchment does.
@@ -16,7 +17,7 @@ import sys
 import threading
 from pathlib import Path
 
-from ..app import ENV, app_config
+from ..app import ENV, MEDIA_ENV, RECORDS_ENV, app_config
 from .project import Project
 
 
@@ -32,6 +33,10 @@ def app_env(project: Project, port: int) -> dict[str, str]:
         state = project.puddles_dir / "app" / "state"
         state.mkdir(parents=True, exist_ok=True)
         env["DUCKSTRING_APP_STATE"] = str(state)
+    if cfg["media"] and MEDIA_ENV not in env:
+        media = project.puddles_dir / "app" / "media"
+        media.mkdir(parents=True, exist_ok=True)
+        env[MEDIA_ENV] = str(media)
     env[ENV] = json.dumps({"name": project.name, "major": int(project.version.split(".")[0]),
                            "version": project.version, "root": str(project.puddles_dir),
                            "sources": list(project.sources), **_sources(project)})
@@ -71,8 +76,35 @@ def serve_app(project: Project, port: int) -> int:
     does what the Catchment does: files under ``static`` are served directly, everything else (WebSockets
     included) goes to the command."""
     cfg = app_config(project.info, project.dir)
-    if cfg["command"] and cfg["static"]:
-        return _serve_fronted(project, cfg, port)
+    records = _local_records(project) if cfg["records"] and RECORDS_ENV not in os.environ else None
+    try:
+        if records is not None:
+            os.environ[RECORDS_ENV] = records.line_url(project.name, int(project.version.split(".")[0]))
+        if cfg["command"] and cfg["static"]:
+            return _serve_fronted(project, cfg, port)
+        return _serve(project, cfg, port)
+    finally:
+        if records is not None:
+            os.environ.pop(RECORDS_ENV, None)
+            records.stop()
+
+
+def _local_records(project: Project):
+    """The App's Records for a local serve: a PostgreSQL of its own under ``puddles/app/records/``, kept between
+    runs, with the App line's schema and role, as the Catchment provisions them."""
+    from ..catchment.db import connect, migrate
+    from ..catchment.records import Records
+
+    base = project.puddles_dir / "app"
+    base.mkdir(parents=True, exist_ok=True)
+    db = connect(base / "records.db")
+    migrate(db)
+    records = Records(base, db)
+    records.provision(project.name, int(project.version.split(".")[0]))
+    return records
+
+
+def _serve(project: Project, cfg: dict, port: int) -> int:
     env = app_env(project, port)
     if cfg["command"]:
         argv = ["/bin/sh", "-c", "exec " + cfg["command"]]

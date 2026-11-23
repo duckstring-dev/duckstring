@@ -20,7 +20,6 @@ import hashlib
 import hmac
 import logging
 import os
-import re
 import secrets as _secrets
 import signal
 import socket
@@ -31,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urlsplit
+
+from ..app import RECORDS_NAME
 
 log = logging.getLogger("duckstring.records")
 
@@ -47,9 +48,7 @@ DEFAULT_MEMORY = 512 * 2**20
 MAX_CONNECTIONS = 50
 START_TIMEOUT_S = 30.0
 
-# An App line's schema and role are ``{name}_v{major}``: a lower-case identifier PostgreSQL never needs quoted,
-# well inside its 63-byte limit.
-LINE_NAME = re.compile(r"[a-z_][a-z0-9_]{0,47}")
+LINE_NAME = RECORDS_NAME  # an App line's schema and role are ``{name}_v{major}``
 
 
 class RecordsError(Exception):

@@ -260,6 +260,7 @@ class AppSupervisor:
 
         name, major = view["name"], view["major"]
         cfg = view["app"]
+        data_env = self._app_data_env(view)  # before the instance row: a failure here starts nothing
         runtime = app_runtime_dir(self.root, name, major)
         (runtime / "logs").mkdir(parents=True, exist_ok=True)
         port = _free_port()
@@ -286,6 +287,7 @@ class AppSupervisor:
             state = app_state_dir(self.root, name, major)
             state.mkdir(parents=True, exist_ok=True)
             env["DUCKSTRING_APP_STATE"] = str(state)
+        env.update(data_env)
         env[ENV] = json.dumps({
             "name": name, "major": major, "version": view["version"], "root": str(self.root),
             "data_root": self.data_root, "sources": list(view["sources"]), "source_majors": view["sources"],
@@ -310,6 +312,31 @@ class AppSupervisor:
         with self._mu:
             self._instances[view["key"]] = inst
         return inst
+
+    def _app_data_env(self, view: dict) -> dict[str, str]:
+        """The line's Records and Media, made ready (plans/records-and-media.md): its schema and role in the
+        Catchment's PostgreSQL (started if need be) and its Media directory, recorded in ``app_data``, as the
+        environment variables the App reads them through. Raises :class:`AppUnavailable` when they can't be."""
+        from ..app import MEDIA_ENV, RECORDS_ENV
+        from .media import MediaError
+        from .records import RecordsError
+
+        cfg = view["app"]
+        name, major = view["name"], view["major"]
+        env: dict[str, str] = {}
+        if not (cfg.get("records") or cfg.get("media")):
+            return env
+        try:
+            if cfg.get("records"):
+                self.driver.records.provision(name, major)
+                env[RECORDS_ENV] = self.driver.records.line_url(name, major)
+            if cfg.get("media"):
+                self.driver.media.ensure_line(name, major)
+                env[MEDIA_ENV] = self.driver.media.location(name, major)
+        except (RecordsError, MediaError) as e:
+            raise AppUnavailable(503, f"the App's data isn't available: {e}") from None
+        self.driver.note_app_data(name, major, records=bool(cfg.get("records")), media=bool(cfg.get("media")))
+        return env
 
     async def _wait_ready(self, inst: Instance, view: dict) -> None:
         """Wait until the instance answers its health path (2xx), or accepts connections when it declares none."""

@@ -108,7 +108,7 @@ def test_app_config_validates_the_declaration(tmp_path):
     assert app_config({"pond": {"name": "x"}}) is None
     cfg = app_config({"pond": {"type": "app"}, "app": {"command": "run", "idle_timeout": "1h30m"}})
     assert cfg == {"command": "run", "static": None, "memory": None, "idle_timeout_s": 5400, "state": "local",
-                   "health": None, "strip_path": True, "download": None}
+                   "health": None, "strip_path": True, "download": None, "records": False, "media": False}
     assert app_config({"pond": {"type": "app", "memory": "2GB"}, "app": {"command": "run"}})["memory"] == 2 * 10**9
     assert app_config({"pond": {"type": "app"}, "app": {"command": "run", "idle_timeout": "0"}})["idle_timeout_s"] == 0
     (tmp_path / "out").mkdir()
