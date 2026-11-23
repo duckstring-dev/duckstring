@@ -80,6 +80,7 @@ _MIN_DUCKDB_GRANT = 256 * 10**6  # never set DuckDB below this
 # set aside at most this share of the budget, so Pond Runs always keep the rest. An App that declares nothing sets
 # nothing aside; its DuckDB is held to _MIN_DUCKDB_GRANT, small enough for the headroom outside the budget.
 _APP_SHARE = 0.5
+_RECORDS_KEY = "#records"  # the managed Records PostgreSQL's entry in app_reserved (never a Pond key)
 
 
 def _out_of_memory(error: str | None) -> bool:
@@ -2712,6 +2713,22 @@ class Driver(TapsMixin, PuddlesMixin):
                 self.app_reserved[key] = declared
                 self._configure_slots()
             return f"{max(declared, _MIN_DUCKDB_GRANT) // 10**6}MB"
+
+    def records_reserve(self, memory: int) -> None:
+        """The managed Records PostgreSQL is starting: set its memory aside as an App's is (plans/records-and-
+        media.md), under the same share. Raises ``ValueError`` when it doesn't fit."""
+        with self.lock:
+            if self.run_slots > 0:
+                others = sum(b for k, b in self.app_reserved.items() if k != _RECORDS_KEY)
+                share = int(self.memory_budget * _APP_SHARE)
+                if others + memory > share:
+                    raise ValueError(f"Records' memory ({memory / 10**9:.1f} GB) doesn't fit: Apps and Records may "
+                                     f"set aside {share / 10**9:.1f} GB, half of this machine's memory budget")
+            self.app_reserved[_RECORDS_KEY] = memory
+            self._configure_slots()
+
+    def records_release(self) -> None:
+        self.app_release(_RECORDS_KEY)
 
     def app_release(self, key: str, process: bool = True) -> None:
         """The App's instance stopped (or never started): give its memory back to the slots, and start what a

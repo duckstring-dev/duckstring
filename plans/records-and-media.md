@@ -143,7 +143,8 @@ Apps without either keep concurrent majors.
   major, Records and Media frozen (read-only) until explicitly deleted.
 
 **Migration**: by default the previous major's Records schema (dump and restore under the new name) and
-Media (hardlinks locally, server-side copies on an object store) are copied whole, then `[app] migrate`
+Media (real copies locally, since a hardlink would let an App appending in place change a frozen line's
+file too; server-side copies on an object store) are copied whole, then `[app] migrate`
 (a command, like `[app] download`) runs over the copy with the previous major readable. Most migrations
 are a few `ALTER` statements. A move from the private SQLite directory into Records is a `migrate` that
 reads the previous major's state directory.

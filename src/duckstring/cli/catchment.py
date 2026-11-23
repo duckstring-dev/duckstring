@@ -437,6 +437,65 @@ def settings(
 
 
 @app.command()
+def records(
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
+    use: Optional[str] = typer.Option(
+        None, "--use", help="Where Records live: managed (a PostgreSQL the Catchment runs) or a postgres:// URI "
+                            "(credentials as ${secret:NAME} or ${env:NAME})."),
+    memory: Optional[str] = typer.Option(None, "--memory", help="A managed PostgreSQL's memory, such as 1GB."),
+    listen: Optional[str] = typer.Option(
+        None, "--listen", help="A managed PostgreSQL's listen address (127.0.0.1 unless something on another "
+                               "machine needs it)."),
+) -> None:
+    """Show or set where Apps' Records live.
+
+    Records are each App line's tables, in PostgreSQL. By default the Catchment runs its own (install it with
+    `duckstring install postgres`), started the first time an App needs it. Where Records live can't change once
+    an App line holds Records.
+    """
+    from . import _http
+    from .config import resolve_catchment
+
+    _, cfg = resolve_catchment(catchment)
+    if use is not None or memory is not None or listen is not None:
+        body = {k: v for k, v in {"target": use, "memory": memory, "listen": listen}.items() if v is not None}
+        got = _http.put(f"{cfg['url']}/api/catchment/records", auth=cfg, json=body).json()
+    else:
+        got = _http.get(f"{cfg['url']}/api/catchment/records", auth=cfg).json()
+    if got["target"] == "managed":
+        state = "running" if got.get("running") else ("stopped" if got.get("initialised") else "not started yet")
+        version = f", PostgreSQL {got['postgres_major']}" if got.get("postgres_major") else ""
+        typer.echo(f"records:  managed ({state}{version})")
+        typer.echo(f"memory:   {got['memory'] / 10**6:.0f} MB")
+        typer.echo(f"listen:   {got['listen']}" + (f":{got['port']}" if got.get("port") else ""))
+    else:
+        typer.echo(f"records:  {got['host']}:{got['port']}/{got['database']}")
+    if got.get("in_use"):
+        typer.echo("note:     App lines hold Records here, so where they live is now fixed.")
+
+
+@app.command()
+def media(
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
+    use: Optional[str] = typer.Option(
+        None, "--use", help="Where Media lives: local (the Catchment's own directory) or an object store "
+                            "(s3://, gs://, az://, abfss://)."),
+) -> None:
+    """Show or set where Apps' Media (their files) lives. It can't change once an App line holds Media."""
+    from . import _http
+    from .config import resolve_catchment
+
+    _, cfg = resolve_catchment(catchment)
+    if use is not None:
+        got = _http.put(f"{cfg['url']}/api/catchment/media", auth=cfg, json={"target": use}).json()
+    else:
+        got = _http.get(f"{cfg['url']}/api/catchment/media", auth=cfg).json()
+    typer.echo(f"media:    {got['target']}")
+    if got.get("in_use"):
+        typer.echo("note:     App lines hold Media here, so where it lives is now fixed.")
+
+
+@app.command()
 def reset(
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to reset (default if omitted)."),
     clear_history: bool = typer.Option(False, "--clear-history", help="Also delete all run history."),

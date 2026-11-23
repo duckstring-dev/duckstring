@@ -153,7 +153,15 @@ async def _lifespan(app: FastAPI):
     import httpx
 
     from .app_supervisor import AppSupervisor, run_app_supervisor
+    from .media import Media
+    from .records import Records
     from .state_sync import checkpoint_full, run_checkpoint_worker
+
+    # Records and Media (plans/records-and-media.md): App lines' data. A managed Records PostgreSQL starts the
+    # first time something needs it and stops with the Catchment.
+    driver.records = Records(app.state.root, driver.db, reserve=driver.records_reserve,
+                             release=driver.records_release)
+    driver.media = Media(app.state.root, driver.db)
 
     app.state.app_supervisor = AppSupervisor(driver, app.state.root, app.state.data_root)
     app.state.app_supervisor.close_orphans()
@@ -190,6 +198,7 @@ async def _lifespan(app: FastAPI):
                 pass
         launcher.shutdown_all()
         await asyncio.to_thread(app.state.app_supervisor.shutdown)
+        await asyncio.to_thread(driver.records.stop)
         await app.state.app_http.aclose()
         for wire in getattr(app.state, "serve_wires", []):
             wire.stop()
