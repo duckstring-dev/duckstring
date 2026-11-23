@@ -559,14 +559,14 @@ class Driver(TapsMixin, PuddlesMixin):
             name_by_pnid = {r[0]: r[1] for r in db.execute("SELECT id, name FROM pond_name")}
             rows = db.execute("""
                 SELECT pn.name, p.major, p.id, p.pond_version_id, pv.version, pv.source_path, pn.kind,
-                       p.is_draw, p.is_spout, pv.dbt, pv.app, pv.deployed_at, p.exact_ints
+                       p.is_draw, p.is_spout, pv.dbt, pv.app, pv.deployed_at, p.exact_ints, pv.external
                 FROM pond p JOIN pond_name pn ON pn.id = p.pond_name_id
                 JOIN pond_version pv ON pv.id = p.pond_version_id
             """).fetchall()
             deployed = {pond_key(name, major) for name, major, *_ in rows}
             pondid_to_key = {pid: pond_key(nm, mj) for nm, mj, pid, *_ in rows}
             for (name, major, pond_id, pv_id, version, source_path, kind, is_draw, is_spout, dbt, app, deployed_at,
-                 exact_ints) in rows:
+                 exact_ints, external) in rows:
                 self.meta[pond_key(name, major)] = {
                     "name": name, "major": major, "version_id": pv_id, "version": version,
                     "source_path": source_path, "pond_id": pond_id, "kind": kind,
@@ -576,9 +576,11 @@ class Driver(TapsMixin, PuddlesMixin):
                     "deployed_at": deployed_at,
                     # Publishes an integer SUM as BIGINT, not DOUBLE (lines first deployed from 0.9 on; 037).
                     "exact_ints": bool(exact_ints),
+                    # Declared external sources, drawn on the canvas ([pond] external; visual only).
+                    "external": json.loads(external) if external else [],
                 }
 
-            for name, major, pond_id, pv_id, _version, _source_path, _kind, is_draw, is_spout, _dbt, app, _at, _x in rows:
+            for name, major, pond_id, pv_id, _version, _source_path, _kind, is_draw, is_spout, _dbt, app, _at, _x, _ext in rows:
                 is_app = app is not None
                 key = pond_key(name, major)
                 sources, optional, missing = [], set(), []
@@ -2824,8 +2826,14 @@ class Driver(TapsMixin, PuddlesMixin):
             instance = {"id": row[0], "started_at": row[1], "ready_at": row[2], "active": 0, "idle_at": None}
             activity = self.app_activity(key, m["app"]["idle_timeout_s"]) if self.app_activity else None
             instance.update(activity or {})
+        data = first_row(self.db.execute("SELECT records, media, state FROM app_data WHERE name = ? AND major = ?",
+                                         (m["name"], m["major"])))
+        cfg = m["app"]
         return {"path": base_path(m["name"], m["major"]) + "/", "deployed_at": m["deployed_at"],
-                "idle_timeout_s": m["app"]["idle_timeout_s"], "instance": instance}
+                "idle_timeout_s": cfg["idle_timeout_s"], "instance": instance,
+                # Its Records and Media (plans/records-and-media.md): declared, and the line's state once it has run.
+                "records": bool(cfg.get("records")), "media": bool(cfg.get("media")),
+                "data_state": data[2] if data else None}
 
     def _app_error(self, key: str) -> str | None:
         """Why an App failed, from its last instance (survives a restart with no extra state)."""
@@ -4675,6 +4683,7 @@ class Driver(TapsMixin, PuddlesMixin):
                     # An App (plans/apps.md): where it serves and its running instance, if any.
                     "is_app": self.meta[key].get("is_app", False),
                     "app": self._app_status(key) if self.meta[key].get("is_app") else None,
+                    "external": self.meta[key].get("external", []),
                     # A Spout's egress config + armed state, for the node's control panel.
                     "spout": (
                         {**self.meta[key]["spout"], "armed": ps.standing_wake}

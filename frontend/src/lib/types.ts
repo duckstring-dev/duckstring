@@ -21,6 +21,8 @@ export interface Pond {
   dbt: boolean; // a dbt-mode Pond — its Ripples are dbt models (no @ripple code)
   isApp: boolean; // an App: an Outlet that serves HTTP from the Catchment (plans/apps.md)
   sources: PondId[];
+  // Declared external sources ([pond] external): drawn as nodes feeding it. `app:name@major` is an App line's data.
+  external: string[];
 }
 
 export interface Ripple {
@@ -104,6 +106,9 @@ export interface AppInfo {
   path: string; // served at, from the Catchment's root ("/apps/{name}/v{major}/")
   deployedAt: string | null; // ISO; a version can be redeployed in place, so this tells deploys apart
   idleTimeoutS: number; // 0 = never stops for idleness
+  records: boolean; // declares Records (plans/records-and-media.md)
+  media: boolean; // declares Media
+  dataState: 'trial' | 'live' | 'retired' | null; // its line's, once it has started
   instance: {
     id: number;
     startedAt: string;

@@ -20,6 +20,7 @@ import { useLiveStore, consumeEdgeColor, demandLines, formatAge } from '@/lib/st
 import { computeLayout, statsLineWidth, type ContentFloors } from '@/lib/layout';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { PondNode } from './PondNode';
+import { ExternalNode } from './ExternalNode';
 import { RippleNode } from './RippleNode';
 import { CatchmentGroupNode } from './CatchmentGroupNode';
 import { RemotePondNode } from './RemotePondNode';
@@ -52,6 +53,7 @@ const nodeTypes: NodeTypes = {
   ripple: RippleNode as NodeTypes[string],
   catchmentGroup: CatchmentGroupNode as NodeTypes[string],
   remotePond: RemotePondNode as NodeTypes[string],
+  external: ExternalNode as NodeTypes[string],
 };
 
 const edgeTypes: EdgeTypes = {
@@ -97,7 +99,7 @@ export function DagCanvas() {
   const layoutKey = useMemo(
     () =>
       JSON.stringify({
-        ponds: Object.values(ponds).map((p) => ({ id: p.id, sources: p.sources, name: p.name })),
+        ponds: Object.values(ponds).map((p) => ({ id: p.id, sources: p.sources, name: p.name, external: p.external })),
         ripples: Object.values(ripples).map((r) => ({ id: r.id, parents: r.parents, pondId: r.pondId, name: r.name })),
         demand,
       }),

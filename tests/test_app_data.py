@@ -449,3 +449,22 @@ def test_a_trial_is_for_manage_access_only(tmp_path):
         assert client.get("/apps/feedback/v2/notes", headers=full).status_code == 200  # starts the trial
         assert client.get("/apps/feedback/v2/notes", headers=read).status_code == 403
         assert client.get("/apps/feedback/v1/total", headers=read).status_code == 200
+
+
+def test_a_pond_declares_its_external_sources_for_the_canvas(catchment_client):
+    client = catchment_client
+    toml = ('[pond]\nname = "tally"\nversion = "1.0.0"\n'
+            'external = ["app:feedback@1", "GDELT events", "GDELT events"]\n')
+    r = _deploy(client, "tally", {"pond.toml": toml, "src/pond.py": _TALLY_PY})
+    assert r.status_code == 200, r.text
+    tally = next(p for p in client.get("/api/status").json()["ponds"] if p["name"] == "tally")
+    assert tally["external"] == ["app:feedback@1", "GDELT events"]
+    bad = toml.replace("app:feedback@1", "app:Feedback")
+    assert _deploy(client, "tally", {"pond.toml": bad, "src/pond.py": _TALLY_PY}, version="1.0.1").status_code == 422
+
+    r = _deploy(client, "feedback", {"pond.toml": _toml("feedback"), "main.py": _APP_PY})
+    assert r.status_code == 200, r.text
+    app = lambda: next(p for p in client.get("/api/status").json()["ponds"] if p["name"] == "feedback")["app"]  # noqa: E731
+    assert (app()["records"], app()["media"], app()["data_state"]) == (True, True, None)
+    client.get("/apps/feedback/v1/healthz")
+    assert app()["data_state"] == "live"

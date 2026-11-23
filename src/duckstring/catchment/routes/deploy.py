@@ -119,7 +119,7 @@ def _pond_config(toml_path: Path) -> dict:
     are operational config managed via `duckstring window`, not declared at deploy time.)"""
     cfg = {"sources": {}, "immediate_retries": DEFAULT_IMMEDIATE_RETRIES, "source_retries": 0, "kind": None,
            "dbt_project": None, "duck_pool": None, "flock_mode": None, "flock_engine": None, "oom_policy": None,
-           "flock_accept": None, "app": None}
+           "flock_accept": None, "app": None, "external": None}
     if not toml_path.exists():
         return cfg
     info = _read_toml(toml_path.read_text(encoding="utf-8"))
@@ -135,6 +135,7 @@ def _pond_config(toml_path: Path) -> dict:
     # override in pond_duck coalesces over them. Validated loosely here (a pool name is Catchment-local
     # and may not exist yet — resolution falls back to the Catchment Duck, keeping pond.toml portable).
     cfg["duck_pool"] = pond.get("duck")  # pool name | 'catchment' | None
+    cfg["external"] = _external(pond.get("external"))
     flock = info.get("flock", {})
     cfg["flock_mode"] = _validate_choice(flock.get("mode"), ("off", "upgrade", "always"), "[flock] mode")
     cfg["flock_engine"] = flock.get("engine")
@@ -159,6 +160,21 @@ def _pond_config(toml_path: Path) -> dict:
             raise ValueError(f"an App serves HTTP and has no Ripples: remove {entry}, [ripples], [static] and "
                              "dbt_project from it, or make it a Pond")
     return cfg
+
+
+def _external(value) -> list[str] | None:
+    """``[pond] external``: names of where the Pond's data ultimately comes from, drawn on the canvas (visual
+    only; plans/records-and-media.md). ``app:name@major`` names an App line's Records and Media."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or any(not isinstance(v, str) or not v.strip() for v in value):
+        raise ValueError('pond.toml [pond] external: expected a list of names, such as ["GDELT events"]')
+    import re
+
+    for v in value:
+        if v.startswith("app:") and not re.fullmatch(r"app:[a-z_][a-z0-9_]*@[0-9]+", v):
+            raise ValueError(f"pond.toml [pond] external: {v!r}: an App's data is app:name@major, such as app:feedback@1")
+    return list(dict.fromkeys(v.strip() for v in value))
 
 
 def _validate_choice(value, choices, label):
@@ -271,6 +287,7 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
     major = int(version.split(".")[0])
     deployed_at = datetime.now(timezone.utc).isoformat()
     app_json = json.dumps(cfg["app"]) if cfg.get("app") is not None else None
+    external_json = json.dumps(cfg["external"]) if cfg.get("external") else None
     with db:
         db.execute("INSERT OR IGNORE INTO pond_name (name, kind) VALUES (?, ?)", (name, kind))
         db.execute("UPDATE pond_name SET kind = ? WHERE name = ?", (kind, name))
@@ -300,20 +317,21 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
             db.execute(
                 "UPDATE pond_version SET source_path = ?, major = ?, immediate_retries = ?, "
                 "source_retries = ?, deployed_at = ?, duck_pool = ?, flock_mode = ?, flock_engine = ?, "
-                "oom_policy = ?, flock_accept = ?, dbt = ?, app = ? WHERE id = ?",
+                "oom_policy = ?, flock_accept = ?, dbt = ?, app = ?, external = ? WHERE id = ?",
                 (source_path, major, cfg["immediate_retries"], cfg["source_retries"], deployed_at,
                  cfg.get("duck_pool"), cfg.get("flock_mode"), cfg.get("flock_engine"),
                  cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project"))),
-                 app_json, pv_id),
+                 app_json, external_json, pv_id),
             )
         else:
             db.execute(
                 "INSERT INTO pond_version (pond_name_id, version, major, source_path, "
                 "immediate_retries, source_retries, deployed_at, duck_pool, flock_mode, flock_engine, "
-                "oom_policy, flock_accept, dbt, app) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "oom_policy, flock_accept, dbt, app, external) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (pn_id, version, major, source_path, cfg["immediate_retries"], cfg["source_retries"],
                  deployed_at, cfg.get("duck_pool"), cfg.get("flock_mode"), cfg.get("flock_engine"),
-                 cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project"))), app_json),
+                 cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project"))), app_json,
+                 external_json),
             )
             (pv_id,) = first_row(db.execute(
                 "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)

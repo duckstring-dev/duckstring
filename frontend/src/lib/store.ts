@@ -154,7 +154,7 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
     ponds[p.id] = {
       id: p.id, name: p.name, kind: p.kind,
       isDraw: p.is_draw ?? false, isSpout: p.is_spout ?? false, isPuddle: p.is_puddle ?? false, dbt: p.dbt ?? false, isApp: p.is_app ?? false,
-      sources: [],
+      sources: [], external: p.external ?? [],
     };
     pondInfo[p.id] = {
       version: p.version,
@@ -182,6 +182,7 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
       spout: p.spout ?? null,
       app: p.app ? {
         path: p.app.path, deployedAt: p.app.deployed_at, idleTimeoutS: p.app.idle_timeout_s,
+        records: p.app.records ?? false, media: p.app.media ?? false, dataState: p.app.data_state ?? null,
         instance: p.app.instance ? {
           id: p.app.instance.id, startedAt: p.app.instance.started_at, readyAt: p.app.instance.ready_at,
           active: p.app.instance.active, idleAt: p.app.instance.idle_at,

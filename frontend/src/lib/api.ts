@@ -105,6 +105,7 @@ export interface RawPond {
   is_draw: boolean; // a Pond Draw — fed by a duct from an upstream Catchment, not run by a Duck
   is_spout: boolean; // a Spout — egresses its source's output to an external system (run by the egress worker)
   is_puddle?: boolean; // a Puddle node: a Source read from another Catchment as a Puddle (also is_draw)
+  external?: string[]; // declared external sources ([pond] external), drawn as nodes feeding it
   dbt: boolean; // a dbt-mode Pond — its Ripples are dbt models
   is_app?: boolean; // an App: an Outlet serving HTTP; its one Ripple (`serve`) is synthetic
   app?: RawApp | null;
@@ -151,6 +152,9 @@ export interface RawApp {
   path: string;
   deployed_at: string | null;
   idle_timeout_s: number;
+  records?: boolean; // declares Records (plans/records-and-media.md)
+  media?: boolean; // declares Media
+  data_state?: 'trial' | 'live' | 'retired' | null; // the line's, once it has started; null before
   instance: { id: number; started_at: string; ready_at: string | null; active: number; idle_at: string | null } | null;
 }
 

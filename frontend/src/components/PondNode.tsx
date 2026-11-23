@@ -9,7 +9,7 @@ import { DemandIndicators } from './DemandIndicators';
 import { DbtIcon } from './DbtIcon';
 
 // A small grid/table glyph — the affordance to open this Pond's data viewer (shown when it has tables).
-function TableIcon() {
+export function TableIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
       <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
@@ -119,6 +119,23 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
           }}
         >
           <OpenIcon />
+        </span>
+      )}
+
+      {pond.isApp && info?.app && (info.app.records || info.app.media) && info.app.dataState && (
+        <span
+          role="button"
+          title={info.app.dataState === 'live' ? 'View its Records and Media' : `View its Records and Media (${info.app.dataState})`}
+          onClick={(e) => {
+            e.stopPropagation();
+            openDataViewer(pondId);
+          }}
+          style={{
+            position: 'absolute', top: 7, right: 35, zIndex: 1, lineHeight: 0, padding: 3, borderRadius: 5,
+            cursor: 'pointer', color: borderColor, background: '#0f0f14cc', opacity: 0.9,
+          }}
+        >
+          <TableIcon />
         </span>
       )}
 
