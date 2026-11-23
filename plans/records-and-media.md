@@ -170,8 +170,10 @@ public serves it itself.
 
 - Read: browse Records tables and Media, download Media, query Records through `/api/query` (attached
   read-only). The catalog list gains a Records section, one schema per App line.
-- Manage (full): upload and delete Media. Not lower, so Media can't be used as a drop box. Objects gain
-  upload at the same time (today the viewer lists, downloads and deletes them).
+- Manage (full): upload and delete Media. Not lower, so Media can't be used as a drop box. Objects did not
+  gain upload (2026-11-24, while building): an Object is a Pond's published output, so an uploaded one would
+  be replaced at the Pond's next Run and would skip the version contract; the viewer keeps listing,
+  downloading and deleting them.
 - Records are read-only in the UI: only the App knows its rules.
 
 ## Later

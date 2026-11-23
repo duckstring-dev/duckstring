@@ -5,8 +5,9 @@ import { useLiveStore, atLeast, THEME_BLOCKED, THEME_BRAND, THEME_SUCCESS } from
 import {
   fetchTables, fetchFreshness, fetchHistory, fetchCount, fetchPage, cancelQuery, fetchObjects, downloadObject,
   deleteTable, deleteObject, fetchCatalog, promoteServe, exposeTable,
+  fetchAppData, fetchMedia, downloadMedia, uploadMedia, deleteMedia,
   type DataQuery, type TableInfo, type TrickleMode, type PageResult, type ObjectInfo,
-  type Catalog, type CatalogTable, UnauthorizedError,
+  type Catalog, type CatalogTable, type AppDataLine, type MediaFile, UnauthorizedError,
 } from '@/lib/api';
 import { ConfirmDialog, type ConfirmOpts } from './ConfirmDialog';
 import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
@@ -65,6 +66,8 @@ function splitId(id: string): { name: string; major: number | null } {
 }
 
 type Pending = { pond: string; major: number; table: string; nonce: number };
+// An App line's data picked in the tree (plans/records-and-media.md): its Records tables or its Media.
+type AppSel = { name: string; major: number; view: 'records' | 'media'; table?: string };
 
 // ─── The modal shell: tree + viewer ─────────────────────────────────────────
 
@@ -88,13 +91,24 @@ function CatalogModal({ preselect, onClose }: { preselect: string | null; onClos
   const [leftCollapsed, setLeftCollapsed] = useState(!!preselect);
   const [pending, setPending] = useState<Pending | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [appLines, setAppLines] = useState<AppDataLine[]>([]);
+  const [appSel, setAppSel] = useState<AppSel | null>(null);
   const nonce = useRef(1);
 
   const load = useCallback(async () => {
+    const pre = preselect ? splitId(preselect) : null;
+    try {
+      const data = await fetchAppData();
+      setAppLines(data.lines);
+      // Opened from an App node's table icon: start on that line's data.
+      const line = pre && data.lines.find((l) => l.name === pre.name && l.major === pre.major);
+      if (line) setAppSel((a) => a ?? { name: line.name, major: line.major, view: line.records ? 'records' : 'media' });
+    } catch (e) {
+      on401(e);
+    }
     try {
       const c = await fetchCatalog();
       setCat(c);
-      const pre = preselect ? splitId(preselect) : null;
       setActive((a) => a ?? pre?.name ?? c.ponds[0]?.name ?? null);
       if (pre?.major != null) setTreeMajor((m) => (pre.name in m ? m : { ...m, [pre.name]: pre.major as number }));
     } catch (e) {
@@ -114,6 +128,7 @@ function CatalogModal({ preselect, onClose }: { preselect: string | null; onClos
     !!p && activePond != null && p.pond === activePond.name && p.major === activeMajor;
 
   const pickTable = (pond: string, major: number, table: string) => {
+    setAppSel(null);
     setActive(pond);
     setTreeMajor((m) => ({ ...m, [pond]: major }));
     setPending({ pond, major, table, nonce: nonce.current++ });
@@ -151,7 +166,10 @@ function CatalogModal({ preselect, onClose }: { preselect: string | null; onClos
               search={search}
               setSearch={setSearch}
               canManage={canManage}
-              onActivate={setActive}
+              onActivate={(name) => { setAppSel(null); setActive(name); }}
+              appLines={appLines}
+              appSel={appSel}
+              onPickApp={setAppSel}
               onPickMajor={(name, major) => setTreeMajor((m) => ({ ...m, [name]: major }))}
               onPickTable={pickTable}
               onExpose={onExpose}
@@ -160,8 +178,20 @@ function CatalogModal({ preselect, onClose }: { preselect: string | null; onClos
           </div>
         )}
 
-        {/* Right: the Data Viewer, keyed on pond+major so a switch remounts it fresh. */}
-        {activePond && activeMajor != null ? (
+        {/* Right: an App line's data, or the Data Viewer keyed on pond+major so a switch remounts it fresh. */}
+        {appSel && appLines.some((l) => l.name === appSel.name && l.major === appSel.major) ? (
+          <AppDataViewer
+            key={`${appSel.name}:${appSel.major}`}
+            line={appLines.find((l) => l.name === appSel.name && l.major === appSel.major)!}
+            sel={appSel}
+            onSelect={setAppSel}
+            canManage={canManage}
+            leftCollapsed={leftCollapsed}
+            onToggleLeft={() => setLeftCollapsed((v) => !v)}
+            onChanged={load}
+            onClose={onClose}
+          />
+        ) : activePond && activeMajor != null ? (
           <DataViewer
             key={`${activePond.name}:${activeMajor}`}
             pondName={activePond.name}
@@ -208,7 +238,11 @@ const chip: React.CSSProperties = {
 
 function PondTree({
   cat, active, treeMajor, search, setSearch, canManage, onActivate, onPickMajor, onPickTable, onExpose,
+  appLines, appSel, onPickApp,
 }: {
+  appLines: AppDataLine[];
+  appSel: AppSel | null;
+  onPickApp: (s: AppSel) => void;
   cat: Catalog | null;
   active: string | null;
   treeMajor: Record<string, number>;
@@ -300,8 +334,260 @@ function PondTree({
             {cat == null ? 'Loading…' : 'Nothing serviceable.'}
           </div>
         )}
+        <AppDataTree lines={appLines} sel={appSel} search={search} onPick={onPickApp} />
       </div>
     </>
+  );
+}
+
+// Apps' Records and Media, a section of their own below the Ponds: each App line, its Records tables and its Media.
+function AppDataTree({ lines, sel, search, onPick }: {
+  lines: AppDataLine[]; sel: AppSel | null; search: string; onPick: (s: AppSel) => void;
+}) {
+  const shown = lines.filter((l) => !search || l.name.includes(search) || (l.tables ?? []).some((t) => t.table.includes(search)));
+  if (shown.length === 0) return null;
+  const item = (active: boolean): React.CSSProperties => ({
+    display: 'flex', alignItems: 'center', gap: 6, padding: '3px 10px 3px 22px', cursor: 'pointer', fontSize: 12,
+    color: active ? '#f4f4f5' : '#c4c4c8', background: active ? '#1f1f27' : 'transparent',
+  });
+  return (
+    <div style={{ borderTop: '1px solid #27272a', marginTop: 6, paddingTop: 6 }}>
+      <div style={{ padding: '4px 10px', fontSize: 10.5, color: '#71717a', letterSpacing: 0.4, textTransform: 'uppercase' }}>
+        App data
+      </div>
+      {shown.map((l) => {
+        const isLine = sel?.name === l.name && sel?.major === l.major;
+        const tables = (l.tables ?? []).filter((t) => !search || t.table.includes(search) || l.name.includes(search));
+        return (
+          <div key={`${l.name}@${l.major}`}>
+            <div onClick={() => onPick({ name: l.name, major: l.major, view: l.records ? 'records' : 'media' })}
+                 style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', cursor: 'pointer', fontSize: 12.5,
+                          color: isLine ? '#f4f4f5' : '#c4c4c8' }}>
+              <span style={{ color: '#71717a', fontSize: 10, width: 8 }}>{isLine ? '▾' : '▸'}</span>
+              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {l.name} <span style={{ color: '#71717a' }}>v{l.major}</span>
+              </span>
+              {l.state !== 'live' && <span style={{ fontSize: 10.5, color: '#71717a' }}>{l.state}</span>}
+            </div>
+            {isLine && (
+              <div style={{ padding: '2px 0 6px 0' }}>
+                {l.records && tables.map((t) => (
+                  <div key={t.table} onClick={() => onPick({ name: l.name, major: l.major, view: 'records', table: t.table })}
+                       title={`records.${l.schema}.${t.table}`}
+                       style={item(sel?.view === 'records' && sel?.table === t.table)}>
+                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.table}</span>
+                  </div>
+                ))}
+                {l.records && tables.length === 0 && (
+                  <div style={{ padding: '4px 10px 4px 24px', color: '#52525b', fontSize: 11.5 }}>No Records tables yet.</div>
+                )}
+                {l.media && (
+                  <div onClick={() => onPick({ name: l.name, major: l.major, view: 'media' })} style={item(sel?.view === 'media')}>
+                    <span style={{ flex: 1 }}>Media</span>
+                    {l.usage && <span style={{ color: '#71717a', fontSize: 11 }}>{l.usage.files}</span>}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── An App line's data (right panel) ────────────────────────────────────────
+
+function AppDataViewer({ line, sel, onSelect, canManage, leftCollapsed, onToggleLeft, onChanged, onClose }: {
+  line: AppDataLine;
+  sel: AppSel;
+  onSelect: (s: AppSel) => void;
+  canManage: boolean;
+  leftCollapsed: boolean;
+  onToggleLeft: () => void;
+  onChanged: () => void;
+  onClose: () => void;
+}) {
+  const table = sel.view === 'records' ? (sel.table ?? line.tables?.[0]?.table) : undefined;
+  const [sort, setSort] = useState<{ col: string | null; desc: boolean }>({ col: null, desc: false });
+  const [runSeq, setRunSeq] = useState(0);
+  const [, setTotal] = useState<number | null>(null);
+  const cycleSort = (col: string) =>
+    setSort((s) => (s.col !== col ? { col, desc: false } : !s.desc ? { col, desc: true } : { col: null, desc: false }));
+  const sql = table ? `SELECT * FROM records."${line.schema}"."${table}"` : null;
+  const tab = (active: boolean): React.CSSProperties => ({
+    ...chip, fontSize: 12, padding: '5px 11px', color: active ? '#f4f4f5' : '#a1a1aa',
+    borderColor: active ? THEME_BRAND : '#3f3f46',
+  });
+  return (
+    <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderBottom: '1px solid #27272a', flexWrap: 'wrap' }}>
+        <button onClick={onToggleLeft} title={leftCollapsed ? 'Show ponds' : 'Hide ponds'} style={chip}>
+          {leftCollapsed ? '›' : '‹'}
+        </button>
+        <span style={{ color: '#f4f4f5', fontSize: 13.5, fontWeight: 700 }}>
+          {line.name} <span style={{ color: '#71717a', fontWeight: 400 }}>v{line.major}</span>
+        </span>
+        {line.state !== 'live' && (
+          <span title={line.state === 'retired' ? 'A newer major took over: this data is read-only' : 'Not yet promoted'}
+                style={{ fontSize: 11, color: '#a1a1aa', border: '1px solid #3f3f46', borderRadius: 4, padding: '1px 6px' }}>
+            {line.state}
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        {line.records && (
+          <button style={tab(sel.view === 'records')} onClick={() => onSelect({ ...sel, view: 'records' })}>Records</button>
+        )}
+        {line.media && (
+          <button style={tab(sel.view === 'media')} onClick={() => onSelect({ ...sel, view: 'media' })}>Media</button>
+        )}
+        <button onClick={onClose} style={chip}>✕</button>
+      </div>
+      {sel.view === 'records' && (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', borderBottom: '1px solid #27272a', fontSize: 12, color: '#a1a1aa' }}>
+            <select value={table ?? ''} onChange={(e) => onSelect({ ...sel, view: 'records', table: e.target.value })}
+                    style={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 6, padding: '4px 8px',
+                             color: '#e4e4e7', fontSize: 12, fontFamily: 'inherit', outline: 'none' }}>
+              {(line.tables ?? []).map((t) => <option key={t.table} value={t.table}>{t.table}</option>)}
+            </select>
+            {table && <span style={{ color: '#71717a' }}>records.{line.schema}.{table}</span>}
+          </div>
+          <div style={{ flex: 1, minHeight: 0 }}>
+            {sql ? (
+              <VirtualGrid key={`${sql}:${sort.col}:${sort.desc}:${runSeq}`}
+                           query={{ pond: `${line.name}@${line.major}`, sql, orderBy: sort.col, orderDesc: sort.desc }}
+                           onTotal={setTotal} onRowClick={() => undefined} sort={sort} onSort={cycleSort}
+                           onRetry={() => setRunSeq((n) => n + 1)} />
+            ) : (
+              <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>No Records tables yet.</div>
+            )}
+          </div>
+        </>
+      )}
+      {sel.view === 'media' && (
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <MediaPanel line={line} canManage={canManage && line.state !== 'retired'} onChanged={onChanged} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MediaPanel({ line, canManage, onChanged }: { line: AppDataLine; canManage: boolean; onChanged: () => void }) {
+  const [files, setFiles] = useState<MediaFile[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [folder, setFolder] = useState('uploads');
+  const [confirm, setConfirm] = useState<ConfirmOpts | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setFiles(await fetchMedia(line.name, line.major));
+    } catch (e) {
+      on401(e);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [line.name, line.major]);
+  useEffect(() => {
+    const t = setTimeout(() => void load(), 0);
+    return () => clearTimeout(t);
+  }, [load]);
+
+  const act = async (key: string, run: () => Promise<void>) => {
+    setBusy(key);
+    setError(null);
+    try {
+      await run();
+    } catch (e) {
+      on401(e);
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const upload = (list: FileList | null) => {
+    if (!list || list.length === 0) return;
+    const dir = folder.trim().replace(/^\/+|\/+$/g, '');
+    void act('upload', async () => {
+      for (const f of Array.from(list)) await uploadMedia(line.name, line.major, dir ? `${dir}/${f.name}` : f.name, f);
+      await load();
+      onChanged();
+    });
+  };
+  const remove = (f: MediaFile) => setConfirm({
+    title: `Delete “${f.path}”?`,
+    body: 'The file is removed from the App’s Media. The App and the Ponds reading it no longer see it.',
+    confirmLabel: 'Delete file',
+    action: () => act(f.path, async () => { await deleteMedia(line.name, line.major, f.path); await load(); onChanged(); }),
+  });
+
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      {canManage && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', borderBottom: '1px solid #27272a', fontSize: 12, color: '#a1a1aa' }}>
+          <span>Upload into</span>
+          <input value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="folder"
+                 style={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 6, color: '#e4e4e7',
+                          padding: '4px 8px', fontSize: 12, fontFamily: 'inherit', outline: 'none', width: 160 }} />
+          <button onClick={() => input.current?.click()} disabled={busy === 'upload'}
+                  style={{ ...chip, fontSize: 12, color: THEME_BRAND, borderColor: `${THEME_BRAND}66` }}>
+            {busy === 'upload' ? 'Uploading…' : 'Choose files'}
+          </button>
+          <input ref={input} type="file" multiple style={{ display: 'none' }}
+                 onChange={(e) => { upload(e.target.files); e.target.value = ''; }} />
+        </div>
+      )}
+      {error && <div style={{ padding: '8px 14px', color: '#ef4444', fontSize: 12.5 }}>{error}</div>}
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+        {files == null ? (
+          <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>Loading…</div>
+        ) : files.length === 0 ? (
+          <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>No files.</div>
+        ) : (
+          <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12, color: '#d4d4d8' }}>
+            <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
+              <tr>
+                <th style={th({})}>path</th>
+                <th style={th({ textAlign: 'right' })}>size</th>
+                <th style={th({})}>modified</th>
+                <th style={th({ textAlign: 'right' })}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {files.map((f, i) => (
+                <tr key={f.path} style={{ height: ROW_H, background: i % 2 ? '#121217' : 'transparent' }}>
+                  <td style={td({ color: '#e4e4e7' })} title={f.path}>{f.path}</td>
+                  <td style={td({ textAlign: 'right', color: '#a1a1aa' })}>{fmtBytes(f.size)}</td>
+                  <td style={td({ color: '#a1a1aa' })}>{f.modified ? fmtTs(f.modified) : ''}</td>
+                  <td style={td({ textAlign: 'right' })}>
+                    <span style={{ display: 'inline-flex', gap: 6, justifyContent: 'flex-end' }}>
+                      <button onClick={() => act(f.path, () => downloadMedia(line.name, line.major, f.path))}
+                              disabled={busy === f.path}
+                              style={{ background: 'transparent', border: '1px solid #3f3f46', borderRadius: 5, padding: '2px 10px',
+                                       color: busy === f.path ? '#52525b' : THEME_BRAND, fontSize: 11.5, fontWeight: 700,
+                                       cursor: 'pointer', fontFamily: 'inherit' }}>
+                        {busy === f.path ? '…' : 'Download'}
+                      </button>
+                      {canManage && (
+                        <button onClick={() => remove(f)} disabled={busy === f.path}
+                                style={{ background: 'transparent', border: `1px solid ${THEME_BLOCKED}66`, borderRadius: 5,
+                                         padding: '2px 10px', color: THEME_BLOCKED, fontSize: 11.5, fontWeight: 700,
+                                         cursor: 'pointer', fontFamily: 'inherit' }}>
+                          Delete
+                        </button>
+                      )}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+      {confirm && <ConfirmDialog opts={confirm} onClose={() => setConfirm(null)} />}
+    </div>
   );
 }
 

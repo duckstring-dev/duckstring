@@ -1148,3 +1148,70 @@ export function addWindow(pond: string, body: AddWindowBody): Promise<void> {
 export function removeWindow(pond: string, name: string): Promise<void> {
   return postJSON(pondPath(pond, `windows/${encodeURIComponent(name)}/remove`));
 }
+
+// ─── Apps' Records and Media (plans/records-and-media.md) ─────────────────────
+
+export interface AppDataTable {
+  table: string;
+  kind: 'table' | 'view';
+  rows: number | null; // PostgreSQL's estimate; null before a table is first analysed
+}
+
+export interface AppDataLine {
+  name: string;
+  major: number;
+  records: boolean;
+  media: boolean;
+  state: 'trial' | 'live' | 'retired';
+  schema: string; // the Records schema, `{name}_v{major}` (records.{schema}.{table} in the query catalog)
+  tables?: AppDataTable[];
+  usage?: { files: number; bytes: number } | null;
+}
+
+export interface MediaFile {
+  path: string;
+  size: number;
+  modified: string | null;
+}
+
+export async function fetchAppData(): Promise<{ lines: AppDataLine[]; records_error: string | null }> {
+  return getJSON('/app-data');
+}
+
+const mediaPath = (name: string, major: number) => `/app-data/${encodeURIComponent(name)}/${major}/media`;
+
+export async function fetchMedia(name: string, major: number): Promise<MediaFile[]> {
+  return getJSON<{ files: MediaFile[] }>(mediaPath(name, major)).then((d) => d.files);
+}
+
+// Fetched with auth then handed to the browser as a blob (a plain link wouldn't carry the auth header).
+export async function downloadMedia(name: string, major: number, path: string): Promise<void> {
+  const res = await fetch(`${apiBase()}${mediaPath(name, major)}/file?path=${encodeURIComponent(path)}`,
+                          { headers: authHeaders() });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error(`download failed: ${res.status}`);
+  const href = URL.createObjectURL(await res.blob());
+  const a = document.createElement('a');
+  a.href = href;
+  a.download = path.split('/').pop() || 'file';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 10_000);
+}
+
+export async function uploadMedia(name: string, major: number, path: string, file: File): Promise<void> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${apiBase()}${mediaPath(name, major)}/file?path=${encodeURIComponent(path)}`,
+                          { method: 'POST', headers: authHeaders(), body: form });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `upload failed: ${res.status}`);
+}
+
+export async function deleteMedia(name: string, major: number, path: string): Promise<void> {
+  const res = await fetch(`${apiBase()}${mediaPath(name, major)}/file?path=${encodeURIComponent(path)}`,
+                          { method: 'DELETE', headers: authHeaders() });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `delete failed: ${res.status}`);
+}
