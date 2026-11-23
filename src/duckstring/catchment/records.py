@@ -41,6 +41,7 @@ LISTEN_SETTING = "records_listen"  # a managed PostgreSQL's listen address (defa
 PORT_SETTING = "records_port"      # a managed PostgreSQL's port (chosen once, kept)
 
 DATABASE = "records"
+DUMP = "records.dump"  # every line's Records, in catchment download and the state backup (records/ is left out)
 ADMIN = "duckstring"
 READER = "duckstring_reader"  # NOLOGIN: SELECT on every line's schema
 PONDS = "duckstring_ponds"    # LOGIN, a READER: Ponds, the viewer and the query surface read with it
@@ -378,13 +379,18 @@ class Records:
         with self._lock:
             if self._ready is not None and (not self._ready.managed or self.pg.running()):
                 return self._ready
+            if self._stopping:
+                raise RecordsError("the Catchment is shutting down")
             self._ready = None
             self._provisioned.clear()
             if self.managed:
+                fresh = not self.pg.initialised()
                 endpoint = self._start_managed()
             else:
-                endpoint = parse_external(self.target)
+                fresh, endpoint = False, parse_external(self.target)
             self._bootstrap(endpoint)
+            if fresh:
+                self._restore_dump(endpoint)
             self._ready = endpoint
             return endpoint
 
@@ -596,13 +602,39 @@ class Records:
 
     def dump(self, out: Path) -> bool:
         """Every line's Records as one ``pg_dump`` archive at ``out`` (for ``catchment download`` and the state
-        backup); False when no line holds Records."""
-        if not self.in_use():
+        backup, which leave the cluster's own files out: they can't be copied while it runs). False when no line
+        holds Records, or they live in an external PostgreSQL (whose own backups cover them)."""
+        if not self.managed or not self.in_use():
             return False
         endpoint = self.ensure()
         self._run_tool([self._tool("pg_dump"), "-Fc", "-f", str(out), "-d", endpoint.conninfo()], endpoint,
                        "dumping Records")
         return True
+
+    def _restore_dump(self, endpoint: Endpoint) -> None:
+        """A fresh managed cluster beside a ``records.dump`` (a restored download or state backup): make every
+        line's role, then restore the dump into the database, which recreates the schemas with their owners."""
+        dump = self.base / DUMP
+        if not dump.is_file():
+            return
+        from .db import locked
+
+        with locked(self.db):
+            lines = self.db.execute("SELECT name, major FROM app_data WHERE records = 1").fetchall()
+        for name, major in lines:
+            role = line_role(name, major)
+            pw = _sql_literal(self.password(role))
+            self.psql(f"""
+                DO $$BEGIN
+                  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN
+                    CREATE ROLE "{role}" LOGIN PASSWORD {pw};
+                  END IF;
+                END$$;
+                GRANT "{READER}" TO "{role}";""", endpoint)
+        self._run_tool([self._tool("pg_restore"), "--exit-on-error", "-d", endpoint.conninfo(), str(dump)], endpoint,
+                       "restoring Records from records.dump")
+        dump.rename(dump.with_name(f"{DUMP}.restored-{time.strftime('%Y%m%dT%H%M%S')}"))
+        log.info("records: restored %d line(s) from %s", len(lines), DUMP)
 
     def url(self, role: str, host: str | None = None, start: bool = True) -> str:
         """A standard libpq URL signing ``role`` in (its search path is set on the role itself). With

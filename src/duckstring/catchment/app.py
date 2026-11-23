@@ -200,7 +200,6 @@ async def _lifespan(app: FastAPI):
                 pass
         launcher.shutdown_all()
         await asyncio.to_thread(app.state.app_supervisor.shutdown)
-        await asyncio.to_thread(driver.records.shutdown)
         await app.state.app_http.aclose()
         for wire in getattr(app.state, "serve_wires", []):
             wire.stop()
@@ -218,6 +217,8 @@ async def _lifespan(app: FastAPI):
             from fastapi.concurrency import run_in_threadpool
 
             await run_in_threadpool(checkpoint_full, app.state.root, app.state.state_backup, driver)
+        # Last, after the state backup has dumped Records: stop their PostgreSQL.
+        await asyncio.to_thread(driver.records.shutdown)
 
 
 def create_app(

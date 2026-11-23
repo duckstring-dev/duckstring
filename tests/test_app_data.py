@@ -468,3 +468,64 @@ def test_a_pond_declares_its_external_sources_for_the_canvas(catchment_client):
     assert (app()["records"], app()["media"], app()["data_state"]) == (True, True, None)
     client.get("/apps/feedback/v1/healthz")
     assert app()["data_state"] == "live"
+
+
+# ─── Downloads and restores ─────────────────────────────────────────────────────
+
+
+def test_a_download_carries_records_as_a_dump_and_a_fresh_catchment_restores_them(tmp_path):
+    import io
+    import tarfile
+
+    from fastapi.testclient import TestClient
+
+    from duckstring.catchment.app import create_app
+
+    first = tmp_path / "first"
+    with TestClient(create_app(first)) as client:
+        _deploy(client, "feedback", {"pond.toml": _toml("feedback"), "main.py": _APP_PY})
+        client.post("/apps/feedback/v1/rate/4")
+        client.post("/apps/feedback/v1/rate/5")
+        archive = client.get("/api/catchment/archive").content
+        assert client.get("/api/catchment/usage").json()["total_bytes"] > 0
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        names = tar.getnames()
+        assert "records/records.dump" in names
+        assert not any(n.startswith("records/pg") for n in names)  # never the live cluster's files
+        assert "media/feedback/m1/uploads/note.txt" in names
+        second = tmp_path / "second"
+        tar.extractall(second, filter="data")
+
+    with TestClient(create_app(second)) as client:
+        # The first request starts the App, which starts a fresh cluster and restores the dump into it.
+        assert client.get("/apps/feedback/v1/total").json()["total"] == 9
+        assert client.post("/apps/feedback/v1/rate/1").json() == {"ok": True}
+        assert client.get("/apps/feedback/v1/total").json()["total"] == 10
+        assert any(p.name.startswith("records.dump.restored-") for p in (second / "records").iterdir())
+
+
+def test_the_shutdown_state_backup_carries_records_and_small_media(tmp_path, monkeypatch):
+    import tarfile
+
+    from fastapi.testclient import TestClient
+
+    from duckstring.catchment import state_sync
+    from duckstring.catchment.app import create_app
+
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    with TestClient(create_app(tmp_path / "root", state_backup=str(backup))) as client:
+        _deploy(client, "feedback", {"pond.toml": _toml("feedback"), "main.py": _APP_PY})
+        client.post("/apps/feedback/v1/rate/4")
+        driver = client.app.state.driver
+        monkeypatch.setattr(state_sync, "_MEDIA_IN_BACKUP", 1)  # past the cap, Media is left out (and logged)
+        assert state_sync.checkpoint_full(tmp_path / "root", str(backup), driver)
+        with tarfile.open(backup / "state.tar") as tar:
+            assert not any(n.startswith("media/") for n in tar.getnames())
+        monkeypatch.undo()
+    # The shutdown's own backup, with the cap as it is.
+    with tarfile.open(backup / "state.tar") as tar:
+        names = tar.getnames()
+    assert "records/records.dump" in names and "media/feedback/m1/uploads/note.txt" in names
+    assert not any(n.startswith("records/pg") for n in names)
+    assert not driver.records.pg.running()  # stopped after the backup dumped it
