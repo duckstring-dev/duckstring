@@ -432,7 +432,7 @@ class ObjectStorage(Storage):
                 extra = _EXTRA_FOR_PROTOCOL.get(protocol)
                 if extra is None:
                     raise
-                raise ImportError(f"{scheme}:// storage needs the {extra} extra: pip install 'duckstring[{extra}]'"
+                raise ImportError(f"{scheme}:// storage needs the {extra} extra: duckstring install {extra}"
                                   ) from exc
         return self._fs
 
@@ -674,7 +674,7 @@ class VolumeStorage(ObjectStorage):
                 from .volumes import VolumeFileSystem
             except ImportError as exc:
                 raise ImportError("a Volume reached through the Files API needs the databricks extra: "
-                                  "pip install 'duckstring[databricks]'") from exc
+                                  "duckstring install databricks") from exc
             self._fs = VolumeFileSystem()
         return self._fs
 
@@ -882,7 +882,7 @@ def _google_token(spec: str | None) -> str:
         import google.auth
         from google.auth.transport.requests import Request
     except ImportError:
-        raise ImportError("gs:// storage needs the gcp extra: pip install 'duckstring[gcp]'") from None
+        raise ImportError("gs:// storage needs the gcp extra: duckstring install gcp") from None
     key = credentials.resolve(spec) if spec else ""  # a rotated ${secret:} key gets fresh credentials
     with _google_lock:
         creds = _google_creds.get(key)

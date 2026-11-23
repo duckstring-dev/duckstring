@@ -48,7 +48,7 @@ def _require_dbt():
         from dbt.cli.main import dbtRunner
     except ImportError as exc:  # pragma: no cover - exercised only without the extra
         raise DbtError(
-            "dbt-mode Ponds need the dbt extra — install with: pip install 'duckstring[dbt]'"
+            "dbt-mode Ponds need the dbt extra: duckstring install dbt"
         ) from exc
     return dbtRunner
 

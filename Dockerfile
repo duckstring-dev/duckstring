@@ -17,6 +17,9 @@
 FROM python:3.13-slim
 
 ARG EXTRAS=aws
+# The PostgreSQL major for Records (plans/records-and-media.md), which a Catchment run from this image starts
+# itself; empty leaves PostgreSQL out (a Duck never runs it).
+ARG POSTGRES=18
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -45,16 +48,22 @@ RUN pip install uv \
         "$(ls /opt/duckstring/duckstring-[0-9]*.whl)[${EXTRAS}]" \
     && mkdir -p /var/lib/duckstring \
     && chown -R duck:duck /var/lib/duckstring
+
+# PostgreSQL from the PostgreSQL project's apt repository (PGDG), installed by `duckstring install`, which
+# also turns off Debian's default cluster (the Catchment runs its own, as the duck user).
+RUN if [ -n "${POSTGRES}" ]; then \
+        duckstring install postgres --postgres-version "${POSTGRES}" --yes && rm -rf /var/lib/apt/lists/*; \
+    fi
 USER duck
 WORKDIR /var/lib/duckstring
 
-# DuckDB's extensions for this cloud's storage (httpfs for S3 and GCS, azure for Azure) and for DuckLake
-# Spouts, placed in the duck user's extension directory, where INSTALL finds them and LOAD reads them.
-# Otherwise every new container downloads them at its first read (1-1.6 s and 18-43 MB each, measured), and a
-# Duck in a network with no internet access can't (docker/duckdb_extensions.py fetches the files).
-COPY docker/duckdb_extensions.py /opt/duckstring/
+# DuckDB's extensions for this cloud's storage (httpfs for S3 and GCS, azure for Azure), for DuckLake Spouts
+# and for reading Records, placed in the duck user's extension directory, where INSTALL finds them and LOAD
+# reads them. Otherwise every new container downloads them at its first read (1-1.6 s and 18-43 MB each,
+# measured), and a Duck in a network with no internet access can't. `duckstring install` fetches the files
+# without importing DuckDB, which doesn't finish importing under the other architecture's emulation.
 RUN case "${EXTRAS}" in azure) storage=azure ;; *) storage=httpfs ;; esac \
-    && python /opt/duckstring/duckdb_extensions.py "$storage" ducklake
+    && duckstring install extensions "$storage" ducklake postgres --yes
 
 ENTRYPOINT ["python", "-m"]
 CMD ["duckstring.duck", "--help"]

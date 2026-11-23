@@ -1,4 +1,4 @@
-"""The CLI's layout after the 2026-10 regrouping, plus `app` and `runs` (2026-11): fifteen top-level commands,
+"""The CLI's layout after the 2026-10 regrouping, plus `app` and `runs` (2026-11) and `install`: sixteen top-level commands,
 tables and Objects named as POND.NAME under `data`, catalog SQL through the top-level `query`, multi-Pond `control`
 verbs, `pond promote` and `pond puddle`, and `catchment duct open|close`."""
 
@@ -10,10 +10,10 @@ from test_execute import _deploy_outlet
 from duckstring.cli import app
 
 TOP_LEVEL = {"status", "runs", "query", "get", "refresh", "window", "control", "data", "pond", "catchment", "duck",
-             "spout", "secret", "alert", "app"}
+             "spout", "secret", "alert", "app", "install"}
 
 
-def test_the_top_level_is_fifteen_commands():
+def test_the_top_level_is_sixteen_commands():
     import typer.main
 
     group = typer.main.get_command(app)

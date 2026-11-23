@@ -162,6 +162,7 @@ src/duckstring/
     project.py             #   load_project: pond.toml + entrypoints + puddles/ dirs
     hydrate.py             #   materialise @puddle definitions → puddles/ponds/{source}/data/*.parquet
     runner.py              #   run_pond: one local Pond Run in topological order → puddles/out/
+  install.py               # `duckstring install`: PostgreSQL (PGDG/Homebrew), DuckDB extensions, extras (no DuckDB import)
   cli/                     # Typer CLI (`duckstring` / `ds`)
     refresh.py             #   refresh now|add|ls|rm POND, and refresh tap … (cli/tap.py, mounted under refresh)
     data.py                #   top-level query (catalog SQL, POND.TABLE, or --pond) and get (table or Object), and the data
@@ -182,8 +183,8 @@ src/duckstring/
     runs.py                #   runs [POND] (Run history, --ripples, --json)
     wait.py                #   --wait for refresh now/wake/force/rebuild/deploy (Waiter: exit 0/1/2), interactive():
                            #   without a TTY status prints once and one-shot commands wait instead of a Live view
-                           #   Top level (15): status runs query get refresh window control data pond catchment duck spout
-                           #   secret alert app
+                           #   Top level (16): status runs query get refresh window control data pond catchment duck spout
+                           #   secret alert app install
   alerts/                  # Failure and freshness notifications
     event.py               #   AlertEvent (rendered and sanitised; never a traceback) + KNOWN_EVENTS/normalise_events
     base.py                #   Notifier protocol + get_notifier(uri) scheme registry + destination validation

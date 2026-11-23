@@ -29,6 +29,7 @@ from .control import (
 )
 from .deploy import deploy, promote
 from .deploy import remove as remove_pond
+from .install import install
 from .runs import runs
 from .status import status
 
@@ -90,6 +91,7 @@ app.add_typer(spout_cmd.app, name="spout")
 app.add_typer(secret_cmd.app, name="secret")
 app.add_typer(alert_cmd.app, name="alert")
 app.add_typer(app_cmd.app, name="app")
+app.command("install")(install)
 
 
 def main() -> None:

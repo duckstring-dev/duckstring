@@ -157,7 +157,7 @@ def test_a_missing_extra_names_it(monkeypatch):
         raise ImportError("Install adlfs to access Azure Datalake Gen2 and Azure Blob Storage")
 
     monkeypatch.setattr(fsspec, "filesystem", missing)
-    with pytest.raises(ImportError, match=r"duckstring\[azure\]"):
+    with pytest.raises(ImportError, match=r"duckstring install azure"):
         _ = get_storage("az://lake/p?account_name=a").fs
 
 
