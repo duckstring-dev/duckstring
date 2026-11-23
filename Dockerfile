@@ -62,8 +62,8 @@ WORKDIR /var/lib/duckstring
 # reads them. Otherwise every new container downloads them at its first read (1-1.6 s and 18-43 MB each,
 # measured), and a Duck in a network with no internet access can't. `duckstring install` fetches the files
 # without importing DuckDB, which doesn't finish importing under the other architecture's emulation.
-RUN case "${EXTRAS}" in azure) storage=azure ;; *) storage=httpfs ;; esac \
-    && duckstring install extensions "$storage" ducklake postgres --yes
+# The default set: httpfs, ducklake, postgres, and azure when the azure extra is installed.
+RUN duckstring install extensions --yes
 
 ENTRYPOINT ["python", "-m"]
 CMD ["duckstring.duck", "--help"]

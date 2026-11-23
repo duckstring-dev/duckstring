@@ -158,3 +158,14 @@ def test_with_no_component_every_state_is_listed():
     assert result.exit_code == 0, result.output
     for name in ("postgres", "extension httpfs", "dbt", "aws"):
         assert name in result.output
+
+
+def test_names_after_extensions_are_extensions_postgres_included(tmp_path, monkeypatch, no_servers):
+    from duckstring.cli.install import _plans
+
+    monkeypatch.setattr(inst.Path, "home", lambda: tmp_path)
+    plans = _plans(["extensions", "httpfs", "postgres"], 18)
+    assert [p.component for p in plans] == ["extension httpfs", "extension postgres"]
+    plans = _plans(["postgres", "extensions", "httpfs", "dbt"], 18)
+    assert [p.component for p in plans][:2] == ["postgres", "extension httpfs"]
+    assert plans[-1].component == "extras dbt"

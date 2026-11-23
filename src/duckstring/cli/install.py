@@ -3,7 +3,8 @@
     duckstring install                       # every component's state
     duckstring install postgres              # PostgreSQL for Records, from the official packages
     duckstring install extensions            # DuckDB's extensions, for a machine without internet access
-    duckstring install extensions httpfs postgres
+    duckstring install extensions httpfs postgres   # names after `extensions` are extensions (postgres too)
+    duckstring install postgres extensions          # the PostgreSQL server, then the default extensions
     duckstring install aws dbt               # Duckstring's extras, pinned to this Duckstring
 """
 
@@ -29,7 +30,9 @@ def _plans(components: list[str], postgres_version: int) -> list:
             plans.append(inst.postgres_plan(postgres_version))
         elif name == "extensions":
             names = []
-            while i + 1 < len(components) and components[i + 1] not in COMPONENTS + inst.EXTRAS:
+            # Every name after `extensions` is an extension, `postgres` included (DuckDB's postgres extension);
+            # name the PostgreSQL server before `extensions` to install both.
+            while i + 1 < len(components) and components[i + 1] not in inst.EXTRAS + ("extensions",):
                 i += 1
                 names.append(components[i])
             plans += inst.extension_plans(names or None)
