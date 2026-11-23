@@ -69,7 +69,7 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
     if command is not None and (not isinstance(command, str) or not command.strip()):
         raise ValueError("pond.toml [app] command: expected a command line")
     unknown = set(section) - {"command", "static", "idle_timeout", "state", "health", "strip_path", "download",
-                              "records", "media"}
+                              "records", "media", "migrate"}
     if unknown:
         raise ValueError(f"pond.toml [app]: unknown {', '.join(sorted(unknown))}")
     static = section.get("static")
@@ -100,6 +100,12 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
         if pond.get("name") is not None and not RECORDS_NAME.fullmatch(str(pond["name"])):
             raise ValueError("pond.toml [app] records: an App with Records needs a name of lower-case letters, digits "
                              "and underscores, starting with a letter or underscore, at most 48 characters")
+    migrate = section.get("migrate")
+    if migrate is not None:
+        if not isinstance(migrate, str) or not migrate.strip():
+            raise ValueError("pond.toml [app] migrate: expected a command line")
+        if not (records or media):
+            raise ValueError("pond.toml [app] migrate: only an App with Records or Media is migrated")
     health = section.get("health")
     if health is not None and (not isinstance(health, str) or not health.startswith("/")):
         raise ValueError('pond.toml [app] health: expected a path starting with "/"')
@@ -120,6 +126,7 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
         "download": download,
         "records": records,
         "media": media,
+        "migrate": migrate,
     }
 
 

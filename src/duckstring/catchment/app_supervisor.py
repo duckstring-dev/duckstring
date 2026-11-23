@@ -318,6 +318,7 @@ class AppSupervisor:
         Catchment's PostgreSQL (started if need be) and its Media directory, recorded in ``app_data``, as the
         environment variables the App reads them through. Raises :class:`AppUnavailable` when they can't be."""
         from ..app import MEDIA_ENV, RECORDS_ENV
+        from .app_lifecycle import LifecycleError
         from .media import MediaError
         from .records import RecordsError
 
@@ -326,6 +327,15 @@ class AppSupervisor:
         env: dict[str, str] = {}
         if not (cfg.get("records") or cfg.get("media")):
             return env
+        lifecycle = self.driver.lifecycle
+        if lifecycle.cutting_over(name):
+            raise AppUnavailable(503, "the App is being upgraded; try again in a moment")
+        try:
+            state = lifecycle.prepare(view)  # a new line: live, or a trial migrated from the live one
+        except LifecycleError as e:
+            raise AppUnavailable(503, f"the App's data isn't ready: {e}") from None
+        if state == "retired":
+            raise AppUnavailable(410, "a newer major of this App took over")
         try:
             if cfg.get("records"):
                 self.driver.records.provision(name, major)
@@ -335,7 +345,8 @@ class AppSupervisor:
                 env[MEDIA_ENV] = self.driver.media.location(name, major)
         except (RecordsError, MediaError) as e:
             raise AppUnavailable(503, f"the App's data isn't available: {e}") from None
-        self.driver.note_app_data(name, major, records=bool(cfg.get("records")), media=bool(cfg.get("media")))
+        self.driver.note_app_data(name, major, records=bool(cfg.get("records")), media=bool(cfg.get("media")),
+                                  state=state)
         return env
 
     async def _wait_ready(self, inst: Instance, view: dict) -> None:

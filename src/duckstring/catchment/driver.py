@@ -2677,6 +2677,12 @@ class Driver(TapsMixin, PuddlesMixin):
             majors = self.deployed_majors(name)
             if not majors:
                 return None
+            # An App with Records or Media serves its live line (app_lifecycle.py), whatever else is deployed.
+            live = next((r[0] for r in self.db.execute(
+                "SELECT major FROM app_data WHERE name = ? AND state = 'live'", (name,)).fetchall()
+                if r[0] in majors), None)
+            if live is not None:
+                return live
             served = self.served_major(name)
             return served if served in majors else max(majors)
 
@@ -2729,19 +2735,21 @@ class Driver(TapsMixin, PuddlesMixin):
             _log.warning("Records and Media locations unavailable: %s", e)
         return out
 
-    def note_app_data(self, name: str, major: int, records: bool = False, media: bool = False) -> None:
+    def note_app_data(self, name: str, major: int, records: bool = False, media: bool = False,
+                      state: str = "live") -> None:
         """Record that the App line ``name@major`` holds Records or Media (plans/records-and-media.md): kept, with
-        its state, until the data is purged, whatever happens to the line itself."""
+        its state (``state`` for a line not seen before; see app_lifecycle.py), until the data is purged, whatever
+        happens to the line itself."""
         with self.lock:
             before = self.db.execute("SELECT records, media FROM app_data WHERE name = ? AND major = ?",
                                      (name, int(major))).fetchone()
             if before is None or (records and not before[0]) or (media and not before[1]):
                 self.data_version += 1  # the serving catalog gains the line's Records
             self.db.execute(
-                "INSERT INTO app_data (name, major, records, media, created_at) VALUES (?, ?, ?, ?, ?) "
+                "INSERT INTO app_data (name, major, records, media, state, created_at) VALUES (?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(name, major) DO UPDATE SET records = max(records, excluded.records), "
                 "media = max(media, excluded.media)",
-                (name, int(major), int(records), int(media), _now().isoformat()))
+                (name, int(major), int(records), int(media), state, _now().isoformat()))
             self.db.commit()
 
     def app_data(self, name: str | None = None) -> list[dict]:

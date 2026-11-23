@@ -551,6 +551,59 @@ class Records:
                     self._last_warning = now
                     log.warning("records: PostgreSQL isn't running and couldn't start: %s", e)
 
+    def _run_tool(self, argv: list[str], endpoint: Endpoint, what: str) -> None:
+        env = {**os.environ, "PGPASSWORD": endpoint.admin_password}
+        out = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=3600)
+        if out.returncode != 0:
+            raise RecordsError(f"{what}: {(out.stderr or out.stdout).strip()[-2000:]}")
+
+    def copy_line(self, src: tuple[str, int], dst: tuple[str, int]) -> None:
+        """Replace the line ``dst``'s Records with a copy of ``src``'s: every table, view, sequence, index and
+        function, owned by ``dst``'s role, ``src``'s left as it was (so it can be copied again, and keeps serving
+        meanwhile). The schema is renamed in a scratch database, since a dump can't be restored under another
+        schema's name."""
+        a, b = line_role(*src), line_role(*dst)
+        with self._lock:
+            endpoint = self.ensure()
+            self.provision(*dst)
+            scratch = f"duckstring_copy_{_secrets.token_hex(4)}"
+            work = self.base / "copies"
+            work.mkdir(parents=True, exist_ok=True)
+            first, second = work / f"{scratch}.src.dump", work / f"{scratch}.dst.dump"
+            pg_dump, pg_restore = self._tool("pg_dump"), self._tool("pg_restore")
+            self.psql(f'CREATE DATABASE "{scratch}"', endpoint, database="postgres")
+            try:
+                self._run_tool([pg_dump, "-Fc", "-n", a, "-f", str(first), "-d", endpoint.conninfo()], endpoint,
+                               f"copying {src[0]}@{src[1]}'s Records")
+                self._run_tool([pg_restore, "-d", endpoint.conninfo(database=scratch), str(first)], endpoint,
+                               "restoring the copy")
+                self.psql(f'''ALTER SCHEMA "{a}" RENAME TO "{b}";
+                    REASSIGN OWNED BY "{a}" TO "{b}";
+                    ALTER DEFAULT PRIVILEGES FOR ROLE "{a}" IN SCHEMA "{b}" REVOKE SELECT ON TABLES FROM "{READER}";''',
+                          endpoint, database=scratch)
+                self._run_tool([pg_dump, "-Fc", "-n", b, "-f", str(second), "-d", endpoint.conninfo(database=scratch)],
+                               endpoint, "renaming the copy")
+                self.psql(f'''SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{b}';
+                    DROP SCHEMA IF EXISTS "{b}" CASCADE;''', endpoint)
+                self._run_tool([pg_restore, "-d", endpoint.conninfo(), str(second)], endpoint,
+                               f"installing the copy as {dst[0]}@{dst[1]}'s Records")
+            finally:
+                first.unlink(missing_ok=True)
+                second.unlink(missing_ok=True)
+                self.psql(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)', endpoint, database="postgres")
+            self._provisioned.discard(b)
+            self.provision(*dst)  # grants, search path, and its sign-in, over the restored schema
+
+    def dump(self, out: Path) -> bool:
+        """Every line's Records as one ``pg_dump`` archive at ``out`` (for ``catchment download`` and the state
+        backup); False when no line holds Records."""
+        if not self.in_use():
+            return False
+        endpoint = self.ensure()
+        self._run_tool([self._tool("pg_dump"), "-Fc", "-f", str(out), "-d", endpoint.conninfo()], endpoint,
+                       "dumping Records")
+        return True
+
     def url(self, role: str, host: str | None = None, start: bool = True) -> str:
         """A standard libpq URL signing ``role`` in (its search path is set on the role itself). With
         ``start=False`` it is built from the settings, never starting anything."""

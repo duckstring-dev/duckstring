@@ -337,3 +337,115 @@ def test_media_uploads_need_manage_access(tmp_path):
                            headers=read).status_code == 403
         assert client.post("/api/app-data/feedback/1/media/file", params={"path": "a.txt"}, content=b"x",
                            headers=full).status_code == 200
+
+
+# ─── Majors: trial, live, retired (app_lifecycle.py) ─────────────────────────────
+
+_MIGRATE_PY = '''import os
+
+import psycopg
+
+with psycopg.connect(os.environ["DUCKSTRING_RECORDS_URL"]) as con:
+    con.execute("ALTER TABLE ratings ADD COLUMN IF NOT EXISTS note text DEFAULT 'migrated'")
+with open(os.path.join(os.environ["DUCKSTRING_MEDIA_URL"], "MIGRATED"), "w") as f:
+    f.write(os.environ["DUCKSTRING_PREVIOUS_MAJOR"])
+'''
+
+_V2_PY = _APP_PY + '''
+
+@api.get("/notes")
+def notes():
+    with ds.records() as con:
+        return {"notes": [r[0] for r in con.execute("SELECT note FROM ratings ORDER BY score").fetchall()]}
+'''
+
+
+def _v2_toml() -> str:
+    return _toml("feedback", extra='records = true\nmedia = true\nmigrate = "python migrate.py"\n').replace(
+        'version = "1.0.0"', 'version = "2.0.0"')
+
+
+def test_a_new_major_is_a_trial_until_promoted_then_the_old_one_retires(catchment_client):
+    client = catchment_client
+    driver = client.app.state.driver
+    r = _deploy(client, "feedback", {"pond.toml": _toml("feedback"), "main.py": _APP_PY})
+    assert r.status_code == 200, r.text
+    client.post("/apps/feedback/v1/rate/4")
+    r = _deploy(client, "feedback", {"pond.toml": _v2_toml(), "main.py": _V2_PY, "migrate.py": _MIGRATE_PY},
+                version="2.0.0")
+    assert r.status_code == 200, r.text
+
+    # The bare address stays on the live line; the trial starts with a migrated copy.
+    assert client.get("/apps/feedback/", follow_redirects=False).headers["location"].startswith("/apps/feedback/v1/")
+    assert client.get("/apps/feedback/v2/notes").json() == {"notes": ["migrated"]}
+    assert (client.app.state.root / "media" / "feedback" / "m2" / "MIGRATED").read_text() == "1"
+    assert driver.lifecycle.state("feedback", 2) == "trial"
+    client.post("/apps/feedback/v2/rate/1")  # written to the trial: discarded by the next migration
+
+    # The live line keeps taking writes; the promotion carries them over and migrates them.
+    client.post("/apps/feedback/v1/rate/5")
+    got = client.post("/api/ponds/feedback/serve/promote", json={"major": 2})
+    assert got.status_code == 200, got.text
+    assert got.json()["migrated"] and got.json()["retired"] == 1
+    assert client.get("/apps/feedback/v2/total").json()["total"] == 9  # 4 + 5; the trial's 1 is gone
+    assert client.get("/apps/feedback/v2/notes").json() == {"notes": ["migrated", "migrated"]}
+
+    # The retired line redirects to the live one, never starts, and its role can't sign in.
+    moved = client.get("/apps/feedback/v1/total", follow_redirects=False)
+    assert moved.status_code == 307 and moved.headers["location"] == "/apps/feedback/v2/total"
+    assert driver.lifecycle.state("feedback", 1) == "retired"
+    assert "not permitted to log in" in subprocess_psql(driver.records.line_url("feedback", 1))
+    assert client.post("/api/app-data/feedback/1/media/file", params={"path": "x"}, content=b"x").status_code == 409
+    assert client.get("/apps/feedback/", follow_redirects=False).headers["location"].startswith("/apps/feedback/v2/")
+
+    # Purge: a live line can't be, a retired one can.
+    identity = client.get("/api/catchment/identity").json()
+    name = identity["name"] or identity["id"]
+    assert client.post("/api/app-data/feedback/2/purge", json={"confirm": name}).status_code == 422
+    assert client.post("/api/app-data/feedback/1/purge", json={"confirm": "wrong"}).status_code == 422
+    assert client.post("/api/app-data/feedback/1/purge", json={"confirm": name}).status_code == 200
+    assert [d["major"] for d in driver.app_data()] == [2]
+    assert not (client.app.state.root / "media" / "feedback" / "m1").exists()
+    assert driver.records.psql("SELECT count(*) FROM pg_roles WHERE rolname = 'feedback_v1'").strip() == "0"
+
+
+def subprocess_psql(url: str) -> str:
+    import subprocess
+
+    return subprocess.run([str(find_postgres()[0] / "psql"), url, "-Atc", "SELECT 1"],
+                          capture_output=True, text=True).stderr
+
+
+def test_a_failed_migration_leaves_the_live_line_as_it_was(catchment_client):
+    client = catchment_client
+    driver = client.app.state.driver
+    _deploy(client, "feedback", {"pond.toml": _toml("feedback"), "main.py": _APP_PY})
+    client.post("/apps/feedback/v1/rate/4")
+    broken = _v2_toml().replace("python migrate.py", "python -c 'raise SystemExit(3)'")
+    _deploy(client, "feedback", {"pond.toml": broken, "main.py": _V2_PY}, version="2.0.0")
+    got = client.post("/api/ponds/feedback/serve/promote", json={"major": 2})
+    assert got.status_code == 422 and "exited with code 3" in got.json()["detail"]
+    assert driver.lifecycle.state("feedback", 1) == "live"
+    assert client.get("/apps/feedback/v1/total").json()["total"] == 4  # signs in and serves again
+    assert client.post("/apps/feedback/v1/rate/1").json() == {"ok": True}
+
+
+def test_a_trial_is_for_manage_access_only(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from duckstring.catchment.app import create_app
+    from duckstring.catchment.auth import generate
+
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        keys = generate(app.state.driver.db)
+        full = {"Authorization": f"Bearer {keys['full']}"}
+        read = {"Authorization": f"Bearer {keys['read']}"}
+        _deploy(client, "feedback", {"pond.toml": _toml("feedback"), "main.py": _APP_PY}, headers=full)
+        assert client.post("/apps/feedback/v1/rate/3", headers=read).status_code == 200
+        assert client.get("/apps/feedback/v1/total", headers=read).status_code == 200
+        _deploy(client, "feedback", {"pond.toml": _v2_toml(), "main.py": _V2_PY, "migrate.py": _MIGRATE_PY},
+                version="2.0.0", headers=full)
+        assert client.get("/apps/feedback/v2/notes", headers=full).status_code == 200  # starts the trial
+        assert client.get("/apps/feedback/v2/notes", headers=read).status_code == 403
+        assert client.get("/apps/feedback/v1/total", headers=read).status_code == 200

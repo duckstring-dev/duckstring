@@ -132,9 +132,19 @@ class _PromoteBody(BaseModel):
 
 @router.post("/ponds/{name}/serve/promote", dependencies=[auth.full])
 def promote(name: str, body: _PromoteBody, request: Request):
+    """Serve another major. For an App with Records or Media it is the cutover (app_lifecycle.py): the live line
+    stops, its data is migrated into this major, which goes live, and the old one is retired."""
+    from ...keys import pond_key
+    from ..app_lifecycle import LifecycleError, stateful
+
+    driver = _driver(request)
+    view = driver.app_view(pond_key(name, body.major))
     try:
-        _driver(request).promote(name, body.major)
-    except ValueError as exc:
+        if view is not None and stateful(view["app"]):
+            done = driver.lifecycle.promote(request.app.state.app_supervisor, name, body.major)
+            return {"ok": True, "served_major": body.major, **done}
+        driver.promote(name, body.major)
+    except (ValueError, LifecycleError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
     return {"ok": True, "served_major": body.major}
 

@@ -15,7 +15,8 @@ from typing import Optional
 
 import typer
 
-app = typer.Typer(help="Inspect an App's instances and logs, and restart it.", no_args_is_help=True)
+app = typer.Typer(help="Inspect an App's instances and logs, restart it, and manage its data across majors.",
+                  no_args_is_help=True)
 
 
 def _resolve(catchment: Optional[str]) -> tuple[str, dict]:
@@ -104,3 +105,48 @@ def restart(
     url, cfg = _resolve(catchment)
     _http.post(f"{url}/api/ponds/{name}/app/restart", auth=cfg, params=_http.pond_params(major, version))
     typer.echo(f"Restarting {name}: see `duckstring app instances {name}`.")
+
+
+@app.command("migrate")
+def migrate(
+    name: str = typer.Argument(..., help="The App."),
+    major: int = typer.Option(..., "--major", "-m", help="The trial major to migrate again."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
+) -> None:
+    """Migrate a trial major again from the live one.
+
+    Its Records and Media are copied afresh from the live major (what was written to the trial is discarded) and
+    its `[app] migrate` command runs over the copy. `pond promote` runs the final migration and makes it live.
+    """
+    from . import _http
+
+    url, cfg = _resolve(catchment)
+    got = _http.post(f"{url}/api/ponds/{name}/app/migrate", auth=cfg, params={"major": major}).json()
+    typer.echo(f"Migrated {got['migrated']} again from v{got['from']}.")
+
+
+@app.command("purge")
+def purge(
+    line: str = typer.Argument(..., help="The App line, as name@major."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
+) -> None:
+    """Delete an App line's Records and Media for good.
+
+    For a retired line, a trial, or an App that was removed (its data is kept until purged). The live line of a
+    deployed App can't be purged.
+    """
+    from . import _http
+    from .config import resolve_catchment
+
+    app_name, at, major = line.partition("@")
+    if not at or not major.isdigit():
+        typer.echo("Error: name the line as name@major, such as feedback@1.", err=True)
+        raise typer.Exit(1)
+    cname, cfg = resolve_catchment(catchment)
+    meta = _http.get(f"{cfg['url']}/api/catchment/identity", auth=cfg).json()
+    confirm = meta.get("name") or meta.get("id") or cname
+    if not yes:
+        typer.confirm(f"Delete {line}'s Records and Media on '{cname}' for good?", default=False, abort=True)
+    _http.post(f"{cfg['url']}/api/app-data/{app_name}/{major}/purge", auth=cfg, json={"confirm": confirm})
+    typer.echo(f"Purged {line}: its Records and Media are deleted.")

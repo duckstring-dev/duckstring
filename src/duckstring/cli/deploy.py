@@ -333,13 +333,20 @@ def promote(
     major: int = typer.Option(..., "--major", "-m", help="Major version to serve under the Pond's bare name."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
 ) -> None:
-    """Make a major version the one the Pond's bare name refers to in catalog SQL.
+    """Make a major version the one the Pond's bare name refers to in catalog SQL, or the one an App serves.
 
-    Refused if that major doesn't publish every table currently served.
+    Refused if that major doesn't publish every table currently served. For an App with Records or Media this
+    is the cutover: the live major stops, its data is copied into this one and `[app] migrate` runs over the
+    copy, this major goes live and the old one is retired (read-only until purged). The App answers 503 while
+    the migration runs.
     """
     from . import _http
     from .config import resolve_catchment
 
     _, cfg = resolve_catchment(catchment)
-    _http.post(f"{cfg['url']}/api/ponds/{pond}/serve/promote", auth=cfg, json={"major": major})
-    typer.echo(f"Promoted {pond}: its bare name now refers to v{major}.")
+    got = _http.post(f"{cfg['url']}/api/ponds/{pond}/serve/promote", auth=cfg, json={"major": major}).json()
+    if got.get("migrated"):
+        typer.echo(f"Promoted {pond}: v{major} is live with v{got['retired']}'s data migrated; "
+                   f"v{got['retired']} is retired.")
+    else:
+        typer.echo(f"Promoted {pond}: its bare name now refers to v{major}.")

@@ -48,16 +48,50 @@ def _bearer(conn) -> str:
 
 def _allowed(conn) -> tuple[bool, bool]:
     """(may this request reach an App, did it authenticate with a bearer token to strip)."""
+    level, strip = _level(conn)
+    return level is not None, strip
+
+
+def _level(conn):
+    """(the access level the request signed in with, None when it didn't; whether to strip its bearer token). An
+    open Catchment grants full."""
     state = conn.app.state
     con = getattr(state, "db", None)
     api_key = getattr(state, "api_key", None)
     if not auth.auth_configured(con, api_key):
-        return True, False
+        return auth.Level.FULL, False
     bearer = _bearer(conn)
-    if bearer and auth.level_for_key(con, api_key, bearer) is not None:
-        return True, True
+    if bearer:
+        level = auth.level_for_key(con, api_key, bearer)
+        if level is not None:
+            return level, True
     cookie = conn.cookies.get(COOKIE, "")
-    return bool(cookie) and auth.level_for_key(con, api_key, cookie) is not None, False
+    return (auth.level_for_key(con, api_key, cookie) if cookie else None), False
+
+
+def _line_gate(conn, name: str, major: int, below: str) -> Response | None:
+    """An App with Records or Media (app_lifecycle.py): while it is being promoted it answers 503; a retired line
+    redirects to the live one; a trial is for Manage access only. None: carry on."""
+    driver = conn.app.state.driver
+    lifecycle = getattr(driver, "lifecycle", None)
+    if lifecycle is None:
+        return None
+    if lifecycle.cutting_over(name):
+        return Response("the App is being upgraded; try again in a moment\n", status_code=503,
+                        media_type="text/plain", headers={"Retry-After": str(5)})
+    state = lifecycle.state(name, major)
+    if state == "retired":
+        live = driver.app_major(name)
+        if live is None or live == major:
+            return Response("this major of the App is retired\n", status_code=410, media_type="text/plain")
+        query = f"?{conn.url.query}" if getattr(conn, "url", None) is not None and conn.url.query else ""
+        return RedirectResponse(f"/apps/{quote(name)}/v{live}/{below}{query}", status_code=307)
+    if state == "trial":
+        level, _ = _level(conn)
+        if level is None or level < auth.Level.FULL:
+            return Response("this major of the App is a trial: Manage access only\n", status_code=403,
+                            media_type="text/plain")
+    return None
 
 
 _SIGN_IN = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -130,6 +164,9 @@ async def forward(request: Request, name: str, rest: str):
         return RedirectResponse(f"/apps/{quote(name)}/v{served}/{rest}{query}", status_code=307)
     if below is None:  # /apps/{name}/v1 → /apps/{name}/v1/
         return RedirectResponse(f"/apps/{quote(name)}/v{major}/", status_code=307)
+    gated = _line_gate(request, name, major, below)
+    if gated is not None:
+        return gated
     key = pond_key(name, major)
     view = driver.app_view(key)
     if view is None:
@@ -245,6 +282,9 @@ async def forward_websocket(websocket: WebSocket, name: str, rest: str):
     major, below = _resolve(rest)
     if major is None or below is None:  # a WebSocket can't follow a redirect
         await websocket.close(code=1008)
+        return
+    if _line_gate(websocket, name, major, below) is not None:  # upgrading, retired or a trial: no socket
+        await websocket.close(code=1013)
         return
     key = pond_key(name, major)
     view = driver.app_view(key)

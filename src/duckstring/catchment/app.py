@@ -152,6 +152,7 @@ async def _lifespan(app: FastAPI):
     # forwards requests to them.
     import httpx
 
+    from .app_lifecycle import Lifecycle
     from .app_supervisor import AppSupervisor, run_app_supervisor
     from .media import Media
     from .records import Records
@@ -162,6 +163,7 @@ async def _lifespan(app: FastAPI):
     driver.records = Records(app.state.root, driver.db, reserve=driver.records_reserve,
                              release=driver.records_release)
     driver.media = Media(app.state.root, driver.db)
+    driver.lifecycle = Lifecycle(driver, app.state.root)
 
     app.state.app_supervisor = AppSupervisor(driver, app.state.root, app.state.data_root)
     app.state.app_supervisor.close_orphans()

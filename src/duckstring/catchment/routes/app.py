@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 
 from ...keys import pond_key
 from .. import auth
@@ -82,3 +83,44 @@ async def app_restart(name: str, request: Request, major: int | None = None, ver
     request.app.state.app_restarts.add(task)  # held until done, so the task isn't collected mid-start
     task.add_done_callback(request.app.state.app_restarts.discard)
     return {"ok": True}
+
+
+# ─── Records and Media across majors (app_lifecycle.py) ───────────────────────────
+
+
+@router.post("/ponds/{name}/app/migrate", dependencies=[auth.full])
+async def app_migrate(name: str, request: Request, major: int | None = None, version: str | None = None):
+    """Migrate a trial line again from the live one: its Records and Media copied afresh (what was written there is
+    discarded) and its ``[app] migrate`` run over them."""
+    from ..app_lifecycle import LifecycleError
+
+    app_name, app_major = _app_line(request, name, major, version)
+    driver = _driver(request)
+    try:
+        await asyncio.to_thread(driver.lifecycle.rerun_trial, request.app.state.app_supervisor, app_name, app_major)
+    except LifecycleError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    return {"migrated": f"{app_name}@{app_major}", "from": driver.lifecycle.live_major(app_name)}
+
+
+class _PurgeBody(BaseModel):
+    confirm: str | None = None  # the Catchment's name
+
+
+@router.post("/app-data/{name}/{major}/purge", dependencies=[auth.full])
+async def app_purge(name: str, major: int, body: _PurgeBody, request: Request):
+    """Delete an App line's Records and Media for good (a retired line's, a trial's, or a removed App's). Refused
+    for a deployed live line. Needs the Catchment's name as confirmation."""
+    from ..app_lifecycle import LifecycleError
+    from .catchment import _catchment_name
+
+    driver = _driver(request)
+    expected = _catchment_name(driver.db)
+    if (body.confirm or "") != expected:
+        raise HTTPException(status_code=422, detail=f"purging deletes {name}@{major}'s Records and Media for "
+                                                    f"good; confirm with the Catchment's name: {expected!r}")
+    try:
+        await asyncio.to_thread(driver.lifecycle.purge, request.app.state.app_supervisor, name, major)
+    except LifecycleError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    return {"purged": f"{name}@{major}"}

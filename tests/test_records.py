@@ -134,3 +134,29 @@ def test_an_external_uri_resolves_its_secrets(tmp_path, monkeypatch):
     endpoint = parse_external("postgres://admin:${env:RECORDS_PW}@db.example.com:6543/apps?sslmode=require")
     assert (endpoint.host, endpoint.port, endpoint.database, endpoint.admin_password, endpoint.sslmode) == (
         "db.example.com", 6543, "apps", "s3cret", "require")
+
+
+@needs_pg
+@pytest.mark.timeout(60)
+def test_a_line_is_copied_whole_into_another(records):
+    records.provision("feedback", 1)
+    made = _as(records, "feedback_v1", """
+        CREATE TABLE ratings (id serial PRIMARY KEY, score int CHECK (score BETWEEN 1 AND 5));
+        CREATE INDEX ratings_score ON ratings (score);
+        INSERT INTO ratings (score) VALUES (4), (5);
+        CREATE VIEW good AS SELECT * FROM ratings WHERE score >= 4;""")
+    assert made.returncode == 0, made.stderr
+    records.copy_line(("feedback", 1), ("feedback", 2))
+    # The copy is the new line's: its role owns it, writes it (the sequence carries on), and finds it unqualified.
+    assert _as(records, "feedback_v2", "INSERT INTO ratings (score) VALUES (3) RETURNING id").stdout.strip() == "3"
+    assert _as(records, "feedback_v2", "SELECT count(*) FROM good").stdout.strip() == "2"
+    assert _as(records, "feedback_v2", "INSERT INTO ratings (score) VALUES (9)").returncode != 0  # the CHECK came
+    owner = records.psql("SELECT tableowner FROM pg_tables WHERE schemaname = 'feedback_v2'").strip()
+    assert owner == "feedback_v2"
+    # The source is untouched, still its own role's, and other lines read the copy.
+    assert _as(records, "feedback_v1", "SELECT count(*) FROM ratings").stdout.strip() == "2"
+    assert _as(records, "duckstring_ponds", "SELECT count(*) FROM feedback_v2.ratings").stdout.strip() == "3"
+    # Copying again replaces what the destination held.
+    records.copy_line(("feedback", 1), ("feedback", 2))
+    assert _as(records, "feedback_v2", "SELECT count(*) FROM ratings").stdout.strip() == "2"
+    assert records.psql("SELECT count(*) FROM pg_database WHERE datname LIKE 'duckstring_copy_%'").strip() == "0"

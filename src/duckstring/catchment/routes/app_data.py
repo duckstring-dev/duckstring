@@ -79,7 +79,7 @@ async def list_app_data(request: Request):
     """Every App line holding Records or Media, with its state, its Records tables (``records.{name}_v{major}``
     in the query catalog) and its Media's file count and size."""
     driver = request.app.state.driver
-    lines = driver.app_data()
+    lines = [d for d in driver.app_data() if d["records"] or d["media"]]  # a retired line that kept only a state dir
     records, media = _records(request), _media(request)
     schemas = [f"{d['name']}_v{d['major']}" for d in lines if d["records"]]
     tables: dict = {}
