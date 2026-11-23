@@ -1,6 +1,7 @@
 # Records and Media: Catchment-held App data
 
-Status: **design, not built.** Settled with the author 2026-11-23/24. Supersedes the paragraph in
+Status: **built 2026-11-24** on branch `records-media` for 0.9.0 (see "As built"). Settled with the author
+2026-11-23/24. Supersedes the paragraph in
 `plans/apps.md` "State" that says an App's data reaches a pipeline only through an API an Inlet reads.
 
 ## Why
@@ -182,8 +183,27 @@ public serves it itself.
   read (fast lookups and concurrent reads in Apps; would have replaced the attention App's `db_lock`).
 - A cheap change signal for Records so a reading Pond can skip its read.
 
-## Open
 
-- The purge command's name (`app purge` proposed).
-- The PGDG install on the image (the `duck` user is uid 10001; Postgres refuses to run as root) and on a VM
-  is untested.
+## As built (2026-11-24)
+
+All the above, with these specifics and differences:
+
+- `duckstring install postgres` measured on macOS (Homebrew 18.7) and in `python:3.13-slim` (PGDG 18.7: the
+  postgresql-common script adds the repository with the key it ships; `create_main_cluster = false` before the server
+  package, so no cluster starts). The image installs it (`POSTGRES` build arg, empty to leave it out; about 30 MB).
+- The managed cluster never uses Unix sockets (a long Catchment root overflows the 103-byte path), adopts a
+  postmaster a previous Catchment process left running, and keeps a stable port (re-chosen only when taken).
+- The reader URL rides each job built from settings alone, so a dispatch never starts PostgreSQL; the App
+  supervisor's loop keeps it running while any line holds Records.
+- The trial's first start runs the migration; a previous major with only a private state directory also hands over
+  (its line is recorded retired with no Records or Media).
+- Records copies go through a scratch database (`pg_dump`, rename the schema, `REASSIGN OWNED`, `pg_dump`, restore),
+  so the source line keeps serving during a trial migration.
+- The serving catalog attaches Records as `records`; DuckDB's sandbox (`enable_external_access = false`) still
+  reads an already-attached PostgreSQL (measured).
+- Backups dump Records (`records/records.dump`), restored by a fresh managed cluster after it makes the line roles;
+  the state backup carries Media up to 256 MB.
+
+Open (not built): Records and Media for remote compute (Ducks are given 127.0.0.1; a Media filesystem over the
+Catchment's HTTP API), TLS for a managed PostgreSQL reached from elsewhere, the move command for a changed
+`records`/`media` setting, a `records:` Spout destination, and the purge command's final name (`app purge` for now).

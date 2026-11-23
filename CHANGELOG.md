@@ -4,8 +4,43 @@ Notable changes per release. Versions before 0.5.0 are recorded in the git histo
 
 ## Unreleased
 
-Fixes from two showcase pipelines run unattended on 0.8.0: Melbourne's trains every 31 seconds, and a dozen Ponds
-over Wikipedia page views, news and Bluesky. Needs `duckstring-trickle` 0.4.0.
+Records and Media, the data Apps keep, and fixes from two showcase pipelines run unattended on 0.8.0: Melbourne's
+trains every 31 seconds, and a dozen Ponds over Wikipedia page views, news and Bluesky. Needs `duckstring-trickle`
+0.4.0.
+
+### Records and Media for Apps
+
+An App can now keep data the Catchment holds for it, which Ponds can read and the viewer can show:
+
+- **Records** are an App's tables, in PostgreSQL. `[app] records = true` gives each major line its own schema and
+  sign-in, `{name}_v{major}`, in a PostgreSQL the Catchment runs itself (started the first time an App needs it, its
+  memory set aside like an App's) or one it connects to (`duckstring catchment records --use postgres://...`). The
+  App gets `DUCKSTRING_RECORDS_URL`, a standard connection URL for any driver; `duckstring.app.records()` returns a
+  psycopg connection. Every App can read every other App's Records; only its own are writable.
+- **Media** are an App's files. `[app] media = true` gives each line a folder on the Catchment's disk, or under an
+  object-store prefix (`duckstring catchment media --use s3://...`). The App gets `DUCKSTRING_MEDIA_URL`;
+  `duckstring.app.media()` is a filesystem rooted at it.
+- **Ponds read them**: `pond.read_records("feedback@1.ratings")` is a relation, and `pond.media("feedback@1",
+  "uploads")` lists the files with what was added or removed since the Ripple's previous Run. Both are outside
+  sources: an Inlet reading them always runs when asked. With an App reading the Pond's output (and a Tap on
+  itself), an App's writes flow through a pipeline and back.
+- **Major versions hand over**: an App with Records or Media has one live major. A new major starts as a trial
+  (Manage access only), filled with a copy of the live major's data and migrated by its `[app] migrate` command.
+  `pond promote` is the cutover: the App answers 503 while the final migration runs, then the new major is live
+  and the old one is retired (read-only; its address redirects). `duckstring app migrate` runs a trial's migration
+  again; `duckstring app purge APP@MAJOR` deletes a line's data, which is otherwise kept, even after the App is
+  removed.
+- **In the web UI**, the Catalog gains an App data section: a line's Records tables in the grid (they are the
+  catalog `records`, so SQL can read `records.feedback_v1.ratings` beside Pond tables) and its Media, with
+  download, and upload and delete for Manage access. An App node with Records or Media has a table icon. A Pond
+  can declare where its data comes from (`[pond] external = ["GDELT events", "app:feedback@1"]`), drawn as nodes.
+- **Backups**: `catchment download` and the state backup carry Records as a `pg_dump` (restored by a fresh
+  Catchment) and Media (the state backup up to 256 MB).
+
+PostgreSQL comes from the operating system's official packages: `duckstring install postgres` installs it (the
+PostgreSQL project's apt or yum repository, or Homebrew), and the image carries it. `duckstring install` also
+fetches DuckDB's extensions for a machine without internet access (`extensions`) and installs Duckstring's extras
+pinned to the running version (`aws`, `dbt` and the rest).
 
 ### Each Source read up to what it had published
 

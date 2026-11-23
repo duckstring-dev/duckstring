@@ -90,6 +90,7 @@ src/duckstring/
   core.py                  # Pond/Ripple handles, @ripple/@puddle decorators, Catchment client, pond.toml/entrypoint/import helpers.
                            # load_ripples: THE one collection of a Pond's Ripples (Python + SQL), used by discovery, Duck, runner.
   app.py                   # Apps: [app] validation (app_config), base_path, and the read-only handle duckstring.app.pond()
+  app_data.py              # Ponds reading Apps' Records and Media: read_records, MediaInput (plans/records-and-media.md)
   databricks_rest.py       # Databricks REST (httpx): auth (PAT > OAuth M2M > Entra), SQL statements + Arrow chunks, Volume
                            # files. Shared by the Databricks Flock engine, the Databricks Spout and volumes.py.
   volumes.py               # VolumeFileSystem: an fsspec filesystem over the Files API, for /Volumes where it isn't mounted.
@@ -136,6 +137,9 @@ src/duckstring/
     taps.py                #   TapsMixin (on the Driver): Tap CRUD, key-hash index, the per-query policy, counters
     app_supervisor.py      #   AppSupervisor: App instances (start on request, idle stop, logs, failure)
     app_proxy.py           #   /apps/{name}/v{major}/ forwarding (HTTP + WebSockets), static files, the sign-in gate
+    records.py             #   Records: the managed (or external) PostgreSQL, each App line's schema + role, copy/dump
+    media.py               #   Media: each App line's files, local or under an object-store prefix
+    app_lifecycle.py       #   trial/live/retired lines of an App with Records or Media, migration, cutover, purge
     egress_worker.py       #   delivers published output to Spouts
     alert_worker.py        #   drains the alert_delivery outbox → notifier.send
     providers/             #   the cloud seam: Provider per cloud (aws: Fargate/EC2, presets, gate, verify, instance types;
@@ -336,6 +340,64 @@ An **App** is an Outlet that serves HTTP: `[pond] type = "app"` + `[app]` (`app.
 - **Surface**: `/api/status` per-Pond `is_app` and `app` (`path`, `deployed_at`, `idle_timeout_s`, the running `instance` with `active` requests and `idle_at` from `AppSupervisor.activity` via `Driver.app_activity`); `GET /api/ponds/{name}/app/instances` (read), `/app/logs` (full; `tail`/`offset`, `x-log-offset`), `POST /app/restart` (full: `Driver.prepare_app_restart` clears a failure or Kill, then `AppSupervisor.restart` stops with reason `restart` and starts one in a background task); CLI `duckstring app instances|logs [--follow]|restart`. Bulk Rebuild/Repair skip Apps. Not yet: the guide and recipes, remote compute.
 - **UI** (2026-11-07): the App node is rounder (radius 16), hides `serve`, shows its state (`appState`: failed/killed/starting/running/idle; rim brand cyan while serving) and data age instead of run counts, and an Open button where a Pond has its table button. `openApp` signs the new tab in by POSTing the UI's stored key to `/apps/_signin` from a form (a user gesture, so no popup block); without a stored key it opens the link. The Sidebar's `AppPanel`: version and deploy age, Open App, Sources with their ages, Instance, Refresh (incl. keyless Taps), Restart/Kill; Options trims to the immediate retry budget and Alerts. The bottom panel is `AppInstances` (instances, and the selected one's log, followed while running; logs full-only). Under a subpath host the sign-in page's absolute `/apps/` form action and cookie path don't fit; untested there (platform auth usually leaves the Catchment open).
 - Tests: `tests/test_app.py`.
+
+## Records and Media (`catchment/records.py`, `media.py`, `app_lifecycle.py`, `app_data.py`, `install.py`; migrations `040`/`041`; see `plans/records-and-media.md`)
+
+An App's own data, held by the Catchment (built 2026-11-24, branch `records-media`, for 0.9.0). `[app] records =
+true` / `media = true` (`app_config`; `migrate` = a command, only with one of them).
+- **Records** = PostgreSQL only (SQLite stays inside an App's private `state` dir). `Records` (on `driver.records`):
+  setting `records` = `managed` (default) | a `postgres://` URI (`${secret:}`/`${env:}`, needs CREATEROLE/CREATEDB);
+  `records_memory` (512 MB), `records_listen` (127.0.0.1), `records_port` (chosen once). Fixed once `app_data` has a
+  Records line (`configure` refuses; a move is the way, not built). Managed = `ManagedPostgres` in `{root}/records/pg`:
+  `initdb` (scram, admin `duckstring`, built-in C.UTF-8 on 17+, `--no-locale` before), `postgres` run directly as a
+  child (own session; Unix sockets off: a long root overflows the 103-byte path), adopted from `postmaster.pid` after a
+  Catchment restart, stopped with SIGINT and `proc.wait` (polling `kill(pid, 0)` saw the unreaped child for 30 s).
+  Started lazily by `ensure()` (any need), kept up by `keep_alive` from the App supervisor's loop while lines hold
+  Records, never after `shutdown()` (which runs last in the lifespan, after the state backup). Its memory goes in
+  `app_reserved["#records"]` (`Driver.records_reserve`, the Apps' share). Admin SQL through `psql` from the found bin
+  dir (no Python driver in the Catchment). Binaries: `install.find_postgres` (`DUCKSTRING_PG_BIN`, the recorded path
+  in `~/.duckstring/config.toml [install] postgres`, Homebrew/Postgres.app/Debian/PGDG places, the PATH);
+  `PG_VERSION` pins the major.
+- Per line `{name}_v{major}` (`RECORDS_NAME`, checked at deploy for a Records App): a LOGIN role owning a schema of
+  that name, `search_path` set on the role, member of `duckstring_reader` (NOLOGIN, SELECT on every line via grants +
+  default privileges), so Apps read each other; Ponds/viewer read as `duckstring_ponds`. Passwords = HMAC of the role
+  under `records/key` (0600), never stored. `provision` (idempotent), `freeze` (NOLOGIN + end sessions), `drop`,
+  `copy_line` (pg_dump → scratch database → rename schema + REASSIGN OWNED → pg_dump → restore; source untouched),
+  `dump`/`_restore_dump` (`records/records.dump`, roles made first).
+- **Media** (`driver.media`): setting `media` = `local` (`{root}/media/{name}/m{major}/`) | an object-store URI
+  (`storage.ObjectStorage.fs`; fsspec only comes with the cloud extras, so local uses plain files). `clean_path` keeps
+  paths inside a line; local writes go through `.{name}.uploading` + rename. `copy_line` makes real copies (a hardlink
+  would let an in-place append change a frozen line).
+- **Apps** (`AppSupervisor._app_data_env`, before the instance row): `lifecycle.prepare` (a new line is `live`, or a
+  `trial` migrated from `source_major` when another is live), provision, env `DUCKSTRING_RECORDS_URL`/`_MEDIA_URL`;
+  `duckstring.app.records_url/records()` (psycopg)/`media_url/media_path/media()` (fsspec `DirFileSystem`,
+  `auto_mkdir`). `pond run` gives an App its own cluster under `puddles/app/records/` and `puddles/app/media/`.
+- **Lifecycle** (`Lifecycle` on `driver.lifecycle`, `app_data.state` trial|live|retired): one live major for a
+  stateful App; `Driver.app_major` prefers it. Proxy `_line_gate`: cutover → 503 `Retry-After: 5`; retired → 307 to
+  the live major (410 without one); trial → 403 below full. `pond promote` on a stateful App = `Lifecycle.promote`:
+  stop both lines' instances, freeze the old role, `migrate` (copy Records/Media, run `[app] migrate` with
+  `DUCKSTRING_PREVIOUS_MAJOR`/`_STATE`/`_MEDIA_URL`, 600 s), states, served pointer; a failure unfreezes the old line.
+  A previous major with only a private state dir hands over too (`source_major`'s legacy case; marked retired with
+  records = media = 0, hidden from listings). `app migrate` re-runs a trial's; `app purge APP@MAJOR` (confirm = the
+  Catchment's name; never a deployed live line). Data outlives the line: `pond remove` keeps it.
+- **Ponds** (`app_data.py`): `pond.read_records("name@major.table")` attaches the reader URL read-only once per DuckDB
+  instance (`_duckstring_records`); `pond.media("name@major", folder)` → `MediaInput` (`files/added/removed/open/path`,
+  listing kept via `_input_state`/`_record_input`). Locations ride the job (`app_data`, from settings: a dispatch never
+  starts PostgreSQL) → `set_locations`. A local run reads `puddles/records/{schema}/{table}.parquet`, `puddles/media/`.
+  Outside sources: Inlets always run; a non-Inlet sets `always_run`.
+- **Surface**: `/api/catchment/records|media` (GET read, PUT full), `/api/app-data` (lines, tables, usage),
+  `/api/app-data/{name}/{major}/media[/file]` (list/download read; upload/delete full, 409 on retired),
+  `/api/ponds/{name}/app/migrate`, `/api/app-data/{name}/{major}/purge`; the serving connection attaches Records as
+  catalog `records` before any sandbox locks (data_version bumps when a line gains data). CLI `catchment
+  records|media`, `app migrate|purge`, `install`. UI: Catalog "App data" section (`AppDataTree`, `AppDataViewer`,
+  `MediaPanel`), App node table icon (`app.data_state`), `[pond] external` → `ExternalNode` (dotted; `app:name@major`
+  opens that line's data). Objects got no upload (a Pond's output).
+- **Backups**: `catchment download`/state backup skip `records/` and add `records/records.dump`; Media in both (state
+  backup ≤ 256 MB, `_MEDIA_IN_BACKUP`).
+- Not built: Records/Media reached from remote compute (Ducks get 127.0.0.1; no Media-over-HTTP filesystem), TLS for a
+  managed PostgreSQL, a Records/Media move command, Spouts into Records.
+- Tests: `tests/test_records.py`, `tests/test_app_data.py` (real PostgreSQL; skipped without one), `tests/test_install.py`,
+  `frontend/src/lib/layout.test.ts`.
 
 ## Postgres wire (`catchment/pg_wire.py`, `catchment/pg_types.py`)
 
