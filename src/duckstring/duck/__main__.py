@@ -198,6 +198,10 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                             puddles=data.get("puddles"),
                         )
                         executor.exact_ints = bool(data.get("exact_ints"))  # the line's: see RunInputs
+                        if data.get("app_data"):  # where Apps' Records and Media are (app_data.py)
+                            from ..app_data import set_locations
+
+                            set_locations(data["app_data"].get("records"), data["app_data"].get("media"))
                         if data.get("rebuild"):
                             executor.wipe()  # cold reset: the run rebuilds from scratch
                         _launch(core.begin_run(

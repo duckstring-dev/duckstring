@@ -2714,6 +2714,21 @@ class Driver(TapsMixin, PuddlesMixin):
                 self._configure_slots()
             return f"{max(declared, _MIN_DUCKDB_GRANT) // 10**6}MB"
 
+    def _app_data_locations(self) -> dict | None:
+        """The reader's Records URL and the Media base, once an App line holds either (nothing started before)."""
+        records, media = getattr(self, "records", None), getattr(self, "media", None)
+        if records is None or media is None:
+            return None
+        out = {"records": None, "media": None}
+        try:
+            if records.in_use():
+                out["records"] = records.reader_url(start=False)  # from settings: never starts PostgreSQL here
+            if media.in_use():
+                out["media"] = str(Path(self.root) / "media") if media.is_local else media.target
+        except Exception as e:  # pragma: no cover - a Run never fails for want of App data it may not read
+            _log.warning("Records and Media locations unavailable: %s", e)
+        return out
+
     def note_app_data(self, name: str, major: int, records: bool = False, media: bool = False) -> None:
         """Record that the App line ``name@major`` holds Records or Media (plans/records-and-media.md): kept, with
         its state, until the data is purged, whatever happens to the line itself."""
@@ -3872,6 +3887,9 @@ class Driver(TapsMixin, PuddlesMixin):
             # The live Puddles this line reads ({name: {major, queries, kinds}}): read on the Catchment they live on
             # through this Catchment's Duck channel, at their read positions (catchment/puddles.py).
             "puddles": self.live_puddles_of(pond),
+            # Where this Catchment keeps Apps' Records and Media, for pond.read_records and pond.media
+            # (plans/records-and-media.md).
+            "app_data": self._app_data_locations(),
         })
         # Write started_at as tz-aware ISO (UTC) to match finished_at; the SQLite `datetime('now')`
         # default is naive and would be misread as local time by the UI. A Force re-opens the Run.

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 from test_app import _deploy, _zip  # noqa: F401  (shared App helpers)
+from test_runtime import runtime  # noqa: F401  (the live-Duck Catchment fixture)
 
 from duckstring.app import app_config
 from duckstring.install import find_postgres
@@ -149,3 +150,131 @@ def test_pond_run_gives_an_app_local_records_and_media(tmp_path, monkeypatch):
     assert seen["out"] == "feedback_v1"
     assert "DUCKSTRING_RECORDS_URL" not in local_app.os.environ
     assert (tmp_path / "puddles" / "app" / "records" / "pg" / "PG_VERSION").is_file()  # kept between runs
+
+
+# ─── Ponds reading Records and Media ──────────────────────────────────────────────
+
+
+def test_a_pond_reads_records_and_media_with_what_changed_since_its_last_run(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    import duckdb
+    import psycopg
+
+    from duckstring.app_data import set_locations
+    from duckstring.catchment.db import connect, migrate
+    from duckstring.catchment.media import Media
+    from duckstring.catchment.records import Records
+    from duckstring.core import Pond
+
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    records, media = Records(tmp_path, db), Media(tmp_path, db)
+    try:
+        records.provision("feedback", 1)
+        with psycopg.connect(records.line_url("feedback", 1)) as con:
+            con.execute("CREATE TABLE ratings (id int PRIMARY KEY, score int)")
+            con.execute("INSERT INTO ratings VALUES (1, 5), (2, 3)")
+        media.ensure_line("feedback", 1)
+        import io
+        media.write("feedback", 1, "uploads/a.txt", io.BytesIO(b"first"))
+        set_locations(records.reader_url(), str(tmp_path / "media"))
+
+        registry = duckdb.connect(str(tmp_path / "registry.duckdb"))
+        t0 = datetime(2026, 11, 24, tzinfo=timezone.utc)
+
+        def run(f, previous_f):
+            return Pond("reader", "1.0.0", registry.cursor(), tmp_path, f=f, previous_f=previous_f)
+
+        from duckstring.engine.core import NEVER
+
+        pond = run(t0, NEVER)
+        assert pond.read_records("feedback@1.ratings").aggregate("sum(score)").fetchall()[0][0] == 8
+        first = pond.media("feedback@1", "uploads")
+        assert [e["path"] for e in first.added()] == ["uploads/a.txt"] and first.changed
+        assert first.open("uploads/a.txt").read() == b"first"
+        with pytest.raises(TypeError):
+            first.open("uploads/a.txt", "wb")
+
+        media.write("feedback", 1, "uploads/b.txt", io.BytesIO(b"second"))
+        second = run(t0 + timedelta(hours=1), t0).media("feedback@1", "uploads")
+        assert [e["path"] for e in second.added()] == ["uploads/b.txt"]
+        assert second.removed() == []
+        media.delete("feedback", 1, "uploads/a.txt")
+        third = run(t0 + timedelta(hours=2), t0 + timedelta(hours=1)).media("feedback@1", "uploads")
+        assert third.added() == [] and third.removed() == ["uploads/a.txt"]
+        unchanged = run(t0 + timedelta(hours=3), t0 + timedelta(hours=2)).media("feedback@1", "uploads")
+        assert not unchanged.changed
+
+        with pytest.raises(ValueError):
+            pond.read_records("feedback.ratings")  # the major is always named
+    finally:
+        set_locations(None, None)
+        records.stop()
+
+
+_LOOP_APP_PY = '''from fastapi import FastAPI
+
+from duckstring import app as ds
+
+api = FastAPI()
+pond = ds.pond()
+
+
+@api.get("/healthz")
+def healthz():
+    return {"ok": True}
+
+
+@api.post("/rate/{score}")
+def rate(score: int):
+    with ds.records() as con:
+        con.execute("CREATE TABLE IF NOT EXISTS ratings (id serial PRIMARY KEY, score int)")
+        con.execute("INSERT INTO ratings (score) VALUES (%s)", (score,))
+    return {"ok": True}
+
+
+@api.get("/summary")
+def summary():
+    try:
+        rows = pond.read_table("tally.summary").fetchall()
+    except Exception as e:
+        return {"error": str(e)}
+    return {"n": rows[0][0], "total": rows[0][1]}
+'''
+
+_TALLY_PY = '''from duckstring import ripple
+
+
+@ripple
+def summary(pond):
+    rel = pond.read_records("feedback@1.ratings").aggregate("count(*) AS n, sum(score) AS total")
+    pond.write_table("summary", rel)
+'''
+
+
+@pytest.mark.timeout(120)
+def test_an_app_writes_records_a_pond_reads_them_and_the_app_reads_its_output(runtime):  # noqa: F811
+    import httpx
+    from test_runtime import _pond_status, _wait
+
+    url, root = runtime
+
+    def deploy(name, files, kind="pond"):
+        r = httpx.post(f"{url}/api/deploy", files={"pond": ("pond.zip", _zip(files), "application/zip")},
+                       data={"name": name, "version": "1.0.0", "type": kind}, timeout=30.0)
+        assert r.status_code == 200, r.text
+
+    app_toml = _toml("feedback", extra="records = true\n").replace('type = "app"\n',
+                                                                      'type = "app"\n\n[sources]\ntally = "1.0.0"\n')
+    deploy("tally", {"pond.toml": '[pond]\nname = "tally"\nversion = "1.0.0"\n', "src/pond.py": _TALLY_PY})
+    deploy("feedback", {"pond.toml": app_toml, "main.py": _LOOP_APP_PY})
+
+    for score in (4, 5, 2):
+        assert httpx.post(f"{url}/apps/feedback/v1/rate/{score}", timeout=60.0).json() == {"ok": True}
+    httpx.post(f"{url}/api/ponds/tally/refresh", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "tally") or {}).get("runs_completed", 0) >= 1, timeout=60), \
+        _pond_status(url, "tally")
+    assert _wait(lambda: httpx.get(f"{url}/apps/feedback/v1/summary", timeout=30.0).json().get("n") == 3,
+                 timeout=30), httpx.get(f"{url}/apps/feedback/v1/summary", timeout=30.0).json()
+    assert httpx.get(f"{url}/apps/feedback/v1/summary", timeout=30.0).json() == {"n": 3, "total": 11}

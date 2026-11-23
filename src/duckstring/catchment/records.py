@@ -288,6 +288,8 @@ class Records:
         self._lock = threading.RLock()
         self._ready: Endpoint | None = None
         self._provisioned: set[str] = set()
+        self._stopping = False  # the Catchment is shutting down: keep_alive starts nothing
+        self._last_warning = 0.0
 
     # ── settings ───────────────────────────────────────────────────────────────────────────────────────
 
@@ -415,8 +417,13 @@ class Records:
             raise
         return Endpoint("127.0.0.1", port, DATABASE, ADMIN, admin_password, managed=True)
 
+    def shutdown(self) -> None:
+        """The Catchment is stopping: stop a managed PostgreSQL and start nothing after."""
+        self._stopping = True
+        self.stop()
+
     def stop(self) -> None:
-        """Stop a managed PostgreSQL (at the Catchment's shutdown), giving its memory back."""
+        """Stop a managed PostgreSQL, giving its memory back."""
         with self._lock:
             was = self.pg.running()
             self.pg.stop()
@@ -520,9 +527,34 @@ class Records:
                   END IF;
                 END$$;""")
 
-    def url(self, role: str, host: str | None = None) -> str:
-        """A standard libpq URL signing ``role`` in (its search path is set on the role itself)."""
-        endpoint = self.ensure()
+    def _known_endpoint(self) -> Endpoint | None:
+        """Where PostgreSQL answers, from the settings alone (nothing started); None before a managed one has a
+        port."""
+        if self._ready is not None:
+            return self._ready
+        if not self.managed:
+            return parse_external(self.target)
+        port = self._setting(PORT_SETTING)
+        if not port:
+            return None
+        return Endpoint("127.0.0.1", int(port), DATABASE, ADMIN, self.password(ADMIN), managed=True)
+
+    def keep_alive(self) -> None:
+        """Start a managed PostgreSQL again if App lines hold Records and it isn't running (the Catchment's
+        restart, or a crash), so Ponds and Apps find it. Called from the App supervisor's loop."""
+        if self.managed and not self._stopping and not self.pg.running() and self.in_use():
+            try:
+                self.ensure()
+            except RecordsError as e:
+                now = time.monotonic()
+                if now - self._last_warning > 300:
+                    self._last_warning = now
+                    log.warning("records: PostgreSQL isn't running and couldn't start: %s", e)
+
+    def url(self, role: str, host: str | None = None, start: bool = True) -> str:
+        """A standard libpq URL signing ``role`` in (its search path is set on the role itself). With
+        ``start=False`` it is built from the settings, never starting anything."""
+        endpoint = (self._known_endpoint() if not start else None) or self.ensure()
         query = f"?sslmode={endpoint.sslmode}" if endpoint.sslmode else ""
         return (f"postgresql://{role}:{self.password(role)}@{host or endpoint.host}:{endpoint.port}/"
                 f"{endpoint.database}{query}")
@@ -530,8 +562,8 @@ class Records:
     def line_url(self, name: str, major: int, host: str | None = None) -> str:
         return self.url(line_role(name, major), host)
 
-    def reader_url(self, host: str | None = None) -> str:
-        return self.url(PONDS, host)
+    def reader_url(self, host: str | None = None, start: bool = True) -> str:
+        return self.url(PONDS, host, start=start)
 
     def status(self) -> dict:
         out = {"target": "managed" if self.managed else "external", "running": False,

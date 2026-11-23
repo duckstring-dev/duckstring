@@ -1208,6 +1208,24 @@ class Pond:
 
     # ─── input positions (duckstring.databricks: what an Inlet last read from outside) ─────────────────
 
+    def read_records(self, ref: str):
+        """An App line's Records table as a relation: ``"feedback@1.ratings"`` is table ``ratings`` of App
+        ``feedback``'s major line 1 (plans/records-and-media.md). Read-only and read at the moment the relation
+        runs, as any outside source is: an Inlet reading it always runs when asked, and a Pond with Sources sets
+        ``@ripple(always_run=True)`` on the Ripple reading it. ``merge_table`` it (with its key) to keep a Trickle
+        with a change log of what the App changed."""
+        from .app_data import read_records
+
+        return read_records(self, ref)
+
+    def media(self, line: str, folder: str = ""):
+        """An App line's Media, or a folder of it, as this run sees it (a :class:`~duckstring.app_data.MediaInput`):
+        ``files()``, ``added()`` (new or changed since the Ripple's previous completed run), ``removed()``,
+        ``open(path)`` and ``path(path)``. ``line`` is ``name@major``."""
+        from .app_data import MediaInput
+
+        return MediaInput(self, line, folder)
+
     def _input_state(self, ref: str) -> dict | None:
         """What this Ripple recorded about the external input ``ref`` at its previous completed run, or None
         (a first run, a Rebuild, or nothing recorded). The registry holds every run's (a Run dispatched while

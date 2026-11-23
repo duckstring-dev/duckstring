@@ -198,7 +198,7 @@ async def _lifespan(app: FastAPI):
                 pass
         launcher.shutdown_all()
         await asyncio.to_thread(app.state.app_supervisor.shutdown)
-        await asyncio.to_thread(driver.records.stop)
+        await asyncio.to_thread(driver.records.shutdown)
         await app.state.app_http.aclose()
         for wire in getattr(app.state, "serve_wires", []):
             wire.stop()

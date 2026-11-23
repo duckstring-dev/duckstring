@@ -520,6 +520,9 @@ async def run_app_supervisor(supervisor: AppSupervisor, interval: float = 1.0) -
         await asyncio.sleep(interval)
         try:
             await asyncio.to_thread(supervisor.reconcile)
+            records = getattr(supervisor.driver, "records", None)
+            if records is not None:  # Records' PostgreSQL back after a restart or a crash
+                await asyncio.to_thread(records.keep_alive)
         except Exception as exc:  # keep the loop alive
             print(f"[catchment] app supervisor error: {exc}", flush=True)
 
