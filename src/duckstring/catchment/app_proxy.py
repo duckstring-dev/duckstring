@@ -180,7 +180,7 @@ async def forward(request: Request, name: str, rest: str):
 
     supervisor = request.app.state.app_supervisor
     try:
-        inst = await supervisor.acquire(key)
+        inst = await supervisor.acquire(key, prefer=_sticky(request, view))
     except AppUnavailable as exc:
         return _unavailable(exc)
     await _run_taps(driver, key)
@@ -264,7 +264,24 @@ async def _forward_http(request: Request, supervisor, inst, strip_bearer: bool, 
 
     out = StreamingResponse(body(), status_code=resp.status_code, background=BackgroundTask(finish))
     out.raw_headers = [(k.lower(), v) for k, v in resp.headers.raw if k.decode("latin-1").lower() not in _HOP]
+    if view["app"].get("instances", 1) > 1 and _sticky(request, view) != inst.id:
+        # Several instances: keep this browser on the one it reached, for an App that keeps sessions in memory.
+        path = base_path(view["name"], view["major"]) + "/"
+        out.raw_headers.append((b"set-cookie", f"{_sticky_name(view)}={inst.id}; Path={path}; HttpOnly; SameSite=Lax"
+                                .encode("latin-1")))
     return out
+
+
+def _sticky_name(view: dict) -> str:
+    return f"duckstring_instance_{view['name']}_v{view['major']}"
+
+
+def _sticky(conn, view: dict) -> int | None:
+    """The instance this browser was kept on (its cookie), when the App runs several."""
+    try:
+        return int(conn.cookies.get(_sticky_name(view), ""))
+    except ValueError:
+        return None
 
 
 # ─── WebSockets ────────────────────────────────────────────────────────────────
@@ -293,7 +310,7 @@ async def forward_websocket(websocket: WebSocket, name: str, rest: str):
         return
     supervisor = websocket.app.state.app_supervisor
     try:
-        inst = await supervisor.acquire(key)
+        inst = await supervisor.acquire(key, prefer=_sticky(websocket, view))
     except AppUnavailable:
         await websocket.close(code=1013)
         return

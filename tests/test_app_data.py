@@ -611,3 +611,106 @@ def test_which_ducks_are_on_this_machine():
     assert not launcher.on_this_machine({"remote": True, "duck_target": "big", "pool": {"provider": "fargate"}})
     assert launcher.on_this_machine({"remote": True, "duck_target": "dev", "pool": {"provider": "local"}})
     assert DispatchingLauncher(local, {}).on_this_machine({"remote": True, "duck_target": "M", "preset": True})
+
+
+# ─── Several instances on the Catchment's machine ───────────────────────────────
+
+_SCALED_PY = '''import os
+import time
+
+from fastapi import FastAPI
+
+from duckstring import app as ds
+
+api = FastAPI()
+# Once, as each instance starts (concurrent CREATE TABLE IF NOT EXISTS races in PostgreSQL).
+with ds.records() as con:
+    con.execute("CREATE TABLE IF NOT EXISTS hits (pid int)")
+
+
+@api.get("/healthz")
+def healthz():
+    return {"ok": True}
+
+
+@api.get("/work")
+def work():
+    time.sleep(0.6)  # a sync handler: one instance's threads fill up
+    with ds.records() as con:
+        con.execute("INSERT INTO hits VALUES (%s)", (os.getpid(),))
+    return {"pid": os.getpid()}
+
+
+@api.get("/pid")
+def pid():
+    return {"pid": os.getpid()}
+'''
+
+
+def test_config_refuses_several_instances_with_a_private_state_directory():
+    base = {"pond": {"type": "app", "name": "x"}, "app": {"command": "run", "instances": 2}}
+    with pytest.raises(ValueError, match="state"):
+        app_config(base)
+    assert app_config({**base, "app": {**base["app"], "state": "none"}})["instances"] == 2
+    with pytest.raises(ValueError):
+        app_config({**base, "app": {"command": "run", "instances": 0, "state": "none"}})
+
+
+@pytest.mark.timeout(120)
+def test_an_app_grows_to_several_instances_that_share_its_records(tmp_path, monkeypatch):
+    import asyncio
+
+    import httpx
+    from test_runtime import _free_port, _serve
+
+    port = _free_port()
+    url = f"http://127.0.0.1:{port}"
+    server, thread = _serve(tmp_path, port)
+    try:
+        toml = _toml("busy", extra='records = true\nstate = "none"\ninstances = 3\n').replace(
+            'type = "app"\n', 'type = "app"\nmemory = "300MB"\n')
+        r = httpx.post(f"{url}/api/deploy", files={"pond": ("pond.zip", _zip({"pond.toml": toml,
+                                                                                "main.py": _SCALED_PY}),
+                                                            "application/zip")},
+                       data={"name": "busy", "version": "1.0.0", "type": "pond"}, timeout=30.0)
+        assert r.status_code == 200, r.text
+
+        async def wave(n):
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                got = await asyncio.gather(*[client.get(f"{url}/apps/busy/v1/work") for _ in range(n)])
+            return {g.json()["pid"] for g in got}
+
+        pids = set(asyncio.run(wave(12)))  # one instance, busy: another starts in the background
+        for _ in range(6):
+            pids |= asyncio.run(wave(12))
+            if len(pids) >= 2:
+                break
+        assert len(pids) >= 2, pids
+        driver = server.config.app.state.driver
+        reserved = [k for k in driver.app_reserved if k.startswith("busy@1")]
+        assert len(reserved) >= 2  # each instance sets its memory aside
+        status = next(p for p in httpx.get(f"{url}/api/status").json()["ponds"] if p["name"] == "busy")
+        assert status["app"]["instance"]["count"] >= 2
+
+        # Every instance writes the line's one Records.
+        written = driver.records.psql("SELECT count(DISTINCT pid) FROM busy_v1.hits").strip()
+        assert int(written) >= 2
+
+        # A browser stays on the instance its cookie names.
+        with httpx.Client(timeout=30.0) as browser:
+            first = browser.get(f"{url}/apps/busy/v1/pid")
+            assert any(c.startswith("duckstring_instance_busy_v1=") for c in first.headers.get_list("set-cookie"))
+            again = {browser.get(f"{url}/apps/busy/v1/pid").json()["pid"] for _ in range(5)}
+            assert again == {first.json()["pid"]}
+
+        # Each instance stops on its own when idle; the others keep serving.
+        supervisor = server.config.app.state.app_supervisor
+        instances = supervisor._instances["busy@1"]
+        before = len(instances)
+        instances[-1].last_used -= 3600
+        supervisor.reconcile()
+        assert len(supervisor._instances["busy@1"]) == before - 1
+        assert httpx.get(f"{url}/apps/busy/v1/pid", timeout=30).status_code == 200
+    finally:
+        server.should_exit = True
+        thread.join(timeout=15)

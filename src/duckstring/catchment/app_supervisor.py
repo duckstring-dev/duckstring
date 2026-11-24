@@ -48,6 +48,7 @@ log = logging.getLogger(__name__)
 DEFAULT_START_TIMEOUT_S = 60.0
 STOP_GRACE_S = 10.0
 WS_LEASE_GRACE_S = 60.0  # how long a WebSocket keeps the lease of its previous message
+GROW_AT = 4  # requests in flight on every ready instance before an App with several instances starts another
 # Never handed to an App's process: the Catchment's own credentials.
 _WITHHELD_ENV = ("DUCKSTRING_API_KEY",)
 
@@ -88,6 +89,7 @@ class Instance:
     leases: dict[int, list[tuple[float, dict]]] = field(default_factory=dict)
     next_ticket: int = 0
     memory_limit: str | None = None
+    reserve_key: str = ""  # where its memory is set aside (Driver.app_reserved): the App's key, or one per instance
 
 
 def _current(inst: Instance, view: dict) -> bool:
@@ -110,7 +112,9 @@ class AppSupervisor:
         self.driver = driver
         self.root = Path(root)
         self.data_root = data_root
-        self._instances: dict[str, Instance] = {}
+        self._instances: dict[str, list[Instance]] = {}  # an App's instances ([app] instances, on this machine)
+        self._growing: set[str] = set()  # Apps starting another instance in the background
+        self._slots = 0  # names each extra instance's memory slot
         self._starts: dict[str, asyncio.Lock] = {}
         self._crashes: dict[str, int] = {}  # consecutive instances that exited on their own or never got ready
         self._freshness: dict[str, dict] = {}  # last freshness written per App, to write only on change
@@ -125,14 +129,17 @@ class AppSupervisor:
 
     # ─── serving a request ──────────────────────────────────────────────────
 
-    async def acquire(self, key: str) -> Instance:
-        """A ready instance of the App ``key``, started if needed. Raises :class:`AppUnavailable`."""
+    async def acquire(self, key: str, prefer: int | None = None) -> Instance:
+        """A ready instance of the App ``key``, started if needed: ``prefer`` (an instance id, from the browser's
+        cookie) while it serves, else the least busy. An App declaring several ``instances`` starts another, in the
+        background, once every ready one has ``GROW_AT`` requests in flight. Raises :class:`AppUnavailable`."""
         view = self.driver.app_view(key)
         if view is None:
             raise AppUnavailable(404, "no such App")
         self._check_serving(key, view)
-        inst = self._ready(key, view)
+        inst = self._pick(key, view, prefer)
         if inst is not None:
+            self._maybe_grow(key, view)
             return inst
         lock = self._starts.setdefault(key, asyncio.Lock())
         async with lock:
@@ -140,32 +147,73 @@ class AppSupervisor:
             if view is None:
                 raise AppUnavailable(404, "no such App")
             self._check_serving(key, view)
-            inst = self._ready(key, view)
+            inst = self._pick(key, view, prefer)
             if inst is not None:
                 return inst
-            old = self._instances.get(key)
-            if old is not None and old.proc.poll() is not None and not old.stopping:  # it died: count it
-                await asyncio.to_thread(self._stop, old, "exited")
-                self._exited(view, "exited", old.proc.returncode)
-                view = self.driver.app_view(key)
-                if view is None:
-                    raise AppUnavailable(404, "no such App")
-                self._check_serving(key, view)
-            elif old is not None:  # an older deploy's instance
-                await asyncio.to_thread(self._stop, old, "redeploy")
+            for old in self._of(key):
+                if old.proc.poll() is not None and not old.stopping:  # it died: count it
+                    await asyncio.to_thread(self._stop, old, "exited")
+                    self._exited(view, "exited", old.proc.returncode)
+                    view = self.driver.app_view(key)
+                    if view is None:
+                        raise AppUnavailable(404, "no such App")
+                    self._check_serving(key, view)
+                elif not old.stopping and not _current(old, view):  # an older deploy's instance
+                    await asyncio.to_thread(self._stop, old, "redeploy")
             if not view["app"]["command"]:
                 raise AppUnavailable(404, "not found")  # a static-only App: nothing to start
+            return await self._start(key, view)
+
+    async def _start(self, key: str, view: dict) -> Instance:
+        """Start one more instance of ``key`` and wait for it to be ready."""
+        slot = key if not self._of(key) else f"{key}#{self._next_slot()}"
+        try:
+            memory_limit = self.driver.app_reserve(key, slot)
+        except ValueError as e:
+            raise AppUnavailable(503, str(e)) from None
+        try:
+            inst = await asyncio.to_thread(self._spawn, view, memory_limit, slot)
+        except BaseException:
+            self.driver.app_release(slot)
+            raise
+        await self._wait_ready(inst, view)
+        return inst
+
+    def _next_slot(self) -> int:
+        with self._mu:
+            self._slots += 1
+            return self._slots
+
+    def _maybe_grow(self, key: str, view: dict) -> None:
+        """Start another instance in the background when the App may have more and every ready one is busy."""
+        limit = view["app"].get("instances", 1)
+        if limit <= 1 or key in self._growing or self.closing:
+            return
+        ready = [i for i in self._of(key) if i.ready and not i.stopping and _current(i, view)]
+        starting = [i for i in self._of(key) if not i.ready and not i.stopping]
+        if starting or not ready or len(ready) >= limit or min(i.active for i in ready) < GROW_AT:
+            return
+        self._growing.add(key)
+
+        async def grow() -> None:
             try:
-                memory_limit = self.driver.app_reserve(key)
-            except ValueError as e:
-                raise AppUnavailable(503, str(e)) from None
-            try:
-                inst = await asyncio.to_thread(self._spawn, view, memory_limit)
-            except BaseException:
-                self.driver.app_release(key)
-                raise
-            await self._wait_ready(inst, view)
-            return inst
+                await self._start(key, view)
+            except AppUnavailable as e:  # the instances it has keep serving
+                log.warning("another instance of %s didn't start: %s", key, e.message)
+            except Exception:
+                log.exception("starting another instance of %s", key)
+            finally:
+                self._growing.discard(key)
+
+        asyncio.get_running_loop().create_task(grow())
+
+    def _of(self, key: str) -> list[Instance]:
+        with self._mu:
+            return list(self._instances.get(key, ()))
+
+    def _all(self) -> list[Instance]:
+        with self._mu:
+            return [i for insts in self._instances.values() for i in insts]
 
     def _check_serving(self, key: str, view: dict) -> None:
         if view["is_killed"]:
@@ -177,12 +225,15 @@ class AppSupervisor:
         if self._crashes.get(key, 0) > view["immediate_retries"]:
             self._crashes[key] = 0
 
-    def _ready(self, key: str, view: dict) -> Instance | None:
-        inst = self._instances.get(key)
-        if (inst is not None and inst.ready and not inst.stopping and inst.proc.poll() is None
-                and _current(inst, view)):
-            return inst
-        return None
+    def _pick(self, key: str, view: dict, prefer: int | None = None) -> Instance | None:
+        ready = [i for i in self._of(key)
+                 if i.ready and not i.stopping and i.proc.poll() is None and _current(i, view)]
+        if not ready:
+            return None
+        for inst in ready:
+            if inst.id == prefer:
+                return inst
+        return min(ready, key=lambda i: (i.active, i.id))
 
     def begin(self, inst: Instance) -> int:
         """A request or WebSocket connection starts: it keeps the instance from idling and takes a read lease.
@@ -222,12 +273,12 @@ class AppSupervisor:
         """The versions of the Source line ``source_key`` the App ``key`` is reading: the leases of its requests
         and WebSockets in flight, and its explicit holds (``pond.hold()``). For ``Driver._retain_from``."""
         with self._mu:
-            inst = self._instances.get(key)
-            if inst is None:
+            insts = list(self._instances.get(key, ()))
+            if not insts:
                 return []
-            out = [lease[source_key] for entries in inst.leases.values() for _, lease in entries
+            out = [lease[source_key] for inst in insts for entries in inst.leases.values() for _, lease in entries
                    if source_key in lease]
-            holds = inst.log_path.parent.parent / "holds"
+            holds = insts[0].log_path.parent.parent / "holds"
         for path in holds.glob("*.json") if holds.is_dir() else ():
             try:
                 pid = int(path.stem.split("-")[0])
@@ -243,19 +294,19 @@ class AppSupervisor:
         """For ``/api/status``: the requests in flight on ``key``'s instance, and when it will stop for idleness
         (``None`` while busy, or with no idle timeout). ``None`` with no instance."""
         with self._mu:
-            inst = self._instances.get(key)
-            if inst is None or inst.stopping:
+            insts = [i for i in self._instances.get(key, ()) if not i.stopping]
+            if not insts:
                 return None
-            active, last_used = inst.active, inst.last_used
+            active, last_used = sum(max(i.active, 0) for i in insts), max(i.last_used for i in insts)
         idle_at = None
         if idle_timeout_s > 0 and active <= 0:
             left = max(0.0, idle_timeout_s - (time.monotonic() - last_used))
             idle_at = (datetime.now(timezone.utc) + timedelta(seconds=left)).isoformat()
-        return {"active": max(active, 0), "idle_at": idle_at}
+        return {"active": active, "idle_at": idle_at, "count": len(insts)}
 
     # ─── starting ───────────────────────────────────────────────────────────
 
-    def _spawn(self, view: dict, memory_limit: str | None = None) -> Instance:
+    def _spawn(self, view: dict, memory_limit: str | None = None, slot: str | None = None) -> Instance:
         from ..environments import ensure_env
 
         name, major = view["name"], view["major"]
@@ -293,7 +344,8 @@ class AppSupervisor:
             "data_root": self.data_root, "sources": list(view["sources"]), "source_majors": view["sources"],
             "runtime": str(runtime), "memory_limit": memory_limit,
         })
-        shutil.rmtree(runtime / "holds", ignore_errors=True)  # a previous instance's
+        if not any(not i.stopping for i in self._of(view["key"])):
+            shutil.rmtree(runtime / "holds", ignore_errors=True)  # a previous instance's (none runs beside it)
         self._write_freshness(view["key"], runtime, force=True)
         with open(log_path, "ab") as log:
             log.write(f"[duckstring] starting {name}@{major} {view['version']} on port {port}\n".encode())
@@ -308,9 +360,9 @@ class AppSupervisor:
             db.commit()
         inst = Instance(key=view["key"], id=iid, version_id=view["version_id"], deployed_at=view["deployed_at"],
                         proc=proc, port=port,
-                        log_path=log_path, memory_limit=memory_limit)
+                        log_path=log_path, memory_limit=memory_limit, reserve_key=slot or view["key"])
         with self._mu:
-            self._instances[view["key"]] = inst
+            self._instances.setdefault(view["key"], []).append(inst)
         return inst
 
     def _app_data_env(self, view: dict) -> dict[str, str]:
@@ -421,11 +473,16 @@ class AppSupervisor:
                     pass
                 proc.wait()
         with self._mu:
-            if self._instances.get(inst.key) is inst:
-                del self._instances[inst.key]
+            insts = self._instances.get(inst.key, [])
+            if inst in insts:
+                insts.remove(inst)
+            last = not insts
+            if last:
+                self._instances.pop(inst.key, None)
             inst.leases.clear()
-        shutil.rmtree(inst.log_path.parent.parent / "holds", ignore_errors=True)
-        self.driver.app_release(inst.key, process=process)
+        if last:
+            shutil.rmtree(inst.log_path.parent.parent / "holds", ignore_errors=True)
+        self.driver.app_release(inst.reserve_key or inst.key, process=process)
         db = self.driver.db
         with locked(db):
             db.execute("UPDATE app_instance SET stopped_at = ?, stop_reason = ?, exit_code = ? "
@@ -435,9 +492,7 @@ class AppSupervisor:
     def stop_now(self, key: str, reason: str, process: bool = False) -> None:
         """Stop ``key``'s instance at once: the Driver's hook for a Kill or a removal (``process=False``, as the
         Driver processes the engine itself), and a same-version redeploy's, before its directory is replaced."""
-        with self._mu:
-            inst = self._instances.get(key)
-        if inst is not None:
+        for inst in self._of(key):
             self._stop(inst, reason, process=process)
         self._crashes.pop(key, None)
 
@@ -459,9 +514,7 @@ class AppSupervisor:
         ``closing`` flag, which the Catchment's shutdown sets before it cancels the loop (and this sets again), makes
         such a pass leave everything alone."""
         self.closing = True
-        with self._mu:
-            instances = list(self._instances.values())
-        for inst in instances:
+        for inst in self._all():
             self._stop(inst, "shutdown")
 
     # ─── the loop ───────────────────────────────────────────────────────────
@@ -469,8 +522,7 @@ class AppSupervisor:
     def reconcile(self) -> None:
         """One pass: record instances that exited on their own, stop idle and outdated ones, and refresh
         each running App's freshness file."""
-        with self._mu:
-            instances = list(self._instances.values())
+        instances = self._all()
         now = time.monotonic()
         for inst in instances:
             if self.closing:

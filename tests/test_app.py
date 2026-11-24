@@ -109,7 +109,7 @@ def test_app_config_validates_the_declaration(tmp_path):
     cfg = app_config({"pond": {"type": "app"}, "app": {"command": "run", "idle_timeout": "1h30m"}})
     assert cfg == {"command": "run", "static": None, "memory": None, "idle_timeout_s": 5400, "state": "local",
                    "health": None, "strip_path": True, "download": None, "records": False, "media": False,
-                   "migrate": None}
+                   "migrate": None, "instances": 1}
     assert app_config({"pond": {"type": "app", "memory": "2GB"}, "app": {"command": "run"}})["memory"] == 2 * 10**9
     assert app_config({"pond": {"type": "app"}, "app": {"command": "run", "idle_timeout": "0"}})["idle_timeout_s"] == 0
     (tmp_path / "out").mkdir()
@@ -185,7 +185,7 @@ def test_an_idle_instance_stops_and_the_next_request_starts_another(catchment_cl
     _deploy_pipeline(client)
     assert client.get("/apps/dash/v1/hello").status_code == 200
     supervisor = client.app.state.app_supervisor
-    inst = supervisor._instances["dash@1"]
+    inst = supervisor._instances["dash@1"][0]
     inst.last_used -= 3600  # longer ago than the default idle timeout
     supervisor.reconcile()
     assert inst.proc.poll() is not None and "dash@1" not in supervisor._instances
@@ -221,7 +221,7 @@ def test_an_app_redeploys_its_running_version_in_place(catchment_client):
     assert client.get("/apps/dash/v1/new").json() == {"new": True}
     # An instance started before the redeploy's record lands is replaced by the next reconcile.
     supervisor = client.app.state.app_supervisor
-    inst = supervisor._instances["dash@1"]
+    inst = supervisor._instances["dash@1"][0]
     inst.deployed_at = "an earlier deploy"
     supervisor.reconcile()
     assert inst.proc.poll() is not None and "dash@1" not in supervisor._instances
@@ -254,7 +254,7 @@ def test_a_shutdown_during_a_reconcile_pass_never_fails_the_app(catchment_client
     _deploy_pipeline(client)
     assert client.get("/apps/dash/v1/hello").status_code == 200
     supervisor = client.app.state.app_supervisor
-    inst = supervisor._instances["dash@1"]
+    inst = supervisor._instances["dash@1"][0]
     driver = supervisor.driver
     real_view = driver.app_view
 
@@ -278,7 +278,7 @@ def test_kill_stops_the_instance(catchment_client):
     client = catchment_client
     _deploy_pipeline(client)
     assert client.get("/apps/dash/v1/hello").status_code == 200
-    inst = client.app.state.app_supervisor._instances["dash@1"]
+    inst = client.app.state.app_supervisor._instances["dash@1"][0]
     assert client.post("/api/ponds/dash/kill").status_code == 200
     assert inst.proc.poll() is not None
     assert client.get("/apps/dash/v1/hello").status_code == 503
@@ -623,7 +623,7 @@ def test_a_request_in_flight_keeps_the_source_version_it_may_read(catchment_clie
     _deploy_pipeline(client)
     assert client.get("/apps/dash/v1/hello").status_code == 200
     driver, supervisor = client.app.state.driver, client.app.state.app_supervisor
-    inst = supervisor._instances["dash@1"]
+    inst = supervisor._instances["dash@1"][0]
     f1, f2 = datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2026, 1, 2, tzinfo=timezone.utc)
     _publish(driver, f1)
     ticket = supervisor.begin(inst)  # a request arrives while f1 is the published version
@@ -644,7 +644,7 @@ def test_a_websocket_renews_its_lease_and_keeps_the_previous_one_for_a_while(cat
     _deploy_pipeline(client)
     assert client.get("/apps/dash/v1/hello").status_code == 200
     driver, supervisor = client.app.state.driver, client.app.state.app_supervisor
-    inst = supervisor._instances["dash@1"]
+    inst = supervisor._instances["dash@1"][0]
     f1, f2, f3 = (datetime(2026, 1, d, tzinfo=timezone.utc) for d in (1, 2, 3))
     _publish(driver, f1)
     ticket = supervisor.begin(inst)  # the connection opens at f1
@@ -730,7 +730,7 @@ def test_a_running_app_sets_its_memory_aside_and_the_slots_share_the_rest(tmp_pa
         assert r.status_code == 200, r.text
         assert abs(_size(r.json()["limit"]) - 10**9) < 10**7
         assert driver.app_reserved == {"dash@1": 10**9} and driver._slot_bytes() == 1.5 * 10**9
-        supervisor._instances["dash@1"].last_used -= 3600
+        supervisor._instances["dash@1"][0].last_used -= 3600
         supervisor.reconcile()  # an idle stop gives it back
         assert driver.app_reserved == {} and driver._slot_bytes() == 2 * 10**9
 

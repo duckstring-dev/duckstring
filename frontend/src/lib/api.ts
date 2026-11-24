@@ -155,7 +155,8 @@ export interface RawApp {
   records?: boolean; // declares Records (plans/records-and-media.md)
   media?: boolean; // declares Media
   data_state?: 'trial' | 'live' | 'retired' | null; // the line's, once it has started; null before
-  instance: { id: number; started_at: string; ready_at: string | null; active: number; idle_at: string | null } | null;
+  instance: { id: number; started_at: string; ready_at: string | null; active: number; idle_at: string | null;
+              count?: number } | null;
 }
 
 // A named Duck Pool — Catchment-level remote compute (plans/cloud-config.md). On DSC the S/M/L/XL

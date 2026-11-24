@@ -69,7 +69,7 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
     if command is not None and (not isinstance(command, str) or not command.strip()):
         raise ValueError("pond.toml [app] command: expected a command line")
     unknown = set(section) - {"command", "static", "idle_timeout", "state", "health", "strip_path", "download",
-                              "records", "media", "migrate"}
+                              "records", "media", "migrate", "instances"}
     if unknown:
         raise ValueError(f"pond.toml [app]: unknown {', '.join(sorted(unknown))}")
     static = section.get("static")
@@ -106,6 +106,14 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
             raise ValueError("pond.toml [app] migrate: expected a command line")
         if not (records or media):
             raise ValueError("pond.toml [app] migrate: only an App with Records or Media is migrated")
+    # Several instances on the Catchment's machine (plans/records-and-media.md): shared data lives in Records and
+    # Media, so a private state directory, which concurrent processes would share, is refused.
+    instances = section.get("instances", 1)
+    if isinstance(instances, bool) or not isinstance(instances, int) or not 1 <= instances <= 64:
+        raise ValueError("pond.toml [app] instances: expected a number from 1 to 64")
+    if instances > 1 and state == "local":
+        raise ValueError('pond.toml [app] instances: several instances can\'t share a private state directory; set '
+                         'state = "none" and keep shared data in Records and Media')
     health = section.get("health")
     if health is not None and (not isinstance(health, str) or not health.startswith("/")):
         raise ValueError('pond.toml [app] health: expected a path starting with "/"')
@@ -127,6 +135,7 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
         "records": records,
         "media": media,
         "migrate": migrate,
+        "instances": instances,
     }
 
 

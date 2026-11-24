@@ -173,6 +173,7 @@ function AppPanel({ pond, canDemand, canControl, onOptions, mobile }: {
       <div style={{ fontSize: 12, color: '#a1a1aa', lineHeight: 1.7 }}>
         <div>
           <span style={{ color: THEME_BRAND, fontWeight: 700 }}>{state === 'running' ? 'Running' : 'Starting'}</span>
+          {inst.count > 1 && <span style={{ color: '#a1a1aa' }}> {inst.count} instances</span>}
           <span style={{ color: '#52525b' }}> · </span>since {clock(inst.readyAt ?? inst.startedAt)}
         </div>
         {state === 'running' && (

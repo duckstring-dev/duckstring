@@ -2703,7 +2703,7 @@ class Driver(TapsMixin, PuddlesMixin):
                     "sources": {self.meta[sp]["name"]: iso(self.state.pond_states[sp].end_f) for sp in sources},
                     "changed": {self.meta[sp]["name"]: iso(self.state.pond_states[sp].changed_f) for sp in sources}}
 
-    def app_reserve(self, key: str) -> str:
+    def app_reserve(self, key: str, slot: str | None = None) -> str:
         """An instance of the App ``key`` is about to start: set its ``[pond] memory`` aside from the budget the
         slots divide (plans/apps.md), and return DuckDB's ``memory_limit`` for its handle, which is that memory
         (at least ``_MIN_DUCKDB_GRANT``). Raises ``ValueError`` when the running Apps would then set aside more
@@ -2711,14 +2711,15 @@ class Driver(TapsMixin, PuddlesMixin):
         with self.lock:
             declared = self.declared_memory.get(key, 0)
             if declared and self.run_slots > 0:
-                others = sum(b for k, b in self.app_reserved.items() if k != key)
+                others = sum(b for k, b in self.app_reserved.items() if k != (slot or key))
                 share = int(self.memory_budget * _APP_SHARE)
                 if others + declared > share:
                     gb = lambda n: f"{n / 10**9:.1f} GB"  # noqa: E731
                     running = f", and running Apps already hold {gb(others)}" if others else ""
                     raise ValueError(f"the App's memory ({gb(declared)}) doesn't fit: Apps may set aside "
                                      f"{gb(share)}, half of this machine's memory budget{running}")
-                self.app_reserved[key] = declared
+                # Under the instance's own slot when an App runs several (each sets its memory aside).
+                self.app_reserved[slot or key] = declared
                 self._configure_slots()
             return f"{max(declared, _MIN_DUCKDB_GRANT) // 10**6}MB"
 

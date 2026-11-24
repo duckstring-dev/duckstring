@@ -115,6 +115,7 @@ export interface AppInfo {
     readyAt: string | null; // null while starting
     active: number; // requests and WebSockets in flight
     idleAt: string | null; // when it will stop for idleness (null while busy or with no idle timeout)
+    count: number; // instances running ([app] instances): requests and idleness above are over all of them
   } | null;
 }
 
