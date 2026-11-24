@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import os
 import secrets as _secrets
@@ -39,6 +40,9 @@ SETTING = "records"                # "managed" (default) or a postgres:// URI
 MEMORY_SETTING = "records_memory"  # bytes set aside for a managed PostgreSQL
 LISTEN_SETTING = "records_listen"  # a managed PostgreSQL's listen address (default 127.0.0.1)
 PORT_SETTING = "records_port"      # a managed PostgreSQL's port (chosen once, kept)
+HOST_SETTING = "records_host"      # the address something on another machine reaches it at
+TLS_CERT_SETTING = "records_tls_cert"  # the operator's certificate and key (paths on the Catchment's machine);
+TLS_KEY_SETTING = "records_tls_key"    # without them a self-signed one is made when TLS is needed
 
 DATABASE = "records"
 DUMP = "records.dump"  # every line's Records, in catchment download and the state backup (records/ is left out)
@@ -85,6 +89,68 @@ class Endpoint:
         if self.sslmode:
             parts.append(f"sslmode={self.sslmode}")
         return " ".join(parts)
+
+
+def is_loopback(listen: str) -> bool:
+    return all(part.strip() in ("127.0.0.1", "localhost", "::1") for part in listen.split(","))
+
+
+def hba_lines(listen: str) -> str:
+    """Who may sign in, and how: scram passwords always; beyond this machine only over TLS (``hostssl``), never
+    in the clear."""
+    lines = ["# Written by Duckstring at each start (catchment/records.py).",
+             "local   all all scram-sha-256",
+             "host    all all 127.0.0.1/32 scram-sha-256",
+             "host    all all ::1/128 scram-sha-256"]
+    if not is_loopback(listen):
+        lines += ["hostssl all all 0.0.0.0/0 scram-sha-256", "hostssl all all ::/0 scram-sha-256"]
+    return "\n".join(lines) + "\n"
+
+
+def make_certificate(directory: Path, names: list[str]) -> tuple[Path, Path]:
+    """A self-signed certificate and key in ``directory`` for ``names`` (host names or addresses), made with the
+    ``openssl`` command; kept and reused while the names stay the same."""
+    import ipaddress
+    import shutil
+
+    directory.mkdir(parents=True, exist_ok=True)
+    cert, key, made_for = directory / "server.crt", directory / "server.key", directory / "names"
+    wanted = ",".join(sorted(set(names)))
+    if cert.is_file() and key.is_file() and made_for.is_file() and made_for.read_text() == wanted:
+        return cert, key
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        raise RecordsError("Records over TLS needs a certificate: install openssl (so one is made), or set "
+                           "`duckstring catchment records --tls-cert PATH --tls-key PATH`")
+    alt = []
+    for n in sorted(set(names)):
+        try:
+            ipaddress.ip_address(n)
+            alt.append(f"IP:{n}")
+        except ValueError:
+            alt.append(f"DNS:{n}")
+    out = subprocess.run(
+        [openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3650", "-keyout", str(key),
+         "-out", str(cert), "-subj", f"/CN={sorted(set(names))[0]}", "-addext", "subjectAltName=" + ",".join(alt)],
+        capture_output=True, text=True, timeout=60)
+    if out.returncode != 0:
+        raise RecordsError(f"making a certificate for Records failed: {out.stderr.strip()[-1000:]}")
+    key.chmod(0o600)  # PostgreSQL refuses a key others can read
+    made_for.write_text(wanted)
+    return cert, key
+
+
+def certificate_fingerprint(cert: Path) -> str | None:
+    """The certificate's SHA-256 fingerprint, for a client to check a self-signed one."""
+    import ssl
+
+    try:
+        pem = cert.read_text()
+        der = ssl.PEM_cert_to_DER_cert(pem)
+    except (OSError, ValueError):
+        return None
+    digest = hashlib.sha256(der).hexdigest().upper()
+    return ":".join(digest[i:i + 2] for i in range(0, len(digest), 2))
 
 
 def _free_port() -> int:
@@ -163,13 +229,7 @@ class ManagedPostgres:
             raise RecordsError(f"initdb failed: {(out.stderr or out.stdout).strip()[-2000:]}")
 
     def _write_hba(self, listen: str) -> None:
-        lines = ["# Written by Duckstring at each start (catchment/records.py).",
-                 "local all all scram-sha-256",
-                 "host  all all 127.0.0.1/32 scram-sha-256",
-                 "host  all all ::1/128 scram-sha-256"]
-        if listen not in ("127.0.0.1", "localhost", "::1"):
-            lines += ["host  all all 0.0.0.0/0 scram-sha-256", "host  all all ::/0 scram-sha-256"]
-        (self.data / "pg_hba.conf").write_text("\n".join(lines) + "\n")
+        (self.data / "pg_hba.conf").write_text(hba_lines(listen))
 
     def _postmaster(self) -> tuple[int, int] | None:
         """The pid and port a running postmaster recorded for this cluster, when it is still alive."""
@@ -197,15 +257,21 @@ class ManagedPostgres:
                 self._adopted = None
         return False
 
-    def start(self, port: int, listen: str, memory: int) -> None:
+    def start(self, port: int, listen: str, memory: int, tls: tuple[Path, Path] | None = None) -> None:
         bin_dir = self._bin()
+        # What it is started with: a running postmaster is adopted only when it was started the same way.
+        started = json.dumps({"port": port, "listen": listen, "memory": memory,
+                              "tls": [str(p) for p in tls] if tls else None}, sort_keys=True)
         existing = self._postmaster()
         if existing is not None:
-            if existing[1] == port:
+            recorded = self.base / "started.json"
+            if existing[1] == port and recorded.is_file() and recorded.read_text() == started:
                 self._adopted = existing[0]
                 log.info("records: adopted the running PostgreSQL (pid %s)", existing[0])
                 return
             self._signal_stop(existing[0])
+        if not is_loopback(listen) and tls is None:
+            raise RecordsError("a PostgreSQL listening beyond this machine needs TLS")
         self._write_hba(listen)
         kb = lambda n: f"{max(n, 0) // 1024}kB"  # noqa: E731
         settings = {
@@ -216,6 +282,9 @@ class ManagedPostgres:
             "effective_cache_size": kb(memory),
             "logging_collector": "off",
         }
+        if tls is not None:
+            settings.update({"ssl": "on", "ssl_cert_file": str(tls[0]), "ssl_key_file": str(tls[1]),
+                             "ssl_min_protocol_version": "TLSv1.2"})
         argv = [str(bin_dir / "postgres"), "-D", str(self.data)]
         for k, v in settings.items():
             argv += ["-c", f"{k}={v}"]
@@ -233,6 +302,7 @@ class ManagedPostgres:
             ready = subprocess.run([str(bin_dir / "pg_isready"), "-q", "-h", "127.0.0.1", "-p", str(port)],
                                    capture_output=True, timeout=10)
             if ready.returncode == 0:
+                (self.base / "started.json").write_text(started)
                 return
             time.sleep(0.1)
         self.stop()
@@ -325,6 +395,29 @@ class Records:
     def listen(self) -> str:
         return self._setting(LISTEN_SETTING) or "127.0.0.1"
 
+    @property
+    def host(self) -> str:
+        """The address something on another machine reaches a managed PostgreSQL at: ``records_host``, else a
+        specific listen address, else this machine's name."""
+        set_host = self._setting(HOST_SETTING)
+        if set_host:
+            return set_host
+        first = self.listen.split(",")[0].strip()
+        return first if first not in ("*", "0.0.0.0", "::") else socket.gethostname()
+
+    def tls(self) -> tuple[Path, Path] | None:
+        """The certificate and key a managed PostgreSQL serves TLS with: the operator's, else a self-signed one
+        made for its address. None while it listens on this machine only (nothing reaches it from elsewhere)."""
+        cert = self._setting(TLS_CERT_SETTING) or os.environ.get("DUCKSTRING_RECORDS_TLS_CERT")
+        key = self._setting(TLS_KEY_SETTING) or os.environ.get("DUCKSTRING_RECORDS_TLS_KEY")
+        if cert and key:
+            return Path(cert).expanduser(), Path(key).expanduser()
+        if is_loopback(self.listen):
+            return None
+        names = [self.host, socket.gethostname(), "localhost", "127.0.0.1"]
+        names += [a.strip() for a in self.listen.split(",") if a.strip() not in ("*", "0.0.0.0", "::")]
+        return make_certificate(self.base / "tls", names)
+
     def in_use(self) -> bool:
         """Whether any App line has Records: the target can't change after that without a move."""
         from .db import locked
@@ -332,9 +425,11 @@ class Records:
         with locked(self.db):
             return self.db.execute("SELECT 1 FROM app_data WHERE records = 1 LIMIT 1").fetchone() is not None
 
-    def configure(self, target: str | None = None, memory: int | None = None, listen: str | None = None) -> None:
+    def configure(self, target: str | None = None, memory: int | None = None, listen: str | None = None,
+                  host: str | None = None, tls_cert: str | None = None, tls_key: str | None = None) -> None:
         """Change the settings. The target can't change once a line has Records (a move copies them across);
-        memory and the listen address apply at the managed PostgreSQL's next start."""
+        the rest apply at the managed PostgreSQL's next start, which a running one is given now."""
+        restart = False
         if target is not None:
             target = target.strip() or "managed"
             if target != "managed":
@@ -351,6 +446,23 @@ class Records:
             self._set(MEMORY_SETTING, str(int(memory)))
         if listen is not None:
             self._set(LISTEN_SETTING, listen.strip() or None)
+            restart = True
+        if host is not None:
+            self._set(HOST_SETTING, host.strip() or None)
+            restart = True
+        if (tls_cert is None) != (tls_key is None):
+            raise RecordsError("give the certificate and its key together")
+        if tls_cert is not None:
+            for path in (tls_cert, tls_key):
+                if path.strip() and not Path(path).expanduser().is_file():
+                    raise RecordsError(f"no file {path!r} on the Catchment's machine")
+            self._set(TLS_CERT_SETTING, tls_cert.strip() or None)
+            self._set(TLS_KEY_SETTING, tls_key.strip() or None)
+            restart = True
+        if memory is not None:
+            restart = True
+        if restart and self.managed and self.pg.running():
+            self.stop()  # started again, with the new settings, by the next need (or keep_alive)
 
     # ── keys and passwords ─────────────────────────────────────────────────────────────────────────────
 
@@ -409,14 +521,15 @@ class Records:
             except ValueError as e:
                 raise RecordsError(str(e)) from None
         try:
+            tls = self.tls()
             try:
-                self.pg.start(port, self.listen, memory)
+                self.pg.start(port, self.listen, memory, tls)
             except RecordsError:
                 if "could not bind" not in self.pg.log_tail(5) and "in use" not in self.pg.log_tail(5):
                     raise
                 port = _free_port()  # something else took the port: choose another, keep it
                 self._set(PORT_SETTING, str(port))
-                self.pg.start(port, self.listen, memory)
+                self.pg.start(port, self.listen, memory, tls)
         except BaseException:
             if self._release is not None:
                 self._release()
@@ -636,19 +749,26 @@ class Records:
         dump.rename(dump.with_name(f"{DUMP}.restored-{time.strftime('%Y%m%dT%H%M%S')}"))
         log.info("records: restored %d line(s) from %s", len(lines), DUMP)
 
-    def url(self, role: str, host: str | None = None, start: bool = True) -> str:
+    def url(self, role: str, host: str | None = None, start: bool = True, remote: bool = False) -> str:
         """A standard libpq URL signing ``role`` in (its search path is set on the role itself). With
-        ``start=False`` it is built from the settings, never starting anything."""
+        ``start=False`` it is built from the settings, never starting anything. ``remote``: for something on
+        another machine, at the managed PostgreSQL's reachable address and over TLS (``sslmode=require``)."""
         endpoint = (self._known_endpoint() if not start else None) or self.ensure()
-        query = f"?sslmode={endpoint.sslmode}" if endpoint.sslmode else ""
+        sslmode = endpoint.sslmode
+        if remote and endpoint.managed:
+            if is_loopback(self.listen):
+                raise RecordsError("Records' PostgreSQL listens on this machine only: set `duckstring catchment "
+                                   "records --listen ADDRESS` for something elsewhere to reach it")
+            host, sslmode = host or self.host, "require"
+        query = f"?sslmode={sslmode}" if sslmode else ""
         return (f"postgresql://{role}:{self.password(role)}@{host or endpoint.host}:{endpoint.port}/"
                 f"{endpoint.database}{query}")
 
     def line_url(self, name: str, major: int, host: str | None = None) -> str:
         return self.url(line_role(name, major), host)
 
-    def reader_url(self, host: str | None = None, start: bool = True) -> str:
-        return self.url(PONDS, host, start=start)
+    def reader_url(self, host: str | None = None, start: bool = True, remote: bool = False) -> str:
+        return self.url(PONDS, host, start=start, remote=remote)
 
     def tables(self, schemas: list[str]) -> dict[str, list[dict]]:
         """Each schema's tables and views, ``{schema: [{table, kind, rows}]}``; ``rows`` is PostgreSQL's estimate
@@ -676,6 +796,12 @@ class Records:
                "memory": self.memory if self.managed else None, "listen": self.listen if self.managed else None}
         if self.managed:
             out["running"] = self.pg.running()
+            out["host"] = self.host
+            cert = self._setting(TLS_CERT_SETTING) or os.environ.get("DUCKSTRING_RECORDS_TLS_CERT")
+            made = self.base / "tls" / "server.crt"
+            tls_on = not is_loopback(self.listen) or bool(cert)
+            out["tls"] = {"on": tls_on, "certificate": "operator" if cert else ("self-signed" if tls_on else None),
+                          "fingerprint": certificate_fingerprint(Path(cert) if cert else made) if tls_on else None}
             port = self._setting(PORT_SETTING)
             out["port"] = int(port) if port else None
             out["initialised"] = self.pg.initialised()

@@ -160,3 +160,73 @@ def test_a_line_is_copied_whole_into_another(records):
     records.copy_line(("feedback", 1), ("feedback", 2))
     assert _as(records, "feedback_v2", "SELECT count(*) FROM ratings").stdout.strip() == "2"
     assert records.psql("SELECT count(*) FROM pg_database WHERE datname LIKE 'duckstring_copy_%'").strip() == "0"
+
+
+# ─── TLS beyond this machine ───────────────────────────────────────────────────
+
+
+def _lan_address() -> str | None:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect(("192.0.2.1", 9))  # no packet is sent: this only picks the outgoing interface
+            addr = s.getsockname()[0]
+        except OSError:
+            return None
+    return None if addr.startswith("127.") else addr
+
+
+def test_beyond_this_machine_only_tls_is_accepted():
+    from duckstring.catchment.records import hba_lines
+
+    local = hba_lines("127.0.0.1")
+    assert "0.0.0.0/0" not in local
+    wide = hba_lines("0.0.0.0")
+    assert "hostssl all all 0.0.0.0/0 scram-sha-256" in wide
+    assert not any(line.startswith("host ") and "0.0.0.0/0" in line for line in wide.splitlines())
+
+
+@needs_pg
+@pytest.mark.timeout(60)
+def test_a_postgres_listening_widely_serves_tls_and_refuses_plain_connections(records):
+    lan = _lan_address()
+    if lan is None:
+        pytest.skip("no network address other than loopback")
+    records.configure(listen="0.0.0.0", host=lan)
+    records.provision("feedback", 1)
+    status = records.status()
+    assert status["tls"]["on"] and status["tls"]["certificate"] == "self-signed"
+    assert len(status["tls"]["fingerprint"].split(":")) == 32
+
+    url = records.line_url("feedback", 1)
+    remote = records.url("feedback_v1", remote=True)
+    assert f"@{lan}:" in remote and remote.endswith("sslmode=require")
+    psql = str(PG[0] / "psql")
+    ok = subprocess.run([psql, remote, "-Atc", "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()"],
+                        capture_output=True, text=True)
+    assert ok.stdout.strip() == "t", ok.stderr
+    plain = subprocess.run([psql, remote.replace("sslmode=require", "sslmode=disable"), "-Atc", "SELECT 1"],
+                           capture_output=True, text=True)
+    assert plain.returncode != 0 and "no encryption" in plain.stderr  # no pg_hba line lets it in
+    # On this machine a plain connection is still fine.
+    assert subprocess.run([psql, url, "-Atc", "SELECT 1"], capture_output=True, text=True).returncode == 0
+    records.configure(listen="127.0.0.1")
+    with pytest.raises(RecordsError, match="--listen"):
+        records.url("feedback_v1", remote=True)
+
+
+@needs_pg
+@pytest.mark.timeout(60)
+def test_an_operators_certificate_is_served(tmp_path, records):
+    from duckstring.catchment.records import make_certificate
+
+    cert, key = make_certificate(tmp_path / "operator", ["records.example.com"])
+    records.configure(tls_cert=str(cert), tls_key=str(key))
+    records.provision("feedback", 1)
+    assert records.status()["tls"]["certificate"] == "operator"
+    got = subprocess.run([str(PG[0] / "psql"), records.line_url("feedback", 1) + "?sslmode=require", "-Atc",
+                          "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()"], capture_output=True, text=True)
+    assert got.stdout.strip() == "t", got.stderr
+    with pytest.raises(RecordsError):
+        records.configure(tls_cert=str(cert))  # the key goes with it

@@ -445,7 +445,14 @@ def records(
     memory: Optional[str] = typer.Option(None, "--memory", help="A managed PostgreSQL's memory, such as 1GB."),
     listen: Optional[str] = typer.Option(
         None, "--listen", help="A managed PostgreSQL's listen address (127.0.0.1 unless something on another "
-                               "machine needs it)."),
+                               "machine needs it; beyond this machine connections must use TLS)."),
+    host: Optional[str] = typer.Option(None, "--host", help="The address another machine reaches it at."),
+    tls_cert: Optional[str] = typer.Option(
+        None, "--tls-cert", help="A certificate to serve TLS with (a path on the Catchment's machine); without one a "
+                                 "self-signed certificate is made."),
+    tls_key: Optional[str] = typer.Option(None, "--tls-key", help="The certificate's key."),
+    reader_url: bool = typer.Option(
+        False, "--reader-url", help="Print a read-only connection URL for a client on another machine (a BI tool)."),
 ) -> None:
     """Show or set where Apps' Records live.
 
@@ -457,8 +464,13 @@ def records(
     from .config import resolve_catchment
 
     _, cfg = resolve_catchment(catchment)
-    if use is not None or memory is not None or listen is not None:
-        body = {k: v for k, v in {"target": use, "memory": memory, "listen": listen}.items() if v is not None}
+    if reader_url:
+        typer.echo(_http.get(f"{cfg['url']}/api/catchment/records/reader", auth=cfg).json()["url"])
+        return
+    changes = {"target": use, "memory": memory, "listen": listen, "host": host, "tls_cert": tls_cert,
+               "tls_key": tls_key}
+    if any(v is not None for v in changes.values()):
+        body = {k: v for k, v in changes.items() if v is not None}
         got = _http.put(f"{cfg['url']}/api/catchment/records", auth=cfg, json=body).json()
     else:
         got = _http.get(f"{cfg['url']}/api/catchment/records", auth=cfg).json()
@@ -468,6 +480,11 @@ def records(
         typer.echo(f"records:  managed ({state}{version})")
         typer.echo(f"memory:   {got['memory'] / 10**6:.0f} MB")
         typer.echo(f"listen:   {got['listen']}" + (f":{got['port']}" if got.get("port") else ""))
+        tls = got.get("tls") or {}
+        if tls.get("on"):
+            typer.echo(f"host:     {got.get('host')}")
+            typer.echo(f"tls:      {tls.get('certificate')}" +
+                       (f", SHA-256 {tls['fingerprint']}" if tls.get("fingerprint") else ""))
     else:
         typer.echo(f"records:  {got['host']}:{got['port']}/{got['database']}")
     if got.get("in_use"):

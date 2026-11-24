@@ -32,7 +32,10 @@ def get_records(request: Request):
 class _RecordsBody(BaseModel):
     target: str | None = None  # "managed" or a postgres:// URI
     memory: str | int | None = None  # a managed PostgreSQL's memory ("1GB")
-    listen: str | None = None  # a managed PostgreSQL's listen address
+    listen: str | None = None  # a managed PostgreSQL's listen address (beyond this machine: TLS only)
+    host: str | None = None  # the address another machine reaches it at
+    tls_cert: str | None = None  # the operator's certificate and key, paths on the Catchment's machine
+    tls_key: str | None = None
 
 
 @router.put("/catchment/records", dependencies=[auth.full])
@@ -43,10 +46,27 @@ async def put_records(request: Request, body: _RecordsBody):
     records = _records(request)
     try:
         memory = parse_size(body.memory) if body.memory not in (None, "") else None
-        await asyncio.to_thread(records.configure, body.target, memory, body.listen)
+        await asyncio.to_thread(records.configure, body.target, memory, body.listen, body.host, body.tls_cert,
+                                body.tls_key)
     except (RecordsError, ValueError) as e:
         raise HTTPException(status_code=422, detail=str(e)) from None
     return {**records.status(), "in_use": records.in_use()}
+
+
+@router.get("/catchment/records/reader", dependencies=[auth.full])
+async def records_reader(request: Request):
+    """A read-only connection URL for every line's Records, for a client on another machine (a BI tool): the
+    managed PostgreSQL's reachable address over TLS, or the external one's. Full access: it carries a password."""
+    from ..records import RecordsError
+
+    records = _records(request)
+    try:
+        if not records.in_use():
+            raise RecordsError("no App line holds Records yet")
+        url = await asyncio.to_thread(records.reader_url, None, True, True)
+    except RecordsError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    return {"url": url, "tls": records.status().get("tls")}
 
 
 @router.get("/catchment/media", dependencies=[auth.read])
