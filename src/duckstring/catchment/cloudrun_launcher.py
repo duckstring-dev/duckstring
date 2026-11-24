@@ -55,6 +55,7 @@ def default_image(registry: str | None) -> str | None:
 
 
 class CloudRunLauncher:
+    max_lifetime_s = 604800.0  # the task timeout: App instances are replaced first
     manages_processes = True
     name = "cloudrun"
 

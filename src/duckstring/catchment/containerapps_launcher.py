@@ -68,6 +68,7 @@ def _memory(pool: dict, dc: dict) -> str:
 
 
 class ContainerAppsLauncher:
+    max_lifetime_s = float(_REPLICA_TIMEOUT_S)  # replicaTimeout: App instances are replaced first
     manages_processes = True
     name = "containerapps"
 

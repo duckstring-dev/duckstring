@@ -193,6 +193,7 @@ class AppSupervisor:
         driver.on_app_stop = self.stop_now
         driver.app_leases = self.leases
         driver.app_activity = self.activity
+        driver.app_metrics = self.metrics
 
     # ─── serving a request ──────────────────────────────────────────────────
 
@@ -386,10 +387,21 @@ class AppSupervisor:
         return moves is not None and moves.blocks(view["app"])
 
     def _decide(self, key: str, count: int, reason: str) -> None:
+        """Record a scaling decision: the App's recent ones, the log, and an ``app_scale`` alert for channels that
+        ask for it (outside ``all``)."""
+        at = _now_iso()
         entries = self._decisions.setdefault(key, [])
-        entries.append({"at": _now_iso(), "count": count, "reason": reason})
+        entries.append({"at": at, "count": count, "reason": reason})
         del entries[:-20]
         log.info("%s: %d instance(s): %s", key, count, reason)
+        name, _, major = key.rpartition("@")
+        try:
+            with locked(self.driver.db):
+                self.driver._emit_alert("app_scale", scope_pond=name, scope_major=int(major), severity="info",
+                                        title=f"{name}@{major}: {count} instance(s)", message=reason, f=at,
+                                        detail={"instances": count})
+        except Exception:  # pragma: no cover - alerting never stops scaling
+            pass
 
     def _connections_allow(self, view: dict) -> bool:
         """Whether one more instance of this App fits the Records PostgreSQL's connections (plans/app-scaling.md)."""
@@ -602,11 +614,37 @@ class AppSupervisor:
             if not insts:
                 return None
             active, last_used = sum(max(i.active, 0) for i in insts), max(i.last_used for i in insts)
+            elsewhere = sum(1 for i in insts if i.remote)
         idle_at = None
         if idle_timeout_s > 0 and active <= 0:
             left = max(0.0, idle_timeout_s - (time.monotonic() - last_used))
             idle_at = (datetime.now(timezone.utc) + timedelta(seconds=left)).isoformat()
-        return {"active": active, "idle_at": idle_at, "count": len(insts)}
+        return {"active": active, "idle_at": idle_at, "count": len(insts), "elsewhere": elsewhere,
+                "pressed": self.pressed.get(key)}
+
+    def metrics(self) -> list[dict]:
+        """For ``/metrics``: per App line, its instances by place, active work, mean CPU, memory and reported load,
+        and whether it is held at its maximum under pressure."""
+        out = []
+        now = time.monotonic()
+        for key, insts in list(self._instances.items()):
+            view = self.driver.app_view(key)
+            if view is None:
+                continue
+            live = [i for i in insts if not i.stopping]
+            sc = view["scaling"]
+
+            def mean(values):
+                values = [v for v in values if v is not None]
+                return sum(values) / len(values) if values else None
+
+            out.append({"name": view["name"], "major": view["major"],
+                        "catchment": sum(1 for i in live if not i.remote), "elsewhere": sum(1 for i in live if i.remote),
+                        "active": sum(self._active(i, sc, now) for i in live),
+                        "cpu": mean(i.cpu for i in live), "memory": mean(i.memory for i in live),
+                        "load": mean(i.load[0] for i in live if i.load and now - i.load[1] <= LOAD_STALE_S),
+                        "at_maximum": key in self.pressed})
+        return out
 
     # ─── starting ───────────────────────────────────────────────────────────
 
@@ -1068,6 +1106,10 @@ class AppSupervisor:
                 self._crashes.pop(inst.key, None)
             elif inst.draining and (inst.active <= 0 or now - inst.drain_since >= DRAIN_TIMEOUT_S):
                 self._stop(inst, "drained")
+            elif inst.remote and not inst.draining and self._near_time_limit(inst, view, now):
+                inst.draining, inst.drain_since = True, now  # its replacement starts as for any shortfall
+                self._decide(inst.key, self._live_count(inst.key, view),
+                             f"replacing #{inst.id} before its compute's time limit")
             elif (view["app"]["idle_timeout_s"] > 0 and inst.active <= 0
                   and now - inst.last_used >= view["app"]["idle_timeout_s"]
                   and self._live_count(inst.key, view) > view["scaling"]["min_instances"]
@@ -1079,6 +1121,22 @@ class AppSupervisor:
             else:
                 self._sample(inst, view)
                 self._write_freshness(inst.key, app_runtime_dir(self.root, view["name"], view["major"]))
+
+    def _near_time_limit(self, inst: Instance, view: dict, now: float) -> bool:
+        """Whether a remote instance is within an hour of its backend's execution limit (Cloud Run and Container
+        Apps jobs run 7 days at most)."""
+        if inst.adopted:
+            return False
+        if not hasattr(inst, "_limit"):
+            limit = None
+            max_lifetime = getattr(self.driver.launcher, "max_lifetime", None)
+            if max_lifetime is not None:
+                try:
+                    limit = max_lifetime(self.driver.duck_config(inst.key))
+                except Exception:
+                    limit = None
+            inst._limit = limit
+        return inst._limit is not None and now - inst.started >= max(inst._limit - 3600.0, inst._limit * 0.9)
 
     def _live_count(self, key: str, view: dict) -> int:
         """Instances of ``key`` running the current deploy and not on their way out."""

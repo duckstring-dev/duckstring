@@ -252,3 +252,65 @@ def test_the_scaling_command(live, monkeypatch):
     out = CliRunner().invoke(cli_app.app, ["instances", "web"])
     assert "Catchment" in out.output, out.output
     assert json.loads(json.dumps(_rows(url)))["pond"] == "web@1"
+
+
+def test_scaling_shows_in_status_metrics_and_an_opt_in_alert(live):
+    url, app, launcher, deploy = live
+    r = httpx.post(f"{url}/api/alerts", json={"name": "scale", "destination": "http://127.0.0.1:9/hook",
+                                              "events": "app_scale"}, timeout=10)
+    assert r.status_code == 200, r.text
+    httpx.post(f"{url}/api/alerts", json={"name": "ops", "destination": "http://127.0.0.1:9/ops"}, timeout=10)
+    deploy(_toml('min_instances = 1\n'))
+    assert _wait(lambda: any(r["ready"] for r in _rows(url)["instances"]), timeout=90)
+    status = next(p for p in httpx.get(f"{url}/api/status", timeout=10).json()["ponds"] if p["name"] == "web")
+    assert status["app"]["instance"]["count"] == 1 and status["app"]["instance"]["elsewhere"] == 1
+    text = httpx.get(f"{url}/metrics", timeout=10).text
+    assert 'duckstring_app_instances{pond="web",major="1",place="elsewhere"} 1' in text
+    assert 'duckstring_app_instance_starts_total{pond="web",major="1",place="elsewhere"} 1' in text
+    assert 'duckstring_app_at_maximum{pond="web",major="1"} 0' in text
+    sent = httpx.get(f"{url}/api/alerts/deliveries", timeout=10).json()
+    rows = sent if isinstance(sent, list) else sent.get("deliveries", [])
+    kinds = {(d.get("channel") or d.get("channel_name"), d.get("event_kind") or d.get("kind")) for d in rows}
+    assert any(k == "app_scale" for _, k in kinds), rows  # the channel that asked for it
+    assert not any(c == "ops" and k == "app_scale" for c, k in kinds)  # never part of `all`
+
+
+def test_an_instance_is_replaced_before_its_computes_time_limit(live, monkeypatch):
+    url, app, launcher, deploy = live
+    deploy(_toml('min_instances = 1\n'))
+    assert _wait(lambda: any(r["ready"] for r in _rows(url)["instances"]), timeout=90)
+    monkeypatch.setattr(launcher, "max_lifetime", lambda duck: 30.0, raising=False)  # 90% of it: 27 s
+    supervisor = app.state.app_supervisor
+    (inst,) = supervisor._of("web@1")
+    if hasattr(inst, "_limit"):
+        del inst._limit
+    inst.started -= 60  # as if it had run a minute
+    assert _wait(lambda: any(d["reason"].startswith("replacing #1") for d in _rows(url)["decisions"]), timeout=10)
+    assert _wait(lambda: [r["id"] for r in _rows(url)["instances"] if r["ready"]] == [2], timeout=90)
+
+
+def test_growth_stops_at_the_postgresql_connection_budget():
+    from types import SimpleNamespace
+
+    from duckstring.catchment.app_supervisor import AppSupervisor, Instance
+
+    class Records:
+        def max_connections(self):
+            return 20
+
+    views = {"a@1": {"app": {"records": True}, "scaling": {"connections": 4}},
+             "b@1": {"app": {"records": True}, "scaling": {"connections": 3}},
+             "c@1": {"app": {"records": False}, "scaling": {"connections": 50}}}
+    driver = SimpleNamespace(records=Records(), app_view=views.get, on_app_stop=None, app_leases=None,
+                             app_activity=None, app_metrics=None)
+    sup = AppSupervisor(driver, "/tmp")
+
+    def inst(key, i):
+        return Instance(key=key, id=i, version_id=1, deployed_at=None, proc=None, port=0, log_path=None)
+
+    sup._instances = {"a@1": [inst("a@1", 1)], "b@1": [inst("b@1", 2)], "c@1": [inst("c@1", 3)]}
+    # used 4 + 3 = 7 (c has no Records); 10 kept back: 7 + 4 <= 10 is false
+    assert not sup._connections_allow(views["a@1"])
+    Records.max_connections = lambda self: 21
+    assert sup._connections_allow(views["a@1"])
+    assert sup._connections_allow(views["c@1"])

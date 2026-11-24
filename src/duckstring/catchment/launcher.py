@@ -294,6 +294,15 @@ class DispatchingLauncher:
             return ((duck.get("pool") or {}).get("provider") or self.default_provider) == "local"
         return self._remote_for(duck) is None
 
+    def max_lifetime(self, duck: dict | None) -> float | None:
+        """How long the backend ``duck`` routes to lets one spawn run (a jobs backend's execution limit), or
+        ``None``: an App instance there is replaced before it (plans/app-scaling.md)."""
+        try:
+            backend = self._backend_for(duck)
+        except Exception:
+            return None
+        return getattr(backend, "max_lifetime_s", None)
+
     def placed_elsewhere(self, pond_key: str, duck: dict | None) -> bool:
         """Whether the Pond's Duck is alive on another backend than ``duck`` now routes to (its compute changed).
         The driver then hands its work over as for a redeploy instead of calling ``ensure``, which would kill

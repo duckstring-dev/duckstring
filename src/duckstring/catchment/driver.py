@@ -503,6 +503,7 @@ class Driver(TapsMixin, PuddlesMixin):
         self.app_leases = None
         # And its instance activity for /api/status, called with (key, idle timeout in seconds).
         self.app_activity = None
+        self.app_metrics = None  # the AppSupervisor's per-App scaling numbers, for /metrics
         self.reload()
 
     def set_notify(self, cb) -> None:
@@ -4922,8 +4923,19 @@ class Driver(TapsMixin, PuddlesMixin):
             deliveries = dict(self.db.execute(
                 "SELECT status, COUNT(*) FROM alert_delivery GROUP BY status"
             ).fetchall())
+            # App instances (plans/app-scaling.md): starts by place and stops by reason, from the DB (counters).
+            app_starts = self.db.execute(
+                "SELECT pn.name, pv.major, ai.place, COUNT(*) FROM app_instance ai "
+                "JOIN pond_version pv ON pv.id = ai.pond_version_id JOIN pond_name pn ON pn.id = pv.pond_name_id "
+                "GROUP BY pn.name, pv.major, ai.place").fetchall()
+            app_stops = self.db.execute(
+                "SELECT pn.name, pv.major, ai.stop_reason, COUNT(*) FROM app_instance ai "
+                "JOIN pond_version pv ON pv.id = ai.pond_version_id JOIN pond_name pn ON pn.id = pv.pond_name_id "
+                "WHERE ai.stop_reason IS NOT NULL GROUP BY pn.name, pv.major, ai.stop_reason").fetchall()
             return {"nodes": nodes, "failures": failures, "alert_deliveries": deliveries,
-                    "runtimes": runtimes, "taps": self.tap_metrics()}
+                    "runtimes": runtimes, "taps": self.tap_metrics(),
+                    "apps": self.app_metrics() if self.app_metrics else [],
+                    "app_starts": app_starts, "app_stops": app_stops}
 
     def view_fragment(self, scope: list[str] | None) -> dict:
         """This Catchment's slice of the recursive lineage view (see plans/cross-catchment-visibility.md):
