@@ -53,8 +53,7 @@ def test_the_default_rule_grows_under_sustained_pressure_only():
     calm = [_iv(1, requests=1), _iv(2, requests=2)]
     assert scaler.decide(_app(calm)).desired == 2
     busy = [_iv(1, requests=3), _iv(2, requests=3)]  # 3 per instance >= 0.7 x 4
-    first = scaler.decide(_app(busy, now=100.0))
-    assert first.desired == 2 and "active per instance" in first.reason  # not yet: it must last 10 s
+    assert scaler.decide(_app(busy, now=100.0)).desired == 2  # not yet: the window isn't covered
     assert scaler.decide(_app(busy, now=111.0)).desired == 3
     assert scaler.decide(_app(busy, now=112.0)).desired == 2  # the next waits its own 10 s
     # An idle open socket isn't work; a busy one is.
@@ -65,6 +64,19 @@ def test_the_default_rule_grows_under_sustained_pressure_only():
         s.decide(_app(hot, now=0.0))
         got = s.decide(_app(hot, now=10.0))
         assert got.desired == 3 and kind in got.reason
+    # Gaps in the traffic don't restart the clock: the mean over the window decides.
+    s = DefaultScaler()
+    now, grew = 0.0, None
+    while now < 20 and grew is None:
+        for active, step in ((6, 0.9), (0, 0.1)):
+            now += step
+            if s.decide(_app([_iv(1, requests=active)], now=now)).desired == 2:
+                grew = now
+    assert grew is not None and 10 <= grew <= 11.5, grew
+    # A short burst inside a quiet window doesn't grow it.
+    s = DefaultScaler()
+    for k in range(25):
+        assert s.decide(_app([_iv(1, requests=8 if k == 20 else 0)], now=float(k))).desired == 1
     s = DefaultScaler()
     starting = [_iv(1, requests=4), _iv(2, ready=False, starting=True)]
     s.decide(_app(starting, now=0.0))
