@@ -2,7 +2,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { useLiveStore, appState, formatAge, stateColor, nodeFill, STATE_COLORS, THEME_BRAND, THEME_DEMAND } from '@/lib/store';
+import { useLiveStore, appState, formatAge, stateColor, nodeFill, STATE_COLORS, THEME_AMBER, THEME_BRAND, THEME_DEMAND } from '@/lib/store';
 import { openApp } from '@/lib/api';
 import { STRIP_LINE_H, STRIP_PAD, demandStripHeight } from '@/lib/layout';
 import { DemandIndicators } from './DemandIndicators';
@@ -203,6 +203,10 @@ export const PondNode = memo(function PondNode({ data }: NodeProps) {
             // An App's Runs are passes, so run counts mean nothing: its instance state and data freshness instead.
             <>
               <span style={{ color: APP_STATE_COLOR[app] === '#71717a' ? '#a1a1aa' : APP_STATE_COLOR[app] }}>{app}</span>
+              {(info?.app?.instance?.count ?? 0) > 1 && <span>×{info?.app?.instance?.count}</span>}
+              {info?.app?.instance?.pressed && (
+                <span style={{ color: THEME_AMBER }} title={`At its maximum instances: ${info.app.instance.pressed}`}>max</span>
+              )}
               <span>✓{formatAge(view.endF, now)}</span>
             </>
           ) : (

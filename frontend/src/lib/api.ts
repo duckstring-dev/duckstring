@@ -156,7 +156,7 @@ export interface RawApp {
   media?: boolean; // declares Media
   data_state?: 'trial' | 'live' | 'retired' | null; // the line's, once it has started; null before
   instance: { id: number; started_at: string; ready_at: string | null; active: number; idle_at: string | null;
-              count?: number } | null;
+              count?: number; elsewhere?: number; pressed?: string | null } | null;
 }
 
 // A named Duck Pool — Catchment-level remote compute (plans/cloud-config.md). On DSC the S/M/L/XL
@@ -380,6 +380,8 @@ export interface RawAppInstance {
   stopped_at: string | null;
   stop_reason: string | null;
   exit_code: number | null;
+  place?: 'catchment' | 'remote'; // where it ran (plans/app-scaling.md)
+  start_reason?: string | null; // why it started: a request, the warm floor, the scaler's reason
 }
 
 export async function fetchAppInstances(pond: string, limit = 50): Promise<RawAppInstance[]> {

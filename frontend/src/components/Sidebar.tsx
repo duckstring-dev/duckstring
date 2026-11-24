@@ -174,6 +174,11 @@ function AppPanel({ pond, canDemand, canControl, onOptions, mobile }: {
         <div>
           <span style={{ color: THEME_BRAND, fontWeight: 700 }}>{state === 'running' ? 'Running' : 'Starting'}</span>
           {inst.count > 1 && <span style={{ color: '#a1a1aa' }}> {inst.count} instances</span>}
+          {inst.elsewhere > 0 && (
+            <span style={{ color: '#71717a' }}>
+              {inst.count > 1 ? ` (${inst.elsewhere === inst.count ? 'all' : inst.elsewhere} elsewhere)` : ' elsewhere'}
+            </span>
+          )}
           <span style={{ color: '#52525b' }}> · </span>since {clock(inst.readyAt ?? inst.startedAt)}
         </div>
         {state === 'running' && (
@@ -184,6 +189,9 @@ function AppPanel({ pond, canDemand, canControl, onOptions, mobile }: {
                 ? `Stops when idle in ${formatAge(now, Math.max(idleAt, now))}`  // the time from now to idleAt
                 : app?.idleTimeoutS === 0 ? 'Keeps running until stopped' : 'Idle'}
           </div>
+        )}
+        {inst.pressed && (
+          <div style={{ color: THEME_AMBER }} title={inst.pressed}>At its maximum instances under load</div>
         )}
       </div>
     );

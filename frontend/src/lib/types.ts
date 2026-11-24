@@ -101,7 +101,7 @@ export interface PondInfo {
   spout?: { destination: string; table: string | null; mode: string; armed: boolean } | null;
 }
 
-// An App's serving state. An App runs at most one instance at a time: started by a request, stopped when idle.
+// An App's serving state: its instances start on a request, the warm floor or load, and stop when idle.
 export interface AppInfo {
   path: string; // served at, from the Catchment's root ("/apps/{name}/v{major}/")
   deployedAt: string | null; // ISO; a version can be redeployed in place, so this tells deploys apart
@@ -116,6 +116,8 @@ export interface AppInfo {
     active: number; // requests and WebSockets in flight
     idleAt: string | null; // when it will stop for idleness (null while busy or with no idle timeout)
     count: number; // instances running ([app] instances): requests and idleness above are over all of them
+    elsewhere: number; // of them, on the App's own compute (plans/app-scaling.md)
+    pressed: string | null; // held at its maximum under this pressure
   } | null;
 }
 
@@ -128,6 +130,8 @@ export interface AppInstance {
   stoppedAt: string | null;
   stopReason: string | null;
   exitCode: number | null;
+  elsewhere: boolean; // ran on the App's own compute, not the Catchment
+  startReason: string | null;
 }
 
 // ─── Run history ─────────────────────────────────────────────────────────────

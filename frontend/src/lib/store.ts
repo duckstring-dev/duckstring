@@ -186,6 +186,7 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
         instance: p.app.instance ? {
           id: p.app.instance.id, startedAt: p.app.instance.started_at, readyAt: p.app.instance.ready_at,
           active: p.app.instance.active, idleAt: p.app.instance.idle_at, count: p.app.instance.count ?? 1,
+          elsewhere: p.app.instance.elsewhere ?? 0, pressed: p.app.instance.pressed ?? null,
         } : null,
       } : null,
     };
