@@ -204,6 +204,23 @@ All the above, with these specifics and differences:
 - Backups dump Records (`records/records.dump`), restored by a fresh managed cluster after it makes the line roles;
   the state backup carries Media up to 256 MB.
 
-Open (not built): Records and Media for remote compute (Ducks are given 127.0.0.1; a Media filesystem over the
-Catchment's HTTP API), TLS for a managed PostgreSQL reached from elsewhere, the move command for a changed
-`records`/`media` setting, a `records:` Spout destination, and the purge command's final name (`app purge` for now).
+Added the same day, before merging (the author asked for them):
+
+- **TLS.** A managed PostgreSQL listening beyond its machine (`catchment records --listen`) accepts other machines
+  only over TLS (`hostssl` lines only), with the operator's certificate (`--tls-cert/--tls-key`) or a self-signed
+  one made with `openssl`; loopback stays plain. `--host` names the reachable address, `--reader-url` prints a
+  read-only URL for a BI tool (`sslmode=require`), status shows the certificate's SHA-256 fingerprint. Measured:
+  from the machine's LAN address a plain connection is refused, a TLS one accepted.
+- **Ducks on other machines** read Records and Media (on the Catchment's disk) through the Duck channel, which they
+  already dial back on: no new port, and it works through the relay and platform hosts. Decided per Pond by the
+  launcher (`on_this_machine`: a remote backend, not a `local` Pool). Media in an object store and an external
+  PostgreSQL are read directly.
+- **Several instances of an App** on the Catchment's machine: `[app] instances = N` (with `state = "none"`); one
+  starts on the first request, another once every ready one has 4 requests in flight; least-busy routing with a
+  sticky cookie; memory per instance; each stops when idle. This is the "most teams run one machine" scaling: an
+  App outgrowing one Python process. App instances on other machines are not built (the launchers would have to run
+  long-lived services that take inbound traffic, validated on each cloud).
+- **Spouts into Records**: `records:` delivers into `{pond}_v{major}`, readable by every App.
+
+Open: the move command for a changed `records`/`media` setting (a proposal is with the author), App instances on
+other machines, and the purge command's final name (`app purge` for now).

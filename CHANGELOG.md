@@ -34,6 +34,15 @@ An App can now keep data the Catchment holds for it, which Ponds can read and th
   catalog `records`, so SQL can read `records.feedback_v1.ratings` beside Pond tables) and its Media, with
   download, and upload and delete for Manage access. An App node with Records or Media has a table icon. A Pond
   can declare where its data comes from (`[pond] external = ["GDELT events", "app:feedback@1"]`), drawn as nodes.
+- **Several instances**: `[app] instances = 3` (with `state = "none"`) lets an App grow to more processes on the
+  Catchment's machine as requests pile up, all sharing its Records and Media; a browser stays on the instance it
+  reached.
+- **Spouts into Records**: a Spout to `records:` delivers a Pond's output into Records (`catalog_v1.prices`), where
+  every App reads it with its PostgreSQL driver.
+- **Ducks anywhere**: a Pond running on a Pool or other cloud compute reads Records and Media through the
+  Catchment.
+- **Beyond this machine**: `duckstring catchment records --listen ADDRESS` lets other machines reach Records over
+  TLS only (a self-signed certificate is made, or give your own); `--reader-url` prints a read-only URL for a BI tool.
 - **Backups**: `catchment download` and the state backup carry Records as a `pg_dump` (restored by a fresh
   Catchment) and Media (the state backup up to 256 MB).
 

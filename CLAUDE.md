@@ -394,8 +394,24 @@ true` / `media = true` (`app_config`; `migrate` = a command, only with one of th
   opens that line's data). Objects got no upload (a Pond's output).
 - **Backups**: `catchment download`/state backup skip `records/` and add `records/records.dump`; Media in both (state
   backup ≤ 256 MB, `_MEDIA_IN_BACKUP`).
-- Not built: Records/Media reached from remote compute (Ducks get 127.0.0.1; no Media-over-HTTP filesystem), TLS for a
-  managed PostgreSQL, a Records/Media move command, Spouts into Records.
+- **TLS** (2026-11-24): a managed PostgreSQL listening beyond loopback (`records_listen`) takes other machines only via
+  `hostssl` (`hba_lines`), cert = `records_tls_cert/_key` (or `DUCKSTRING_RECORDS_TLS_CERT/_KEY`) else
+  `make_certificate` (openssl, `records/tls/`, remade when the names change); `url(remote=True)` = `records_host` +
+  `sslmode=require`; `/api/catchment/records/reader` (full). `started.json` records how it was started: adoption only
+  on a match; changed settings stop it (restarted on next need).
+- **Ducks elsewhere**: `DispatchingLauncher.on_this_machine(duck)`; the job's `app_data` says `"catchment"` for Records
+  (managed) and Media (local) when not; the Duck's `AppDataTransport` (duck/client.py) uses `POST /api/duck/{n}/{m}/
+  records/read` (Parquet as the reader role) and `GET /api/duck/{n}/{m}/media/{app}/{major}[/file]`; fetched files go
+  in `{root}/.app-data-cache` (pruned after a day) and `.media-cache`.
+- **Instances**: `[app] instances` (1 to 64; >1 needs `state = "none"`). `AppSupervisor._instances` is `{key: [Instance]}`;
+  `acquire(key, prefer=)` picks the cookie's instance (`duckstring_instance_{name}_v{major}`, set by the proxy when
+  >1) else the least busy; `_maybe_grow` starts one more in a background task once every ready one has `GROW_AT` (4)
+  in flight; each instance's memory under its own `app_reserved` slot (`app_reserve(key, slot)`, `reserve_key`); holds
+  cleared only by the first/last instance; activity reports `count`.
+- **Spouts into Records**: destination `records:` expanded by `add_spout` to `records:{pond}_v{major}` (pond name must
+  fit `RECORDS_NAME`); `egress/records.py` `RecordsEgressDriver(PostgresEgressDriver)` via `set_records`, schema owned
+  by `duckstring_spouts` (`Records.spout_url`), readable by `duckstring_reader`; `Records.in_use` counts them.
+- Not built: App instances on other machines, a Records/Media move command.
 - Tests: `tests/test_records.py`, `tests/test_app_data.py` (real PostgreSQL; skipped without one), `tests/test_install.py`,
   `frontend/src/lib/layout.test.ts`.
 
