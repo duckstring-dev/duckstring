@@ -184,3 +184,10 @@ def test_images_are_urns_or_resource_ids():
 def test_the_boot_script_quotes_its_arguments():
     script = boot_script(["duckstring.duck", "--token=a b'c"], "duckstring[azure]==1.0")
     assert "'--token=a b'\"'\"'c'" in script
+
+
+def test_a_pip_spec_may_name_several_specs():
+    from duckstring.catchment.vm_boot import boot_script
+
+    script = boot_script(["duckstring.duck"], "https://x/duckstring.whl?sig=a&b=c https://x/trickle.whl")
+    assert "/opt/duckstring/bin/python 'https://x/duckstring.whl?sig=a&b=c' https://x/trickle.whl" in script
