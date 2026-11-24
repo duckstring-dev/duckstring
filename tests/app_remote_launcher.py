@@ -29,7 +29,8 @@ class FakeRemoteLauncher:
         name, major = split_pond_key(pond_key)
         root = self.machines / pond_key.replace("@", "-").replace("~", "-")
         root.mkdir(parents=True, exist_ok=True)
-        env = {k: v for k, v in os.environ.items() if not k.startswith("DUCKSTRING_") or k == "DUCKSTRING_SLEEP_MULTIPLIER"}
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("DUCKSTRING_") or k in ("DUCKSTRING_SLEEP_MULTIPLIER", "DUCKSTRING_APP_ORPHAN_MINUTES")}
         argv = [sys.executable, "-m", worker_module(duck), "--pond", name, "--major", str(major), "--version", version,
                 "--catchment", self.base_url, f"--token={self.token}", "--root", str(root),
                 "--source-path", source_path, f"--data-root={self.data_root or ''}"]

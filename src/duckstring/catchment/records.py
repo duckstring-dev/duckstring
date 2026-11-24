@@ -823,8 +823,9 @@ class Records:
     def line_url(self, name: str, major: int, host: str | None = None) -> str:
         return self.url(line_role(name, major), host)
 
-    def reader_url(self, host: str | None = None, start: bool = True, remote: bool = False) -> str:
-        return self.url(PONDS, host, start=start, remote=remote)
+    def reader_url(self, host: str | None = None, start: bool = True, remote: bool = False,
+                   verify: bool = False) -> str:
+        return self.url(PONDS, host, start=start, remote=remote, verify=verify)
 
     def tables(self, schemas: list[str]) -> dict[str, list[dict]]:
         """Each schema's tables and views, ``{schema: [{table, kind, rows}]}``; ``rows`` is PostgreSQL's estimate

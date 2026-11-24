@@ -9,7 +9,8 @@ carries the Catchment's connections to the App's port, forwards the App's output
 Catchment sends, the App's holds, and its own heartbeat.
 
 It ends when the Catchment says stop (``SIGTERM`` to the App's process group, ``SIGKILL`` after the grace), when
-the App exits (reported with its code), or after ``DUCKSTRING_DUCK_ORPHAN_MINUTES`` without the Catchment.
+the App exits (reported with its code), when the Catchment refuses it (an instance it no longer runs), or after
+``DUCKSTRING_APP_ORPHAN_MINUTES`` (5) without the Catchment.
 """
 
 from __future__ import annotations
@@ -32,7 +33,9 @@ log = logging.getLogger("duckstring.app_agent")
 
 HEARTBEAT_S = 2.0
 RECONNECT_MAX_S = 10.0
-DEFAULT_ORPHAN_MINUTES = 60.0
+# Every request reaches an App through its Catchment, so without one an instance serves nothing: it stops soon, and a
+# Catchment back within this (a restart, an upgrade) adopts it.
+DEFAULT_ORPHAN_MINUTES = 5.0
 
 
 def _free_port() -> int:
@@ -353,7 +356,7 @@ class Agent:
 
 
 def _orphan_s() -> float | None:
-    raw = os.environ.get("DUCKSTRING_DUCK_ORPHAN_MINUTES", str(DEFAULT_ORPHAN_MINUTES))
+    raw = os.environ.get("DUCKSTRING_APP_ORPHAN_MINUTES", str(DEFAULT_ORPHAN_MINUTES))
     try:
         minutes = float(raw)
     except ValueError:

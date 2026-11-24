@@ -2748,10 +2748,11 @@ class Driver(TapsMixin, PuddlesMixin):
             return f"{max(declared, _MIN_DUCKDB_GRANT) // 10**6}MB"
 
     def _app_data_locations(self, pond: str | None = None) -> dict | None:
-        """The reader's Records URL and the Media base, once an App line holds either (nothing started before). A
-        Duck on another machine reads both through this Catchment (``"catchment"``: its Duck channel), since a
-        managed PostgreSQL on loopback and Media on this disk are this machine's; Media in an object store it
-        reads itself. An external PostgreSQL is reached directly from anywhere."""
+        """The reader's Records URL and the Media base, once an App line holds either (nothing started before).
+        Data goes direct wherever it can (plans/app-scaling.md): an external PostgreSQL from anywhere, a managed one
+        listening beyond this machine over verified TLS (``records_ca``: the certificate to trust), Media in an
+        object store. Only what is this machine's alone, a managed PostgreSQL on loopback and Media on this disk,
+        a Duck elsewhere reads through this Catchment (``"catchment"``: its Duck channel)."""
         records, media = getattr(self, "records", None), getattr(self, "media", None)
         if records is None or media is None:
             return None
@@ -2766,7 +2767,13 @@ class Driver(TapsMixin, PuddlesMixin):
         try:
             if records.in_use():
                 # From settings: never starts PostgreSQL here.
-                out["records"] = records.reader_url(start=False) if here or not records.managed else "catchment"
+                if here or not records.managed:
+                    out["records"] = records.reader_url(start=False)
+                elif _records_on_loopback(records):
+                    out["records"] = "catchment"
+                else:
+                    out["records"] = records.reader_url(start=False, remote=True, verify=True)
+                    out["records_ca"] = records.remote_ca()
             if media.in_use():
                 if not media.is_local:
                     out["media"] = media.target
@@ -4977,3 +4984,9 @@ class Driver(TapsMixin, PuddlesMixin):
                     ]
                 runs.append(run)
             return runs
+
+
+def _records_on_loopback(records) -> bool:
+    from .records import is_loopback
+
+    return is_loopback(records.listen)

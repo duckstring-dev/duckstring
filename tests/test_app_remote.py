@@ -163,3 +163,103 @@ def test_an_instance_elsewhere_needs_what_it_can_reach(remote):
     r = httpx.get(f"{url}/apps/dash/v1/healthz", timeout=30)
     assert r.status_code == 503 and 'state = \\"none\\"' in r.text or "state" in r.text
     assert not launcher.spawned
+
+
+_RECORDS_APP_PY = '''from fastapi import FastAPI
+
+from duckstring import app as ds_app
+
+api = FastAPI()
+
+
+@api.get("/healthz")
+def healthz():
+    return {"ok": True}
+
+
+@api.post("/add/{n}")
+def add(n: int):
+    with ds_app.records() as con:
+        con.execute("CREATE TABLE IF NOT EXISTS item (n int)")
+        con.execute("INSERT INTO item VALUES (%s)", (n,))
+        ssl = con.execute("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()").fetchone()[0]
+    return {"ssl": ssl, "url": ds_app.records_url().split("@", 1)[1]}
+
+
+@api.get("/total")
+def total():
+    with ds_app.records() as con:
+        return {"total": con.execute("SELECT sum(n) FROM item").fetchone()[0]}
+'''
+
+
+def test_an_instance_elsewhere_reaches_records_directly_over_verified_tls(remote):
+    from duckstring.install import find_postgres
+
+    if find_postgres() is None:
+        pytest.skip("no PostgreSQL here (duckstring install postgres)")
+    url, root, app, launcher = remote
+    r = httpx.put(f"{url}/api/catchment/records", json={"listen": "0.0.0.0", "host": "127.0.0.1"}, timeout=30)
+    assert r.status_code == 200, r.text
+    toml = _toml("records = true\n").replace('[sources]\nsales = "1.0.0"\n\n', "")
+    r = httpx.post(f"{url}/api/deploy", files={"pond": ("pond.zip", _zip({"pond.toml": toml, "main.py": _RECORDS_APP_PY}))},
+                   data={"name": "dash", "version": "1.0.0", "type": "pond"}, timeout=60)
+    assert r.status_code == 200, r.text
+    got = httpx.post(f"{url}/apps/dash/v1/add/4", timeout=120)
+    assert got.status_code == 200, got.text
+    assert got.json()["ssl"] is True
+    assert "sslmode=verify-full" in got.json()["url"] and "sslrootcert=" in got.json()["url"]
+    assert got.json()["url"].startswith("127.0.0.1:")  # the reachable address, not this machine's loopback default
+    httpx.post(f"{url}/apps/dash/v1/add/5", timeout=30)
+    assert httpx.get(f"{url}/apps/dash/v1/total", timeout=30).json() == {"total": 9}
+    assert app.state.driver.records.psql("SELECT sum(n) FROM dash_v1.item").strip() == "9"  # the same Records
+
+
+def test_an_instance_elsewhere_outlives_a_catchment_crash(tmp_path, monkeypatch):
+    """A Catchment process that dies without shutting down leaves its instances running; the next one adopts them
+    when their agents dial in again, and serves through them without starting another."""
+    from duckstring.catchment.app_supervisor import AppSupervisor
+
+    monkeypatch.setenv("DUCKSTRING_DATA_ROOT", str(tmp_path / "data-root"))
+    monkeypatch.setenv("DUCKSTRING_APP_ORPHAN_MINUTES", "0.15")  # 9 s: longer than the restart, short for the test
+    (tmp_path / "data-root").mkdir()
+    root = tmp_path / "catchment"
+    port = _free_port()
+    url = f"http://127.0.0.1:{port}"
+    monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", url)
+    server, thread = _serve(root, port)
+    app = server.config.app
+    first = FakeRemoteLauncher(url, app.state.duck_token, tmp_path / "machines", str(tmp_path / "data-root"))
+    app.state.driver.launcher = first
+    toml = _toml().replace('[sources]\nsales = "1.0.0"\n\n', "")
+    r = httpx.post(f"{url}/api/deploy", files={"pond": ("pond.zip", _zip({"pond.toml": toml, "main.py": _APP_PY}))},
+                   data={"name": "dash", "version": "1.0.0", "type": "pond"}, timeout=60)
+    assert r.status_code == 200, r.text
+    assert httpx.get(f"{url}/apps/dash/v1/healthz", timeout=90).status_code == 200
+    monkeypatch.setattr(AppSupervisor, "shutdown", lambda self: None)  # a crash: nothing is stopped
+    server.should_exit = True
+    thread.join(timeout=20)
+    monkeypatch.undo()
+    monkeypatch.setenv("DUCKSTRING_APP_ORPHAN_MINUTES", "0.15")
+    monkeypatch.setenv("DUCKSTRING_DATA_ROOT", str(tmp_path / "data-root"))
+    monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", url)
+    try:
+        assert first.is_running("dash~1@1")
+        server, thread = _serve(root, port)
+        app = server.config.app
+        second = FakeRemoteLauncher(url, app.state.duck_token, tmp_path / "machines2", str(tmp_path / "data-root"))
+        app.state.driver.launcher = second
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not app.state.app_supervisor._of("dash@1"):
+            time.sleep(0.2)
+        assert app.state.app_supervisor._of("dash@1")[0].adopted
+        assert httpx.get(f"{url}/apps/dash/v1/healthz", timeout=30).status_code == 200
+        assert not second.spawned  # served by the adopted instance
+        server.should_exit = True
+        thread.join(timeout=30)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and first.is_running("dash~1@1"):
+            time.sleep(0.2)
+        assert not first.is_running("dash~1@1")  # without its Catchment it stopped itself
+    finally:
+        first.shutdown_all()

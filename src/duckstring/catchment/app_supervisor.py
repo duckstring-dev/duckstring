@@ -117,6 +117,7 @@ class Instance:
     sent_freshness: dict | None = None
     error: str | None = None
     remote_ready: bool = False
+    adopted: bool = False  # left running by a previous Catchment process: no launcher record, judged by contact
 
     @property
     def remote(self) -> bool:
@@ -157,6 +158,8 @@ class AppSupervisor:
         self.remote_start_timeout = float(os.environ.get("DUCKSTRING_APP_REMOTE_START_TIMEOUT",
                                                          DEFAULT_REMOTE_START_TIMEOUT_S))
         self.tunnels = TunnelHub()
+        # Instances elsewhere a previous Catchment process left running, by id, until their agents dial in again.
+        self._orphans: dict[int, dict] = {}
         self.loop: asyncio.AbstractEventLoop | None = None  # the server's loop, where the tunnels live
         driver.on_app_stop = self.stop_now
         driver.app_leases = self.leases
@@ -757,6 +760,8 @@ class AppSupervisor:
         each running App's freshness file."""
         instances = self._all()
         now = time.monotonic()
+        if self._orphans:
+            self._expire_orphans()
         for inst in instances:
             if self.closing:
                 return  # shutdown stops them (see shutdown)
@@ -794,11 +799,12 @@ class AppSupervisor:
         session = inst.session
         if session is None:
             return True
-        try:
-            if not self.driver.launcher.is_running(inst.launch_key):
-                return True
-        except Exception:
-            pass
+        if not inst.adopted:
+            try:
+                if not self.driver.launcher.is_running(inst.launch_key):
+                    return True
+            except Exception:
+                pass
         loop = self.loop
         if loop is None:
             return False
@@ -809,6 +815,45 @@ class AppSupervisor:
         if fresh != inst.sent_freshness and inst.session is not None:
             if self._in_loop(inst.session.control({"type": "freshness", "data": fresh})):
                 inst.sent_freshness = fresh
+
+    async def adopt(self, iid: int, name: str, major: int):
+        """An agent dialled in for an instance this Catchment process didn't start: one a previous process left
+        running. Adopt it as a ready instance when it runs the deploy its App now selects (its tunnel session, or
+        ``None`` to refuse it, which tells the agent to stop)."""
+        self.loop = asyncio.get_running_loop()
+        orphan = self._orphans.pop(iid, None)
+        if orphan is None:
+            return None
+        key = f"{name}@{major}"
+        view = self.driver.app_view(key)
+        if view is None or view["version_id"] != orphan["version_id"] or view["is_killed"]:
+            self._close_orphan(iid, "redeploy" if view is not None else "removed")
+            return None
+        inst = Instance(key=key, id=iid, version_id=view["version_id"], deployed_at=view["deployed_at"],
+                        proc=RemoteProc(), port=0, log_path=self.root / orphan["log_path"],
+                        reserve_key=f"{key}#remote{iid}", where="remote", launch_key=instance_key(name, major, iid),
+                        ready=True, remote_ready=True, adopted=True)
+        session = await self.tunnels.create(iid, lambda message: self._remote_control(inst, message))
+        inst.session, inst.port = session, session.port
+        with self._mu:
+            self._instances.setdefault(key, []).append(inst)
+        log.info("adopted %s instance %s, left running by the previous Catchment process", key, iid)
+        return session
+
+    def _close_orphan(self, iid: int, reason: str) -> None:
+        db = self.driver.db
+        with locked(db):
+            db.execute("UPDATE app_instance SET stopped_at = ?, stop_reason = ? WHERE id = ? AND stopped_at IS NULL",
+                       (_now_iso(), reason, iid))
+            db.commit()
+
+    def _expire_orphans(self) -> None:
+        """Instances elsewhere whose agents never dialled in again: recorded as shut down."""
+        now = time.monotonic()
+        for iid, orphan in list(self._orphans.items()):
+            if now - orphan["since"] > REMOTE_SILENCE_S * 2:
+                self._orphans.pop(iid, None)
+                self._close_orphan(iid, "shutdown")
 
     def _write_freshness(self, key: str, runtime: Path, force: bool = False) -> None:
         fresh = self.driver.app_freshness(key)
@@ -825,7 +870,12 @@ class AppSupervisor:
         took it down with it (or left it running, outside our control). Record it as shut down."""
         db = self.driver.db
         with locked(db):
-            for iid, pid in db.execute("SELECT id, pid FROM app_instance WHERE stopped_at IS NULL").fetchall():
+            rows = db.execute("SELECT ai.id, ai.pid, ai.place, ai.pond_version_id, ai.log_path, ai.started_at "
+                              "FROM app_instance ai WHERE ai.stopped_at IS NULL").fetchall()
+            for iid, pid, place, version_id, log_path, started_at in rows:
+                if place == "remote":  # its agent may dial in again: adopt it then (adopt), else it stops
+                    self._orphans[iid] = {"version_id": version_id, "log_path": log_path, "since": time.monotonic()}
+                    continue
                 if pid:
                     try:
                         os.killpg(pid, signal.SIGTERM)
@@ -838,6 +888,7 @@ class AppSupervisor:
 
 async def run_app_supervisor(supervisor: AppSupervisor, interval: float = 1.0) -> None:
     """The supervisor's loop: :meth:`AppSupervisor.reconcile` every ``interval`` seconds."""
+    supervisor.loop = asyncio.get_running_loop()
     while True:
         await asyncio.sleep(interval)
         try:

@@ -210,8 +210,11 @@ async def app_tunnel(websocket: WebSocket, name: str, major: int, instance: int)
     connections to the App and the agent's control messages. Refused (403) for an instance the Catchment isn't
     running, which tells the agent to stop."""
     supervisor = getattr(websocket.app.state, "app_supervisor", None)
+    allowed = auth.duck_allowed(websocket)
     session = supervisor.tunnels.get(instance) if supervisor is not None else None
-    if not auth.duck_allowed(websocket) or session is None or session.closed:
+    if allowed and session is None and supervisor is not None:  # one a previous Catchment process started
+        session = await supervisor.adopt(instance, name, major)
+    if not allowed or session is None or session.closed:
         await websocket.close(code=1008)
         return
     await websocket.accept()

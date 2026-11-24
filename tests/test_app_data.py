@@ -599,6 +599,31 @@ def test_a_duck_on_another_machine_reads_records_and_media_through_the_catchment
         thread.join(timeout=10)
 
 
+def test_a_duck_elsewhere_reads_a_listening_records_directly_over_verified_tls(catchment_client, monkeypatch):
+    import duckdb
+
+    from duckstring import app_data
+
+    client = catchment_client
+    driver = client.app.state.driver
+    r = client.put("/api/catchment/records", json={"listen": "0.0.0.0", "host": "127.0.0.1"})
+    assert r.status_code == 200, r.text
+    r = _deploy(client, "feedback", {"pond.toml": _toml("feedback"), "main.py": _APP_PY})
+    assert r.status_code == 200, r.text
+    assert client.post("/apps/feedback/v1/rate/4").json() == {"ok": True}
+    monkeypatch.setattr(driver.launcher, "on_this_machine", lambda duck: False, raising=False)
+    where = driver._app_data_locations("tally@1")
+    assert "sslmode=verify-full" in where["records"] and where["records"].split("@", 1)[1].startswith("127.0.0.1:")
+    assert "BEGIN CERTIFICATE" in where["records_ca"]
+    monkeypatch.setattr(app_data, "_locations", {})
+    app_data.set_locations(where["records"], None, records_ca=where["records_ca"])
+    url = app_data._locations["records"]
+    assert "sslrootcert=" in url
+    con = duckdb.connect()
+    con.execute(f"ATTACH '{url}' AS r (TYPE postgres, READ_ONLY)")  # DuckDB's libpq verifies the server
+    assert con.execute("SELECT sum(score) FROM r.feedback_v1.ratings").fetchall()[0][0] == 4
+
+
 def test_which_ducks_are_on_this_machine():
     from duckstring.catchment.launcher import DispatchingLauncher
 

@@ -202,7 +202,7 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                             from ..app_data import set_locations
 
                             set_locations(data["app_data"].get("records"), data["app_data"].get("media"),
-                                          client.app_data_transport())
+                                          client.app_data_transport(), records_ca=data["app_data"].get("records_ca"))
                         if data.get("rebuild"):
                             executor.wipe()  # cold reset: the run rebuilds from scratch
                         _launch(core.begin_run(

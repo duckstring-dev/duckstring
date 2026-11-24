@@ -30,8 +30,18 @@ _transport = None
 _attach_lock = threading.Lock()
 
 
-def set_locations(records: str | None, media: str | None, transport=None) -> None:
+def set_locations(records: str | None, media: str | None, transport=None, records_ca: str | None = None) -> None:
+    """Where Apps' Records and Media are for this Duck (its job says). ``records_ca`` is the certificate to verify a
+    managed PostgreSQL elsewhere with: written to a file the URL names as ``sslrootcert``."""
     global _transport
+    if records_ca and records and records != VIA_CATCHMENT and "sslrootcert=" not in records:
+        import hashlib
+        import tempfile
+
+        path = Path(tempfile.gettempdir()) / f"duckstring-records-ca-{hashlib.sha256(records_ca.encode()).hexdigest()[:12]}.pem"
+        if not path.is_file():
+            path.write_text(records_ca)
+        records += ("&" if "?" in records else "?") + f"sslrootcert={path}"
     _locations.update(records=records, media=media)
     if transport is not None:
         _transport = transport
