@@ -232,4 +232,6 @@ Added the same day, before merging (the author asked for them):
   switch, old files deleted. A failure before the switch undoes the target. While a move runs, `keep_alive` is held
   off: it restarted the old cluster mid-swap in the first test run.
 
-Open: App instances on other machines, and the purge command's final name (`app purge` for now).
+Open: the purge command's final name (`app purge` for now).
+
+App instances on other machines: `plans/app-scaling.md`.
