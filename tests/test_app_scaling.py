@@ -195,6 +195,8 @@ def test_a_warm_floor_and_the_operators_count(live):
     assert _wait(lambda: len([r for r in _rows(url)["instances"] if r["ready"]]) == 3, timeout=90)
     time.sleep(3)  # past the idle timeout: a held count doesn't idle out
     assert len(_rows(url)["instances"]) == 3
+    status = next(p for p in httpx.get(f"{url}/api/status", timeout=10).json()["ponds"] if p["name"] == "web")
+    assert status["app"]["instance"]["idle_at"] is None  # and isn't shown as about to
     r = httpx.post(f"{url}/api/ponds/web/app/scale", json={"to": 1, "hold_s": 3600}, timeout=30)
     assert _wait(lambda: len(_rows(url)["instances"]) == 1, timeout=60)  # drained down to it
     httpx.post(f"{url}/api/ponds/web/app/scale", json={"release": True}, timeout=30)

@@ -2945,7 +2945,9 @@ class Driver(TapsMixin, PuddlesMixin):
         instance = None
         if row:
             instance = {"id": row[0], "started_at": row[1], "ready_at": row[2], "active": 0, "idle_at": None}
-            activity = self.app_activity(key, m["app"]["idle_timeout_s"]) if self.app_activity else None
+            held = (self._live_scale_override(key) or {}).get("hold_until")  # a timed hold suspends idle stops
+            idle_s = 0 if held else m["app"]["idle_timeout_s"]
+            activity = self.app_activity(key, idle_s) if self.app_activity else None
             instance.update(activity or {})
         data = first_row(self.db.execute("SELECT records, media, state FROM app_data WHERE name = ? AND major = ?",
                                          (m["name"], m["major"])))

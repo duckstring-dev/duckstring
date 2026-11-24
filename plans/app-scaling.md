@@ -174,7 +174,7 @@ to `duckstring.app` later).
 
 ## As built (2026-11-25)
 
-Phases 1 and 2 are built and tested locally; phase 3 (cloud runs) waits for the author's go-ahead.
+Phases 1 and 2 are built and tested locally; phase 3 ran on Google Cloud on 2026-11-25 (below).
 
 - **Launch** (`keys.instance_key`/`split_instance`/`worker_module`): an instance's launcher key is
   `{name}~{id}@{major}`, so every launcher keeps one record per instance and passes `{name}~{id}` as `--pond`; the
@@ -213,4 +213,32 @@ Phases 1 and 2 are built and tested locally; phase 3 (cloud runs) waits for the 
 - **Tests**: `tests/test_tunnel.py`, `tests/test_app_remote.py` (`tests/app_remote_launcher.py`: a stand-in remote
   backend), `tests/test_app_scaling.py`; `test_app_data` gained the remote Duck's direct Records read.
 - Not built: a socket counting as active only when the browser (not the App) sent a message (both count); presigned
-  Media links; any cloud run.
+  Media links; runs on Cloud Run jobs (the launcher has no VPC egress setting, so a job can't reach a Catchment's
+  internal address), AWS and Azure.
+
+## The GCP run (2026-11-25, the author's credits)
+
+A Catchment on a Compute Engine VM (e2-standard-2, Ubuntu 24.04, this branch's wheels; PostgreSQL 18 from
+`duckstring install postgres`), data root and Media on GCS, Records listening on the VPC address with the
+self-signed certificate, the Ripple demo with a 2-minute Refresh, and `scaleapp` (Records, Media, `reports` as its
+Source; `instances = 3`, `concurrency = 2`) on dedicated Compute Engine VMs (e2-small, `pip_spec` = signed URLs of
+both wheels plus psycopg and the gcp extra's packages). Measured:
+
+- The first request ran on the Catchment (`min_instances = 0`). Under load the scaler started a VM 9 s after the
+  load began (the 10 s window) and it served 59 s later (create, boot, uv install, App start); packed routing then
+  sent requests to it.
+- The VM wrote Records directly (`pg_stat_ssl` true, `verify-full` against the self-signed certificate), Media to
+  GCS, and read `reports.monthly_summary` from the data root; its log came back through the tunnel; a browser's cookie
+  kept it on one instance; `/metrics` showed instances by place and CPU and memory shares.
+- The line role's `CONNECTION LIMIT` was 8 (3 x 2 + 2); `max_connections` 51 for 512 MB.
+- `--to 3 --hold` started a second VM; `--to 1` drained both and their VMs were deleted within a minute.
+- `kill -9` of the Catchment: the remote instance kept running and the new process adopted it (served with its
+  cookie); the persisted hold started its replacement for the Catchment's own instance.
+
+Found and fixed during the run: the default rule restarted its window on one quiet sample, so waves of requests
+never grew the App (now a time-weighted mean); `--to 1` drained the instances elsewhere before the Catchment's (now
+the Catchment's first); the sidebar counted down to an idle stop a timed hold suspends; and, outside this work,
+`rotate-keys` left the full key a started Catchment was given valid until a restart (`f4fd0883`). Seen, not
+changed: after a `kill -9`, the new process's Pond Ducks fail to open their registries while the old process's
+Ducks (which outlive it by design) still hold them; the old ones carry on and the Ponds stay healthy.
+Everything was deleted after (VMs, service accounts, bindings, the run's bucket prefix).
