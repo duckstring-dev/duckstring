@@ -213,8 +213,8 @@ Added the same day, before merging (the author asked for them):
   from the machine's LAN address a plain connection is refused, a TLS one accepted.
 - **Ducks on other machines** read Records and Media (on the Catchment's disk) through the Duck channel, which they
   already dial back on: no new port, and it works through the relay and platform hosts. Decided per Pond by the
-  launcher (`on_this_machine`: a remote backend, not a `local` Pool). Media in an object store and an external
-  PostgreSQL are read directly.
+  launcher (`on_this_machine`: a remote backend, not a `local` Pool). Media in an object store, an external
+  PostgreSQL and (since `plans/app-scaling.md`) a managed one listening beyond loopback are read directly.
 - **Several instances of an App** on the Catchment's machine: `[app] instances = N` (with `state = "none"`); one
   starts on the first request, another once every ready one has 4 requests in flight; least-busy routing with a
   sticky cookie; memory per instance; each stops when idle. This is the "most teams run one machine" scaling: an

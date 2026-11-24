@@ -1,6 +1,6 @@
 # App scaling: instances on other machines
 
-Status: planned 2026-11-25, for 0.9.0, on branch `records-media` (worktree `../duckstring-records`). Follows
+Status: planned and built 2026-11-25 (phases 1 and 2; see As built), for 0.9.0, on branch `records-media` (worktree `../duckstring-records`). Follows
 `plans/records-and-media.md`, which built `[app] instances` on the Catchment's own machine.
 
 ## Why
@@ -171,3 +171,46 @@ raises is logged and the default rule decides that tick. The built-in rule is th
 Not planned: scheduled scaling as a setting (a scaler), a connection pooler (PgBouncer), direct inbound networking
 to instances (a possible later optimisation inside a VPC), presigned Media links for large downloads (worth adding
 to `duckstring.app` later).
+
+## As built (2026-11-25)
+
+Phases 1 and 2 are built and tested locally; phase 3 (cloud runs) waits for the author's go-ahead.
+
+- **Launch** (`keys.instance_key`/`split_instance`/`worker_module`): an instance's launcher key is
+  `{name}~{id}@{major}`, so every launcher keeps one record per instance and passes `{name}~{id}` as `--pond`; the
+  `duck` dict's `app_instance` switches the module to `duckstring.app_agent` in every launcher (subprocess, Fargate,
+  EC2 userdata, Container Apps, Azure VMs, Cloud Run, Compute Engine, the Pool agent's jobs).
+- **Agent** (`app_agent.py`): fetches the artifact when the code isn't there, dials
+  `/api/duck/{name}/{major}/app/{id}/tunnel` (Duck token, the Google identity token where needed), gets `config`,
+  builds the env with `ensure_env(check_lock=False)` (no re-exec), starts the App, reports `ready`, then every 2 s
+  forwards the App's output (`log`), its holds and `metrics` (psutil over the process tree; cgroup `cpu.max` and
+  `memory.max` for the limits; the load file). A requested stop exits 0; refused (403) it stops; 5 minutes without
+  the Catchment it stops (`DUCKSTRING_APP_ORPHAN_MINUTES`; an App can't serve without its Catchment, so shorter
+  than a Duck's 60).
+- **Tunnel** (`tunnel.py`, `catchment/tunnels.py`): frames of stream id + type (open, data, close, reset, window,
+  control), 256 KiB credit windows, a loopback listener per remote instance so the proxy is unchanged
+  (`Instance.port` is the listener's). Tested with large transfers, a slow reader held to its window, refused
+  connections and a dropped transport.
+- **Remote instances** (`app_supervisor._start_remote`, `RemoteProc`): `app_instance.place = 'remote'` (migration
+  `042`); lost when the launcher stops running it or its agent is silent 60 s; stopped by a `stop` control, then
+  the launcher's `terminate` once the agent has had 10 s to exit. Remote freshness and leases use `min(changed_f,
+  persisted_f)` (`app_sources_now(persisted=)`, `app_freshness(persisted=)`); the durable mirror deletes only files
+  already collected locally, and local collection follows `retain_from`, so the leases hold in the durable layer.
+- **Adoption**: `close_orphans` keeps remote rows open; an agent dialling an unknown instance is adopted by
+  `adopt()` when its version is current, else refused; unadopted ones close after 120 s. Uvicorn closes WebSockets
+  before the lifespan shutdown, so a graceful shutdown can't send `stop`: instances end through their launchers,
+  and an adopted one (no launcher record) by its orphan timer.
+- **Records**: `Records.url(remote=True, verify=True)` is `verify-full`; `remote_ca()` the self-signed PEM (an
+  operator's certificate: `sslrootcert=system`). Remote Ducks get it as `records_ca` in `app_data` when the managed
+  server listens beyond loopback (`app_data.set_locations` writes it and adds `sslrootcert`).
+- **Scaling** (`catchment/app_scaling.py`; `app.scale_settings` fills defaults for Apps deployed before it):
+  `effective()` merges `app_scale` overrides (migration `043`, also `app_instance.start_reason`) with origins.
+  `scale_app` runs each supervisor tick for every App and after each request (`_kick`): a hold (`app scale --to`)
+  bypasses the scaler; else the scaler decides; the supervisor clamps to min/max, starts at most one at a time,
+  checks the connection budget, backs off 60 s after a failed growth. `_pick` packs (remote first). Idle stops keep
+  `min_instances`; a timed hold suspends them. A remote instance within an hour (or 10%) of its launcher's
+  `max_lifetime_s` (Cloud Run, Container Apps: 7 days) is drained, and the shortfall starts its replacement.
+- **Tests**: `tests/test_tunnel.py`, `tests/test_app_remote.py` (`tests/app_remote_launcher.py`: a stand-in remote
+  backend), `tests/test_app_scaling.py`; `test_app_data` gained the remote Duck's direct Records read.
+- Not built: a socket counting as active only when the browser (not the App) sent a message (both count); presigned
+  Media links; any cloud run.

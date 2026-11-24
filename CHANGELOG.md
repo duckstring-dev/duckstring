@@ -34,12 +34,21 @@ An App can now keep data the Catchment holds for it, which Ponds can read and th
   catalog `records`, so SQL can read `records.feedback_v1.ratings` beside Pond tables) and its Media, with
   download, and upload and delete for Manage access. An App node with Records or Media has a table icon. A Pond
   can declare where its data comes from (`[pond] external = ["GDELT events", "app:feedback@1"]`), drawn as nodes.
-- **Several instances**: `[app] instances = 3` (with `state = "none"`) lets an App grow to more processes on the
-  Catchment's machine as requests pile up, all sharing its Records and Media; a browser stays on the instance it
-  reached.
+- **Several instances, on other machines too**: `[app] instances = 3` (with `state = "none"`) lets an App grow to
+  more processes as it gets busy, all sharing its Records and Media; a browser stays on the instance it reached. An
+  App that declares its own compute (`[pond] duck = "M"`, a Pool, or dedicated) runs its extra instances there:
+  each one dials back to the Catchment, which forwards requests to it, while it reads Pond data, Records and Media
+  directly. A quiet App stays on the Catchment until it gets busy; `min_instances = 1` keeps one running on its own
+  compute and the App off the Catchment entirely. It grows one instance at a time when, for 10 seconds, active
+  requests reach 70% of `concurrency`, or CPU, memory or the load the App reports itself
+  (`duckstring.app.report_load`, or an `X-Duckstring-Load` header) pass their thresholds (`[app.scale]`), and an
+  instance stops after its `idle_timeout`. `duckstring app scale` shows and overrides it all (`--min`, `--max`,
+  `--to 4 --hold 2h`), `duckstring app drain` empties one instance, and `DUCKSTRING_APP_SCALER` replaces the
+  decision with your own. `/metrics` and an opt-in `app_scale` alert show what it does.
 - **Spouts into Records**: a Spout to `records:` delivers a Pond's output into Records (`catalog_v1.prices`), where
   every App reads it with its PostgreSQL driver.
-- **Ducks anywhere**: a Pond running on a Pool or other cloud compute reads Records and Media through the
+- **Ducks anywhere**: a Pond running on a Pool or other cloud compute reads Records directly when they listen
+  beyond the Catchment's machine (verified TLS), and Media directly from an object store; otherwise through the
   Catchment.
 - **Beyond this machine**: `duckstring catchment records --listen ADDRESS` lets other machines reach Records over
   TLS only (a self-signed certificate is made, or give your own); `--reader-url` prints a read-only URL for a BI tool.

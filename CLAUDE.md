@@ -341,6 +341,29 @@ An **App** is an Outlet that serves HTTP: `[pond] type = "app"` + `[app]` (`app.
 - **UI** (2026-11-07): the App node is rounder (radius 16), hides `serve`, shows its state (`appState`: failed/killed/starting/running/idle; rim brand cyan while serving) and data age instead of run counts, and an Open button where a Pond has its table button. `openApp` signs the new tab in by POSTing the UI's stored key to `/apps/_signin` from a form (a user gesture, so no popup block); without a stored key it opens the link. The Sidebar's `AppPanel`: version and deploy age, Open App, Sources with their ages, Instance, Refresh (incl. keyless Taps), Restart/Kill; Options trims to the immediate retry budget and Alerts. The bottom panel is `AppInstances` (instances, and the selected one's log, followed while running; logs full-only). Under a subpath host the sign-in page's absolute `/apps/` form action and cookie path don't fit; untested there (platform auth usually leaves the Catchment open).
 - Tests: `tests/test_app.py`.
 
+## App scaling (`app_agent.py`, `tunnel.py`, `catchment/tunnels.py`, `catchment/app_scaling.py`; migrations `042`/`043`; see `plans/app-scaling.md`)
+
+An App's instances run on the Catchment or on its declared compute (`[pond] duck`), scaled by load. Data goes
+direct (Pond data from the data root, Records over `verify-full`, Media from an object store); only requests and
+control pass through the Catchment, over one dial-back WebSocket per instance carrying many byte streams (the
+Catchment listens on a loopback port per instance, so the proxy is unchanged).
+- **Launch**: launcher key `{name}~{id}@{major}` (`keys.instance_key`); `duck["app_instance"]` makes every launcher
+  run `duckstring.app_agent` (`keys.worker_module`). The agent fetches code, builds the env, runs the App, reports
+  ready, forwards logs, holds and metrics; stops on `stop`, on a 403, or 5 minutes without the Catchment.
+- **Placement**: no declared compute: here. Declared: a request with nothing ready starts here when `min_instances
+  = 0` (the Catchment is the fallback); growth and the warm floor start elsewhere; `min_instances >= 1` never uses
+  the Catchment. Remote instances need `state = "none"`, reachable Records and object-store Media (503 otherwise).
+- **Scaling**: `scale_app` each tick and after requests: an operator hold, else the scaler
+  (`DUCKSTRING_APP_SCALER=module:Class`, default `DefaultScaler`: +1 when, for `after`, active per instance >=
+  `requests` x `concurrency`, or CPU/memory/reported load pass thresholds). Active = HTTP in flight + sockets with
+  a message within `socket_idle`. Routing packs (remote first). Idle stops keep `min_instances`. Connection budget:
+  managed `max_connections` = memory / 10 MB (50 to 1000), role `CONNECTION LIMIT` = instances x connections + 2.
+- **Surface**: `app scale` (show, override, `--to/--hold/--release`), `app drain`, routes `/api/ponds/{name}/app/
+  scale` and `.../app/instances/{id}/drain`; `/metrics` `app_*`; alert kind `app_scale` (explicit); status
+  `app.instance.elsewhere|pressed`.
+- **Lifetimes**: a crashed Catchment's remote instances are adopted when their agents dial back; a graceful
+  shutdown ends them through their launchers; jobs backends' instances are replaced before `max_lifetime_s`.
+
 ## Records and Media (`catchment/records.py`, `media.py`, `app_lifecycle.py`, `app_data.py`, `install.py`; migrations `040`/`041`; see `plans/records-and-media.md`)
 
 An App's own data, held by the Catchment (built 2026-11-24, branch `records-media`, for 0.9.0). `[app] records =
@@ -348,7 +371,7 @@ true` / `media = true` (`app_config`; `migrate` = a command, only with one of th
 - **Records** = PostgreSQL only (SQLite stays inside an App's private `state` dir). `Records` (on `driver.records`):
   setting `records` = `managed` (default) | a `postgres://` URI (`${secret:}`/`${env:}`, needs CREATEROLE/CREATEDB);
   `records_memory` (512 MB), `records_listen` (127.0.0.1), `records_port` (chosen once). Fixed once `app_data` has a
-  Records line (`configure` refuses; a move is the way, not built). Managed = `ManagedPostgres` in `{root}/records/pg`:
+  Records line (`configure` refuses; a move is the way, see Moves). Managed = `ManagedPostgres` in `{root}/records/pg`:
   `initdb` (scram, admin `duckstring`, built-in C.UTF-8 on 17+, `--no-locale` before), `postgres` run directly as a
   child (own session; Unix sockets off: a long root overflows the 103-byte path), adopted from `postmaster.pid` after a
   Catchment restart, stopped with SIGINT and `proc.wait` (polling `kill(pid, 0)` saw the unreaped child for 30 s).
@@ -405,9 +428,8 @@ true` / `media = true` (`app_config`; `migrate` = a command, only with one of th
   in `{root}/.app-data-cache` (pruned after a day) and `.media-cache`.
 - **Instances**: `[app] instances` (1 to 64; >1 needs `state = "none"`). `AppSupervisor._instances` is `{key: [Instance]}`;
   `acquire(key, prefer=)` picks the cookie's instance (`duckstring_instance_{name}_v{major}`, set by the proxy when
-  >1) else the least busy; `_maybe_grow` starts one more in a background task once every ready one has `GROW_AT` (4)
-  in flight; each instance's memory under its own `app_reserved` slot (`app_reserve(key, slot)`, `reserve_key`); holds
-  cleared only by the first/last instance; activity reports `count`.
+  >1) else packs (see App scaling); growth is `scale_app`'s; each instance's memory under its own `app_reserved` slot
+  (`app_reserve(key, slot)`, `reserve_key`); holds cleared only by the first/last instance; activity reports `count`.
 - **Spouts into Records**: destination `records:` expanded by `add_spout` to `records:{pond}_v{major}` (pond name must
   fit `RECORDS_NAME`); `egress/records.py` `RecordsEgressDriver(PostgresEgressDriver)` via `set_records`, schema owned
   by `duckstring_spouts` (`Records.spout_url`), readable by `duckstring_reader`; `Records.in_use` counts them.
@@ -419,7 +441,6 @@ true` / `media = true` (`app_config`; `migrate` = a command, only with one of th
   `pg` via `ManagedPostgres(base, "pg.new", major)`), old store deleted (`_drop_ours` on an external one).
   `records.held` stops `keep_alive` restarting a cluster mid-swap. Media: two-pass copy, listings compared. A
   failure before the switch undoes the target. Refused during a promotion, and promote refuses during a move.
-- Not built: App instances on other machines.
 - Tests: `tests/test_records.py`, `tests/test_app_data.py` (real PostgreSQL; skipped without one), `tests/test_install.py`,
   `frontend/src/lib/layout.test.ts`.
 
