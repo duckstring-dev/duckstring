@@ -292,6 +292,10 @@ def create_app(
     # means full access. The tiered read/demand/full keys live in `catchment_key` (see auth.py); either
     # may gate the API. With neither configured, the Catchment is fully open.
     app.state.api_key = api_key or os.environ.get("DUCKSTRING_API_KEY") or None
+    if app.state.api_key and auth.hash_key(app.state.api_key) in auth.key_hashes(con).values():
+        # One of the tiered keys (`catchment start` passes the registration's full key): the database is its
+        # authority, so `rotate-keys` revokes it. Held here as well, it stayed valid until a restart.
+        app.state.api_key = None
     # The internal token Ducks present on the duck channel (persisted, decoupled from the user keys).
     app.state.duck_token = auth.ensure_duck_token(con)
     # The write-only secret store (at the root, archive-excluded). Injected into the egress credential

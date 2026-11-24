@@ -97,6 +97,11 @@ def ensure_duck_token(con: sqlite3.Connection) -> str:
 _KEY_CACHE = "_duckstring_key_hashes"
 
 
+def key_hashes(con: sqlite3.Connection) -> dict[str, str]:
+    """The stored ``{level: hash}`` of the tiered keys (empty when none were made)."""
+    return _key_hashes(con)
+
+
 def _key_hashes(con: sqlite3.Connection) -> dict[str, str]:
     """``{level: hash}``, cached on the Catchment's connection (``db.Connection``) and dropped by
     :func:`generate`, so a request normally needs no query: auth runs on every request, and the shared
