@@ -2722,17 +2722,31 @@ class Driver(TapsMixin, PuddlesMixin):
                 self._configure_slots()
             return f"{max(declared, _MIN_DUCKDB_GRANT) // 10**6}MB"
 
-    def _app_data_locations(self) -> dict | None:
-        """The reader's Records URL and the Media base, once an App line holds either (nothing started before)."""
+    def _app_data_locations(self, pond: str | None = None) -> dict | None:
+        """The reader's Records URL and the Media base, once an App line holds either (nothing started before). A
+        Duck on another machine reads both through this Catchment (``"catchment"``: its Duck channel), since a
+        managed PostgreSQL on loopback and Media on this disk are this machine's; Media in an object store it
+        reads itself. An external PostgreSQL is reached directly from anywhere."""
         records, media = getattr(self, "records", None), getattr(self, "media", None)
         if records is None or media is None:
             return None
+        here = True
+        on_this_machine = getattr(self.launcher, "on_this_machine", None)
+        if pond is not None and on_this_machine is not None:
+            try:
+                here = on_this_machine(self.duck_config(pond))
+            except Exception:  # pragma: no cover - a Run never fails for want of App data it may not read
+                here = True
         out = {"records": None, "media": None}
         try:
             if records.in_use():
-                out["records"] = records.reader_url(start=False)  # from settings: never starts PostgreSQL here
+                # From settings: never starts PostgreSQL here.
+                out["records"] = records.reader_url(start=False) if here or not records.managed else "catchment"
             if media.in_use():
-                out["media"] = str(Path(self.root) / "media") if media.is_local else media.target
+                if not media.is_local:
+                    out["media"] = media.target
+                else:
+                    out["media"] = str(Path(self.root) / "media") if here else "catchment"
         except Exception as e:  # pragma: no cover - a Run never fails for want of App data it may not read
             _log.warning("Records and Media locations unavailable: %s", e)
         return out
@@ -3909,7 +3923,7 @@ class Driver(TapsMixin, PuddlesMixin):
             "puddles": self.live_puddles_of(pond),
             # Where this Catchment keeps Apps' Records and Media, for pond.read_records and pond.media
             # (plans/records-and-media.md).
-            "app_data": self._app_data_locations(),
+            "app_data": self._app_data_locations(pond),
         })
         # Write started_at as tz-aware ISO (UTC) to match finished_at; the SQLite `datetime('now')`
         # default is naive and would be misread as local time by the UI. A Force re-opens the Run.

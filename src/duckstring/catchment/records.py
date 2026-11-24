@@ -21,6 +21,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets as _secrets
 import signal
 import socket
@@ -790,6 +791,25 @@ class Records:
             found.setdefault(schema, []).append({"table": table, "kind": kinds.get(kind, "table"),
                                                  "rows": int(rows) if int(rows) >= 0 else None})
         return found
+
+    def read_parquet(self, schema: str, table: str, out: Path) -> None:
+        """One line's Records table written to ``out`` as Parquet, read as the reader role (for a Duck on another
+        machine, through the Catchment's Duck channel)."""
+        import duckdb
+
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*_v[0-9]+", schema):
+            raise RecordsError(f"not a Records schema: {schema!r}")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", table):
+            raise RecordsError(f"not a Records table: {table!r}")
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL postgres; LOAD postgres")
+            con.execute(f"ATTACH '{self.reader_url()}' AS r (TYPE postgres, READ_ONLY)")
+            con.execute(f"""COPY (SELECT * FROM r."{schema}"."{table}") TO '{out}' (FORMAT PARQUET)""")
+        except duckdb.CatalogException as e:
+            raise RecordsError(f"no Records table {schema}.{table}") from e
+        finally:
+            con.close()
 
     def status(self) -> dict:
         out = {"target": "managed" if self.managed else "external", "running": False,

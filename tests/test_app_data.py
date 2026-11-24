@@ -529,3 +529,85 @@ def test_the_shutdown_state_backup_carries_records_and_small_media(tmp_path, mon
     assert "records/records.dump" in names and "media/feedback/m1/uploads/note.txt" in names
     assert not any(n.startswith("records/pg") for n in names)
     assert not driver.records.pg.running()  # stopped after the backup dumped it
+
+
+# ─── Ducks on another machine ───────────────────────────────────────────────────
+
+_FAR_TALLY_PY = '''from duckstring import ripple
+
+
+@ripple
+def summary(pond):
+    rel = pond.read_records("feedback@1.ratings").aggregate("count(*) AS n, sum(score) AS total")
+    pond.write_table("summary", rel)
+
+
+@ripple
+def files(pond):
+    media = pond.media("feedback@1", "uploads")
+    import duckdb  # noqa: F401
+    rows = [(e["path"], pond_text(media, e["path"])) for e in media.added()]
+    pond.write_table("files", pond.con.sql("SELECT * FROM (VALUES " + ", ".join(
+        f"('{p}', '{t}')" for p, t in rows) + ") AS f(path, body)") if rows else
+        pond.con.sql("SELECT ''::VARCHAR AS path, ''::VARCHAR AS body WHERE false"))
+
+
+def pond_text(media, path):
+    with media.open(path) as f:
+        return f.read().decode()
+'''
+
+
+@pytest.mark.timeout(120)
+def test_a_duck_on_another_machine_reads_records_and_media_through_the_catchment(tmp_path_factory, monkeypatch):
+    import httpx
+    from test_runtime import _free_port, _pond_status, _serve, _wait
+
+    root = tmp_path_factory.mktemp("far_root")
+    port = _free_port()
+    url = f"http://127.0.0.1:{port}"
+    monkeypatch.delenv("DUCKSTRING_DISABLE_DUCKS", raising=False)
+    monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", url)
+    server, thread = _serve(root, port)
+    try:
+        app = server.config.app
+        driver = app.state.driver
+        # Every Duck here counts as on another machine: what's on loopback or this disk only through the Catchment.
+        monkeypatch.setattr(driver.launcher, "on_this_machine", lambda duck: False, raising=False)
+
+        def deploy(name, files):
+            r = httpx.post(f"{url}/api/deploy", files={"pond": ("pond.zip", _zip(files), "application/zip")},
+                           data={"name": name, "version": "1.0.0", "type": "pond"}, timeout=30.0)
+            assert r.status_code == 200, r.text
+
+        deploy("feedback", {"pond.toml": _toml("feedback"), "main.py": _APP_PY})
+        deploy("tally", {"pond.toml": '[pond]\nname = "tally"\nversion = "1.0.0"\n', "src/pond.py": _FAR_TALLY_PY})
+        for score in (4, 5):
+            assert httpx.post(f"{url}/apps/feedback/v1/rate/{score}", timeout=60.0).json() == {"ok": True}
+        job = driver._app_data_locations("tally@1")
+        assert job == {"records": "catchment", "media": "catchment"}
+
+        httpx.post(f"{url}/api/ponds/tally/refresh", timeout=5.0)
+        assert _wait(lambda: (_pond_status(url, "tally") or {}).get("runs_completed", 0) >= 1, timeout=60), \
+            _pond_status(url, "tally")
+        got = httpx.post(f"{url}/api/query", json={"pond": "tally", "sql": "SELECT * FROM summary"}, timeout=30).json()
+        assert got == [{"n": 2, "total": 9}], got
+        got = httpx.post(f"{url}/api/query", json={"pond": "tally", "sql": "SELECT * FROM files"}, timeout=30).json()
+        assert got == [{"path": "uploads/note.txt", "body": "rated 5"}], got
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+def test_which_ducks_are_on_this_machine():
+    from duckstring.catchment.launcher import DispatchingLauncher
+
+    local, far = object(), object()
+    launcher = DispatchingLauncher(local, {"fargate": far})
+    launcher.data_root = "s3://bucket/root"
+    assert launcher.on_this_machine(None)
+    assert launcher.on_this_machine({"remote": False, "duck_target": "catchment"})
+    assert not launcher.on_this_machine({"remote": True, "duck_target": "M", "preset": True})
+    assert not launcher.on_this_machine({"remote": True, "duck_target": "big", "pool": {"provider": "fargate"}})
+    assert launcher.on_this_machine({"remote": True, "duck_target": "dev", "pool": {"provider": "local"}})
+    assert DispatchingLauncher(local, {}).on_this_machine({"remote": True, "duck_target": "M", "preset": True})

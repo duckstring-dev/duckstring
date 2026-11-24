@@ -22,13 +22,36 @@ from pathlib import Path
 _LINE = re.compile(r"([a-z_][a-z0-9_]*)@([0-9]+)")
 ATTACHED = "_duckstring_records"
 
-# Where this process reads Records and Media: set by the Duck from each Run's job (constant per Catchment).
+# Where this process reads Records and Media: set by the Duck from each Run's job (constant per Catchment). Either
+# may be "catchment": a Duck on another machine reads it through its Catchment (``_transport``, its Duck channel).
+VIA_CATCHMENT = "catchment"
 _locations: dict[str, str | None] = {"records": None, "media": None}
+_transport = None
 _attach_lock = threading.Lock()
 
 
-def set_locations(records: str | None, media: str | None) -> None:
+def set_locations(records: str | None, media: str | None, transport=None) -> None:
+    global _transport
     _locations.update(records=records, media=media)
+    if transport is not None:
+        _transport = transport
+
+
+def _scratch(pond, name: str) -> Path:
+    """A fresh file for a fetch, in the Pond's scratch space. A relation over it is lazy, so it stays until a later
+    fetch finds it a day old."""
+    import time
+    import uuid
+
+    d = Path(pond.root) / ".app-data-cache"
+    d.mkdir(parents=True, exist_ok=True)
+    for old in d.iterdir():
+        try:
+            if time.time() - old.stat().st_mtime > 86400:
+                old.unlink()
+        except OSError:
+            pass
+    return d / f"{uuid.uuid4().hex[:12]}-{name}"
 
 
 def parse_line(line: str) -> tuple[str, int]:
@@ -54,6 +77,12 @@ def read_records(pond, ref: str):
     name, major, table = split_ref(ref)
     schema = f"{name}_v{major}"
     url = _locations["records"] or os.environ.get("DUCKSTRING_RECORDS_READER_URL")
+    if url == VIA_CATCHMENT:  # a Duck on another machine: the table fetched through its Catchment, then read here
+        if _transport is None:
+            raise RuntimeError("Records are read through the Catchment, but this process has no channel to it")
+        out = _scratch(pond, f"{schema}.{table}.parquet")
+        _transport.records_parquet(schema, table, out)
+        return pond.con.sql(f"SELECT * FROM read_parquet('{out}')")
     if url:
         with _attach_lock:  # an attached catalog is the instance's, shared by every Ripple's cursor
             pond.con.execute("INSTALL postgres; LOAD postgres")
@@ -90,7 +119,10 @@ class MediaInput:
         self.ref = f"media:{self.name}@{self.major}/{self.prefix}"
         self._pond = pond
         base = _media_base(pond)
-        self._local = "://" not in base
+        self._remote = base == VIA_CATCHMENT  # a Duck on another machine: through its Catchment
+        if self._remote and _transport is None:
+            raise RuntimeError("Media is read through the Catchment, but this process has no channel to it")
+        self._local = not self._remote and "://" not in base
         self._top = (f"{base.rstrip('/')}/{self.name}/m{self.major}")
         self._files = self._list()
         listing = {e["path"]: [e["size"], e["modified"]] for e in self._files}
@@ -101,6 +133,8 @@ class MediaInput:
 
     def _list(self) -> list[dict]:
         out = []
+        if self._remote:
+            return sorted(_transport.media_list(self.name, self.major, self.prefix), key=lambda e: e["path"])
         if self._local:
             top = Path(self._top)
             start = top / self.prefix if self.prefix else top
@@ -157,6 +191,8 @@ class MediaInput:
         if "w" in mode or "a" in mode or "+" in mode:
             raise TypeError("a Pond reads Media; only its App writes it")
         rel = clean_path(path)
+        if self._remote:
+            return open(self.path(rel), mode)
         if self._local:
             return open(Path(self._top) / rel, mode)
         fs, root = self._fs()
@@ -172,6 +208,9 @@ class MediaInput:
             return Path(self._top) / rel
         cache = Path(self._pond.root) / ".media-cache" / self.name / f"m{self.major}" / rel
         cache.parent.mkdir(parents=True, exist_ok=True)
+        if self._remote:
+            _transport.media_file(self.name, self.major, rel, cache)
+            return cache
         fs, root = self._fs()
         fs.get(f"{root}/{rel}", str(cache))
         return cache

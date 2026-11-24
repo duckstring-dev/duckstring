@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import tarfile
 from pathlib import Path
 
@@ -123,6 +124,63 @@ async def puddle_get(name: str, major: int, request: Request):
     except RemoteQueryError as exc:
         status = 502 if exc.status in (401, 403) else exc.status
         raise HTTPException(status_code=status, detail=_origin_error(exc) if status == 502 else exc.detail) from exc
+
+
+# ─── Apps' Records and Media for a Duck on another machine (plans/records-and-media.md) ───────────────
+
+
+@router.post("/duck/{name}/{major}/records/read", dependencies=[auth.duck])
+async def records_read(name: str, major: int, request: Request):
+    """One Records table as Parquet, for a Duck that can't reach this Catchment's PostgreSQL (it listens on this
+    machine). Read as the reader role: Ponds read every line's Records."""
+    import tempfile
+
+    from fastapi.responses import FileResponse
+    from starlette.background import BackgroundTask
+
+    from ..records import RecordsError
+
+    body = await request.json()
+    records = request.app.state.driver.records
+    fd, path = tempfile.mkstemp(suffix=".parquet", prefix="duckstring-records-")
+    os.close(fd)
+    try:
+        await run_in_threadpool(records.read_parquet, str(body.get("schema", "")), str(body.get("table", "")),
+                                Path(path))
+    except RecordsError as exc:
+        Path(path).unlink(missing_ok=True)
+        raise HTTPException(status_code=404 if "no Records table" in str(exc) else 422, detail=str(exc)) from exc
+    return FileResponse(path, media_type="application/octet-stream",
+                        background=BackgroundTask(lambda: Path(path).unlink(missing_ok=True)))
+
+
+@router.get("/duck/{name}/{major}/media/{app}/{app_major}", dependencies=[auth.duck])
+async def media_list(name: str, major: int, app: str, app_major: int, request: Request, prefix: str = ""):
+    """An App line's Media listing, for a Duck that can't reach this machine's disk."""
+    from ..media import MediaError
+
+    try:
+        files = await run_in_threadpool(request.app.state.driver.media.list, app, app_major, prefix)
+    except MediaError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"files": files}
+
+
+@router.get("/duck/{name}/{major}/media/{app}/{app_major}/file", dependencies=[auth.duck])
+async def media_file(name: str, major: int, app: str, app_major: int, request: Request, path: str):
+    from fastapi.responses import StreamingResponse
+
+    from ..media import MediaError
+
+    media = request.app.state.driver.media
+    try:
+        size = await run_in_threadpool(media.size, app, app_major, path)
+    except MediaError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"no file {path!r}") from None
+    return StreamingResponse(media.read(app, app_major, path), media_type="application/octet-stream",
+                             headers={"Content-Length": str(size)})
 
 
 @router.get("/duck/{name}/{major}/artifact", dependencies=[auth.duck])

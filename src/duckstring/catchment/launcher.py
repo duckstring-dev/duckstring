@@ -284,6 +284,16 @@ class DispatchingLauncher:
             return True
         return any(r.is_running(pond_key) for r in self.remotes.values())
 
+    def on_this_machine(self, duck: dict | None) -> bool:
+        """Whether a Pond with this compute runs its Duck on the Catchment's own machine (a ``local`` Pool
+        included), so it can reach what only this machine has: a Records PostgreSQL on loopback, Media on its disk.
+        Decided as :meth:`_backend_for` routes, without making a Pool."""
+        if not duck or not duck.get("remote"):
+            return True
+        if self.pool_identity(duck) is not None:
+            return ((duck.get("pool") or {}).get("provider") or self.default_provider) == "local"
+        return self._remote_for(duck) is None
+
     def placed_elsewhere(self, pond_key: str, duck: dict | None) -> bool:
         """Whether the Pond's Duck is alive on another backend than ``duck`` now routes to (its compute changed).
         The driver then hands its work over as for a redeploy instead of calling ``ensure``, which would kill
