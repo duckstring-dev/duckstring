@@ -436,8 +436,13 @@ def settings(
         typer.echo("note:       the data root is now set-once (the Catchment has published data).")
 
 
-@app.command()
+records_app = typer.Typer(help="Show or set where Apps' Records live, or move them.", invoke_without_command=True)
+media_app = typer.Typer(help="Show or set where Apps' Media lives, or move it.", invoke_without_command=True)
+
+
+@records_app.callback()
 def records(
+    ctx: typer.Context,
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
     use: Optional[str] = typer.Option(
         None, "--use", help="Where Records live: managed (a PostgreSQL the Catchment runs) or a postgres:// URI "
@@ -460,6 +465,8 @@ def records(
     `duckstring install postgres`), started the first time an App needs it. Where Records live can't change once
     an App line holds Records.
     """
+    if ctx.invoked_subcommand is not None:
+        return
     from . import _http
     from .config import resolve_catchment
 
@@ -491,14 +498,17 @@ def records(
         typer.echo("note:     App lines hold Records here, so where they live is now fixed.")
 
 
-@app.command()
+@media_app.callback()
 def media(
+    ctx: typer.Context,
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
     use: Optional[str] = typer.Option(
         None, "--use", help="Where Media lives: local (the Catchment's own directory) or an object store "
                             "(s3://, gs://, az://, abfss://)."),
 ) -> None:
-    """Show or set where Apps' Media (their files) lives. It can't change once an App line holds Media."""
+    """Show or set where Apps' Media (their files) lives. Once an App line holds Media, `move` changes it."""
+    if ctx.invoked_subcommand is not None:
+        return
     from . import _http
     from .config import resolve_catchment
 
@@ -510,6 +520,68 @@ def media(
     typer.echo(f"media:    {got['target']}")
     if got.get("in_use"):
         typer.echo("note:     App lines hold Media here, so where it lives is now fixed.")
+
+
+def _move(kind: str, target: str, catchment: Optional[str], postgres_version: Optional[int], yes: bool) -> None:
+    import time
+
+    from . import _http
+    from .config import resolve_catchment
+
+    cname, cfg = resolve_catchment(catchment)
+    ident = _http.get(f"{cfg['url']}/api/catchment/identity", auth=cfg).json()
+    if not yes:
+        typer.confirm(f"Move {kind.title()} on '{cname}' to {target}? Apps with {kind.title()} stop while it copies, "
+                      f"and the old store is deleted once the copy is verified.", default=False, abort=True)
+    body = {"target": target, "postgres_version": postgres_version, "confirm": ident.get("name") or ident.get("id")}
+    _http.post(f"{cfg['url']}/api/catchment/{kind}/move", auth=cfg, json=body)
+    last = None
+    while True:
+        got = _http.get(f"{cfg['url']}/api/catchment/move", auth=cfg).json()
+        line = f"{got['state']}" + (f": {got['detail']}" if got.get("detail") else "")
+        if line != last:
+            typer.echo(line)
+            last = line
+        if got["state"] in ("done", "failed"):
+            break
+        time.sleep(1)
+    if got["state"] == "failed":
+        typer.echo(f"Error: {got.get('error')}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"{kind.title()} moved to {target}.")
+
+
+@records_app.command("move")
+def records_move(
+    target: str = typer.Argument(..., help="managed (a PostgreSQL the Catchment runs) or a postgres:// URI."),
+    postgres_version: Optional[int] = typer.Option(
+        None, "--postgres-version", help="Move a managed PostgreSQL to this major (install it first with "
+                                         "`duckstring install postgres --postgres-version N`)."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
+) -> None:
+    """Move every App line's Records to another PostgreSQL, or a managed one to another major.
+
+    Apps with Records answer 503 and Spouts into Records wait while the database is copied (dump and restore);
+    row counts are compared, the Catchment switches, and the old store is deleted. A failure before the switch
+    leaves the old store as it was.
+    """
+    _move("records", target, catchment, postgres_version, yes)
+
+
+@media_app.command("move")
+def media_move(
+    target: str = typer.Argument(..., help="local (the Catchment's own directory) or an object store (s3://, gs://, "
+                                           "az://, abfss://)."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
+) -> None:
+    """Move every App line's Media to another place.
+
+    Files are copied while Apps run; then Apps with Media stop while what changed is copied, the listings are
+    compared, the Catchment switches, and the old files are deleted.
+    """
+    _move("media", target, catchment, None, yes)
 
 
 @app.command()
@@ -763,3 +835,7 @@ def set_default(
         raise typer.Exit(1)
     set_default_catchment(name)
     typer.echo(f"Default catchment set to '{name}'.")
+
+
+app.add_typer(records_app, name="records")
+app.add_typer(media_app, name="media")

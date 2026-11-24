@@ -2407,10 +2407,16 @@ class Driver(TapsMixin, PuddlesMixin):
         """Drain the Spout runs the engine dispatched (instead of sending them to a Duck). Each job
         carries the **source** Pond to read + the destination to write; the worker delivers out-of-lock
         and reports completion via complete_spout_run / fail_spout_run."""
+        moves = getattr(self, "moves", None)
         with self.lock:
             jobs = []
+            waiting = []  # records: Spouts while Records are being moved, delivered after
             for skey, f in self._pending_egress:
                 sm = self.meta.get(skey)
+                if (moves is not None and moves.moving("records") and sm is not None
+                        and str(sm.get("spout", {}).get("destination", "")).startswith("records:")):
+                    waiting.append((skey, f))
+                    continue
                 src_key = sm.get("source_key") if sm else None
                 if src_key is None or src_key not in self.meta:
                     continue
@@ -2435,7 +2441,7 @@ class Driver(TapsMixin, PuddlesMixin):
                     "resync": skey in self._resync_spouts,
                 })
                 self._resync_spouts.discard(skey)
-            self._pending_egress = []
+            self._pending_egress = waiting
             return jobs
 
     def complete_spout_run(self, spout_key: str, f: str) -> None:

@@ -79,6 +79,11 @@ def _line_gate(conn, name: str, major: int, below: str) -> Response | None:
     if lifecycle.cutting_over(name):
         return Response("the App is being upgraded; try again in a moment\n", status_code=503,
                         media_type="text/plain", headers={"Retry-After": str(5)})
+    moves = getattr(driver, "moves", None)
+    view = driver.app_view(pond_key(name, major))
+    if moves is not None and view is not None and moves.blocks(view["app"]):
+        return Response("the App's data is being moved; try again in a moment\n", status_code=503,
+                        media_type="text/plain", headers={"Retry-After": str(15)})
     state = lifecycle.state(name, major)
     if state == "retired":
         live = driver.app_major(name)

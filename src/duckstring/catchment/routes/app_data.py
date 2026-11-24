@@ -226,3 +226,46 @@ async def delete_media(request: Request, name: str, major: int, path: str):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"no file {path!r}") from None
     return {"deleted": path}
+
+
+# ─── Moves (catchment/moves.py) ──────────────────────────────────────────────────
+
+
+class _MoveBody(BaseModel):
+    target: str  # Records: "managed" or a postgres:// URI; Media: "local" or an object-store URI
+    postgres_version: int | None = None  # Records: a managed PostgreSQL's major (a move to another version)
+    confirm: str | None = None  # the Catchment's name: a move deletes the old store once verified
+
+
+async def _start_move(request: Request, kind: str, body: _MoveBody):
+    from ..moves import MoveError
+    from .catchment import _catchment_name
+
+    driver = request.app.state.driver
+    expected = _catchment_name(driver.db)
+    if (body.confirm or "") != expected:
+        raise HTTPException(status_code=422, detail=f"a move stops Apps with {kind.title()} while it copies and deletes "
+                                                    f"the old store once the copy is verified; confirm with the "
+                                                    f"Catchment's name: {expected!r}")
+    try:
+        return await asyncio.to_thread(driver.moves.start, kind, body.target, body.postgres_version)
+    except MoveError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+
+
+@router.post("/catchment/records/move", dependencies=[auth.full])
+async def move_records(request: Request, body: _MoveBody):
+    """Move every line's Records to another PostgreSQL (or a managed one to another major); see catchment/moves.py."""
+    return await _start_move(request, "records", body)
+
+
+@router.post("/catchment/media/move", dependencies=[auth.full])
+async def move_media(request: Request, body: _MoveBody):
+    return await _start_move(request, "media", body)
+
+
+@router.get("/catchment/move", dependencies=[auth.read])
+def move_status(request: Request):
+    """The running or last move's progress: kind, target, state (checking, stopping, copying, verifying, switching,
+    deleting, done, failed), detail and error."""
+    return request.app.state.driver.moves.status()

@@ -167,6 +167,9 @@ async def _lifespan(app: FastAPI):
 
     set_records(driver.records)  # Spouts into Records (records:) deliver through it
     driver.lifecycle = Lifecycle(driver, app.state.root)
+    from .moves import Moves
+
+    driver.moves = Moves(driver)  # moving Records or Media (catchment records|media move)
 
     app.state.app_supervisor = AppSupervisor(driver, app.state.root, app.state.data_root)
     app.state.app_supervisor.close_orphans()

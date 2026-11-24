@@ -39,9 +39,10 @@ def _iso(ts: float) -> str:
 
 
 class Media:
-    def __init__(self, root: Path, db):
+    def __init__(self, root: Path, db, target: str | None = None):
         self.root = Path(root)
         self.db = db
+        self._fixed = target  # a Media bound to a target other than the setting (a move's destination)
         self._lock = threading.Lock()
         self._storage = None
         self._storage_for: str | None = None
@@ -53,6 +54,8 @@ class Media:
         from .cloud import get_setting
         from .db import locked
 
+        if self._fixed is not None:
+            return self._fixed
         with locked(self.db):
             return get_setting(self.db, SETTING) or "local"
 

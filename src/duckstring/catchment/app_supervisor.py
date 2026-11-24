@@ -382,6 +382,9 @@ class AppSupervisor:
         lifecycle = self.driver.lifecycle
         if lifecycle.cutting_over(name):
             raise AppUnavailable(503, "the App is being upgraded; try again in a moment")
+        moves = getattr(self.driver, "moves", None)
+        if moves is not None and moves.blocks(cfg):
+            raise AppUnavailable(503, "the App's data is being moved; try again in a moment")
         try:
             state = lifecycle.prepare(view)  # a new line: live, or a trial migrated from the live one
         except LifecycleError as e:

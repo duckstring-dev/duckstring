@@ -185,10 +185,12 @@ def parse_external(uri: str) -> Endpoint:
 class ManagedPostgres:
     """A PostgreSQL cluster in ``{root}/records/pg``, run as a child of the Catchment."""
 
-    def __init__(self, base: Path):
+    def __init__(self, base: Path, data_name: str = "pg", major: int | None = None):
         self.base = Path(base)
-        self.data = self.base / "pg"
-        self.log_path = self.base / "postgres.log"
+        self.data = self.base / data_name
+        self.log_path = self.base / ("postgres.log" if data_name == "pg" else f"postgres.{data_name}.log")
+        self._started_path = self.base / ("started.json" if data_name == "pg" else f"started.{data_name}.json")
+        self._want_major = major  # a new cluster's PostgreSQL major (a move to another version)
         self._proc: subprocess.Popen | None = None
         self._adopted: int | None = None  # a postmaster a previous Catchment process left running
         self.bin_dir: Path | None = None
@@ -197,7 +199,7 @@ class ManagedPostgres:
     def _bin(self) -> Path:
         from ..install import find_postgres
 
-        wanted = None
+        wanted = self._want_major
         version_file = self.data / "PG_VERSION"
         if version_file.is_file():
             wanted = int(version_file.read_text().strip().split(".")[0])
@@ -266,7 +268,7 @@ class ManagedPostgres:
                               "tls": [str(p) for p in tls] if tls else None}, sort_keys=True)
         existing = self._postmaster()
         if existing is not None:
-            recorded = self.base / "started.json"
+            recorded = self._started_path
             if existing[1] == port and recorded.is_file() and recorded.read_text() == started:
                 self._adopted = existing[0]
                 log.info("records: adopted the running PostgreSQL (pid %s)", existing[0])
@@ -304,7 +306,7 @@ class ManagedPostgres:
             ready = subprocess.run([str(bin_dir / "pg_isready"), "-q", "-h", "127.0.0.1", "-p", str(port)],
                                    capture_output=True, timeout=10)
             if ready.returncode == 0:
-                (self.base / "started.json").write_text(started)
+                self._started_path.write_text(started)
                 return
             time.sleep(0.1)
         self.stop()
@@ -362,6 +364,7 @@ class Records:
         self._ready: Endpoint | None = None
         self._provisioned: set[str] = set()
         self._stopping = False  # the Catchment is shutting down: keep_alive starts nothing
+        self.held = False  # a move is under way: keep_alive starts nothing (catchment/moves.py)
         self._last_warning = 0.0
 
     # ── settings ───────────────────────────────────────────────────────────────────────────────────────
@@ -693,6 +696,8 @@ class Records:
     def keep_alive(self) -> None:
         """Start a managed PostgreSQL again if App lines hold Records and it isn't running (the Catchment's
         restart, or a crash), so Ponds and Apps find it. Called from the App supervisor's loop."""
+        if self.held:  # a move is switching clusters: it starts what it needs itself
+            return
         if self.managed and not self._stopping and not self.pg.running() and self.in_use():
             try:
                 self.ensure()

@@ -203,6 +203,9 @@ class Lifecycle:
         state = self.state(name, major)
         if state == "retired":
             raise LifecycleError(f"{name}@{major} is retired: its data is older than the live line's")
+        moves = getattr(self.driver, "moves", None)
+        if moves is not None and moves.busy():
+            raise LifecycleError("Records or Media are being moved; promote once the move has finished")
         with self._cutover(name):
             old_view = self.driver.app_view(pond_key(name, live)) if live is not None else None
             if live is not None:
