@@ -2271,6 +2271,21 @@ class Driver(TapsMixin, PuddlesMixin):
 
         dest = parse_destination(destination)
         validate_mode(mode)
+        if dest.scheme == "records":  # the Catchment's own Records, in the Pond line's schema (egress/records.py)
+            from ..app import RECORDS_NAME
+            from ..egress.records import schema_of
+            from ..keys import split_pond_key as _split
+
+            src, src_major = _split(pond)
+            if not RECORDS_NAME.fullmatch(src):
+                raise ValueError("a Records Spout delivers into a schema named after the Pond, which needs a name of "
+                                 "lower-case letters, digits and underscores")
+            if destination.strip() not in ("records:", f"records:{src}_v{src_major}"):
+                raise ValueError(f"a Records Spout's destination is records: (it delivers into {src}_v{src_major})")
+            destination = f"records:{src}_v{src_major}"
+            schema_of(destination)
+            if mode == "changes":
+                raise ValueError("mode=changes lands change files: not into Records")
         if mode == "changes" and dest.scheme not in (None, *OBJECT_STORE_SCHEMES):
             raise ValueError("mode=changes lands change files: it needs a file://, object-store or /Volumes "
                              f"destination, not {dest.scheme}")

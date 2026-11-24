@@ -50,6 +50,7 @@ DUMP = "records.dump"  # every line's Records, in catchment download and the sta
 ADMIN = "duckstring"
 READER = "duckstring_reader"  # NOLOGIN: SELECT on every line's schema
 PONDS = "duckstring_ponds"    # LOGIN, a READER: Ponds, the viewer and the query surface read with it
+SPOUTS = "duckstring_spouts"  # LOGIN: owns the schemas Spouts deliver Pond output into (egress/records.py)
 DEFAULT_MEMORY = 512 * 2**20
 MAX_CONNECTIONS = 50
 START_TIMEOUT_S = 30.0
@@ -420,11 +421,15 @@ class Records:
         return make_certificate(self.base / "tls", names)
 
     def in_use(self) -> bool:
-        """Whether any App line has Records: the target can't change after that without a move."""
+        """Whether any App line has Records, or a Spout delivers into them: the target can't change after that
+        without a move."""
         from .db import locked
 
         with locked(self.db):
-            return self.db.execute("SELECT 1 FROM app_data WHERE records = 1 LIMIT 1").fetchone() is not None
+            if self.db.execute("SELECT 1 FROM app_data WHERE records = 1 LIMIT 1").fetchone() is not None:
+                return True
+            return self.db.execute(
+                "SELECT 1 FROM pond_spout WHERE destination LIKE 'records:%' LIMIT 1").fetchone() is not None
 
     def configure(self, target: str | None = None, memory: int | None = None, listen: str | None = None,
                   host: str | None = None, tls_cert: str | None = None, tls_key: str | None = None) -> None:
@@ -622,6 +627,32 @@ class Records:
                 GRANT CONNECT, TEMPORARY ON DATABASE "{endpoint.database}" TO "{role}", "{PONDS}";
             """, endpoint)
             self._provisioned.add(role)
+
+    def spout_url(self, schema: str) -> str:
+        """Where a Spout delivers into Records: the ``duckstring_spouts`` role, after making ``schema`` (owned by
+        it, readable by every App line). Idempotent; starts PostgreSQL if need be."""
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*_v[0-9]+", schema):
+            raise RecordsError(f"not a Spout schema: {schema!r}")
+        with self._lock:
+            endpoint = self.ensure()
+            if schema not in self._provisioned:
+                pw = _sql_literal(self.password(SPOUTS))
+                self.psql(f"""
+                    DO $$BEGIN
+                      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{SPOUTS}') THEN
+                        CREATE ROLE "{SPOUTS}" LOGIN PASSWORD {pw};
+                      ELSE
+                        ALTER ROLE "{SPOUTS}" LOGIN PASSWORD {pw};
+                      END IF;
+                    END$$;
+                    GRANT "{SPOUTS}" TO CURRENT_USER;
+                    CREATE SCHEMA IF NOT EXISTS "{schema}" AUTHORIZATION "{SPOUTS}";
+                    GRANT USAGE ON SCHEMA "{schema}" TO "{READER}";
+                    GRANT SELECT ON ALL TABLES IN SCHEMA "{schema}" TO "{READER}";
+                    ALTER DEFAULT PRIVILEGES FOR ROLE "{SPOUTS}" IN SCHEMA "{schema}" GRANT SELECT ON TABLES TO "{READER}";
+                    GRANT CONNECT, TEMPORARY ON DATABASE "{endpoint.database}" TO "{SPOUTS}";""", endpoint)
+                self._provisioned.add(schema)
+        return self.url(SPOUTS)
 
     def freeze(self, name: str, major: int) -> None:
         """Make a line's Records read-only: its role can no longer sign in, and its sessions end."""

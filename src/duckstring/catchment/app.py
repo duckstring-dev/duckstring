@@ -163,6 +163,9 @@ async def _lifespan(app: FastAPI):
     driver.records = Records(app.state.root, driver.db, reserve=driver.records_reserve,
                              release=driver.records_release)
     driver.media = Media(app.state.root, driver.db)
+    from ..egress.records import set_records
+
+    set_records(driver.records)  # Spouts into Records (records:) deliver through it
     driver.lifecycle = Lifecycle(driver, app.state.root)
 
     app.state.app_supervisor = AppSupervisor(driver, app.state.root, app.state.data_root)

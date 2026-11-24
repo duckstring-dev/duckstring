@@ -19,7 +19,8 @@ from . import credentials
 # Schemes a Spout may target. The concrete drivers are added with the egress worker; the construct
 # accepts the destination ahead of that, so the config can be in place when execution lands.
 OBJECT_STORE_SCHEMES = {"file", "s3", "gs", "az", "abfs", "abfss"}
-CATALOG_SCHEMES = {"postgres", "postgresql", "ducklake", "databricks"}  # transactional, with an in-destination watermark
+# transactional, with an in-destination watermark; records: the Catchment's own Records (egress/records.py)
+CATALOG_SCHEMES = {"postgres", "postgresql", "ducklake", "databricks", "records"}
 KNOWN_SCHEMES = OBJECT_STORE_SCHEMES | CATALOG_SCHEMES
 
 VALID_MODES = {"auto", "full", "append", "changes"}

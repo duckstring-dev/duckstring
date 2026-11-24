@@ -714,3 +714,69 @@ def test_an_app_grows_to_several_instances_that_share_its_records(tmp_path, monk
     finally:
         server.should_exit = True
         thread.join(timeout=15)
+
+
+# ─── Spouts into Records ─────────────────────────────────────────────────────────
+
+_PRICES_PY = '''from duckstring import ripple
+
+
+@ripple
+def prices(pond):
+    pond.write_table("prices", pond.con.sql("SELECT * FROM (VALUES (1, 9.5), (2, 12.0)) AS t(id, price)"))
+'''
+
+_SHOP_PY = '''from fastapi import FastAPI
+
+from duckstring import app as ds
+
+api = FastAPI()
+
+
+@api.get("/healthz")
+def healthz():
+    return {"ok": True}
+
+
+@api.get("/price/{item}")
+def price(item: int):
+    with ds.records() as con:
+        row = con.execute("SELECT price FROM catalog_v1.prices WHERE id = %s", (item,)).fetchone()
+    return {"price": float(row[0])}
+'''
+
+
+@pytest.mark.timeout(120)
+def test_a_spout_delivers_pond_output_into_records_where_apps_read_it(runtime):  # noqa: F811
+    import httpx
+    from test_runtime import _pond_status, _wait
+
+    url, root = runtime
+
+    def deploy(name, files):
+        r = httpx.post(f"{url}/api/deploy", files={"pond": ("pond.zip", _zip(files), "application/zip")},
+                       data={"name": name, "version": "1.0.0", "type": "pond"}, timeout=30.0)
+        assert r.status_code == 200, r.text
+
+    deploy("catalog", {"pond.toml": '[pond]\nname = "catalog"\nversion = "1.0.0"\n', "src/pond.py": _PRICES_PY})
+    r = httpx.post(f"{url}/api/ponds/catalog/spouts", json={"destination": "records:", "table": "prices"}, timeout=30)
+    assert r.status_code == 200, r.text
+    spouts = httpx.get(f"{url}/api/ponds/catalog/spouts", timeout=10).json()
+    assert [s["destination"] for s in (spouts.get("spouts", spouts))] == ["records:catalog_v1"]
+    bad = httpx.post(f"{url}/api/ponds/catalog/spouts", json={"destination": "records:other_v9"}, timeout=10)
+    assert bad.status_code == 422
+
+    httpx.post(f"{url}/api/ponds/catalog/refresh", timeout=5.0)
+    assert _wait(lambda: (_pond_status(url, "catalog") or {}).get("runs_completed", 0) >= 1, timeout=60)
+    shop = _toml("shop", extra="records = true\n")
+    deploy("shop", {"pond.toml": shop, "main.py": _SHOP_PY})
+
+    def delivered():
+        got = httpx.get(f"{url}/apps/shop/v1/price/2", timeout=30)
+        return got.status_code == 200 and got.json() == {"price": 12.0}
+
+    assert _wait(delivered, timeout=60), httpx.get(f"{url}/apps/shop/v1/price/2", timeout=30).text
+    # Read-only for Apps; in the catalog beside the Pond's own tables.
+    got = httpx.post(f"{url}/api/serve/query", json={"sql": "SELECT count(*) FROM records.catalog_v1.prices"},
+                     timeout=30).json()
+    assert got["rows"] == [[2]]

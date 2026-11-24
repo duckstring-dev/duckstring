@@ -94,8 +94,10 @@ def _register_builtins() -> None:
     from .ducklake import DuckLakeEgressDriver
     from .object_store import ObjectStoreEgressDriver
     from .postgres import PostgresEgressDriver
+    from .records import RecordsEgressDriver
 
-    for driver in (ObjectStoreEgressDriver, PostgresEgressDriver, DuckLakeEgressDriver, DatabricksEgressDriver):
+    for driver in (ObjectStoreEgressDriver, PostgresEgressDriver, DuckLakeEgressDriver, DatabricksEgressDriver,
+                   RecordsEgressDriver):
         for scheme in driver.SCHEMES:
             register(scheme, driver)
 
