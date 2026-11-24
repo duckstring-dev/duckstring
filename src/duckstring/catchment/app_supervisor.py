@@ -40,8 +40,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..app import ENV, app_stop_message, base_path
+from ..keys import instance_key
 from .db import locked
 from .registry import pond_major_dir
+from .tunnels import TunnelHub
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +51,9 @@ DEFAULT_START_TIMEOUT_S = 60.0
 STOP_GRACE_S = 10.0
 WS_LEASE_GRACE_S = 60.0  # how long a WebSocket keeps the lease of its previous message
 GROW_AT = 4  # requests in flight on every ready instance before an App with several instances starts another
+# An instance on another machine (plans/app-scaling.md): the machine boots and builds the App's environment first.
+DEFAULT_REMOTE_START_TIMEOUT_S = 900.0
+REMOTE_SILENCE_S = 60.0  # without its agent this long, a remote instance is taken for gone
 # Never handed to an App's process: the Catchment's own credentials.
 _WITHHELD_ENV = ("DUCKSTRING_API_KEY",)
 
@@ -72,6 +77,19 @@ class AppUnavailable(Exception):
         self.message = message
 
 
+class RemoteProc:
+    """Stands in for the process of an instance on another machine: its agent reports the exit code."""
+
+    pid = None
+
+    def __init__(self):
+        self.returncode: int | None = None
+        self.gone = False  # ended without a code (its machine went, or its agent fell silent)
+
+    def poll(self) -> int | None:
+        return -1 if self.gone and self.returncode is None else self.returncode
+
+
 @dataclass
 class Instance:
     key: str
@@ -90,6 +108,19 @@ class Instance:
     next_ticket: int = 0
     memory_limit: str | None = None
     reserve_key: str = ""  # where its memory is set aside (Driver.app_reserved): the App's key, or one per instance
+    # On another machine (plans/app-scaling.md): its launcher record, its tunnel, what its agent reported.
+    where: str = "catchment"
+    launch_key: str = ""
+    session: object = None
+    config: dict | None = None
+    holds: dict = field(default_factory=dict)  # Source name -> versions its process holds (pond.hold())
+    sent_freshness: dict | None = None
+    error: str | None = None
+    remote_ready: bool = False
+
+    @property
+    def remote(self) -> bool:
+        return self.where == "remote"
 
 
 def _current(inst: Instance, view: dict) -> bool:
@@ -123,6 +154,10 @@ class AppSupervisor:
         # never mistaken for an App exiting on its own (see shutdown).
         self.closing = False
         self.start_timeout = float(os.environ.get("DUCKSTRING_APP_START_TIMEOUT", DEFAULT_START_TIMEOUT_S))
+        self.remote_start_timeout = float(os.environ.get("DUCKSTRING_APP_REMOTE_START_TIMEOUT",
+                                                         DEFAULT_REMOTE_START_TIMEOUT_S))
+        self.tunnels = TunnelHub()
+        self.loop: asyncio.AbstractEventLoop | None = None  # the server's loop, where the tunnels live
         driver.on_app_stop = self.stop_now
         driver.app_leases = self.leases
         driver.app_activity = self.activity
@@ -133,6 +168,7 @@ class AppSupervisor:
         """A ready instance of the App ``key``, started if needed: ``prefer`` (an instance id, from the browser's
         cookie) while it serves, else the least busy. An App declaring several ``instances`` starts another, in the
         background, once every ready one has ``GROW_AT`` requests in flight. Raises :class:`AppUnavailable`."""
+        self.loop = asyncio.get_running_loop()
         view = self.driver.app_view(key)
         if view is None:
             raise AppUnavailable(404, "no such App")
@@ -165,7 +201,11 @@ class AppSupervisor:
             return await self._start(key, view)
 
     async def _start(self, key: str, view: dict) -> Instance:
-        """Start one more instance of ``key`` and wait for it to be ready."""
+        """Start one more instance of ``key`` and wait for it to be ready: on the machine its compute names, else
+        this one."""
+        duck = self._remote_duck(view)
+        if duck is not None:
+            return await self._start_remote(key, view, duck)
         slot = key if not self._of(key) else f"{key}#{self._next_slot()}"
         try:
             memory_limit = self.driver.app_reserve(key, slot)
@@ -238,7 +278,7 @@ class AppSupervisor:
     def begin(self, inst: Instance) -> int:
         """A request or WebSocket connection starts: it keeps the instance from idling and takes a read lease.
         Returns its ticket for :meth:`renew` and :meth:`end`."""
-        lease = self.driver.app_sources_now(inst.key)
+        lease = self.driver.app_sources_now(inst.key, persisted=inst.remote)
         now = time.monotonic()
         with self._mu:
             inst.active += 1
@@ -250,7 +290,7 @@ class AppSupervisor:
     def renew(self, inst: Instance, ticket: int) -> None:
         """A WebSocket message from the browser: lease the Sources' versions now, keep the previous lease for
         ``WS_LEASE_GRACE_S`` (the work it started may still be reading), and drop older ones."""
-        lease = self.driver.app_sources_now(inst.key)
+        lease = self.driver.app_sources_now(inst.key, persisted=inst.remote)
         now = time.monotonic()
         with self._mu:
             inst.last_used = now
@@ -278,6 +318,12 @@ class AppSupervisor:
                 return []
             out = [lease[source_key] for inst in insts for entries in inst.leases.values() for _, lease in entries
                    if source_key in lease]
+            for inst in insts:  # holds an agent reported (an instance on another machine)
+                for f in inst.holds.get(source_name, ()):
+                    try:
+                        out.append(datetime.fromisoformat(f))
+                    except (TypeError, ValueError):
+                        pass
             holds = insts[0].log_path.parent.parent / "holds"
         for path in holds.glob("*.json") if holds.is_dir() else ():
             try:
@@ -364,6 +410,188 @@ class AppSupervisor:
         with self._mu:
             self._instances.setdefault(view["key"], []).append(inst)
         return inst
+
+    # ─── instances on other machines (plans/app-scaling.md) ──────────────────
+
+    def _remote_duck(self, view: dict) -> dict | None:
+        """The compute an instance of this App starts on when that isn't this machine, else ``None``."""
+        on_here = getattr(self.driver.launcher, "on_this_machine", None)
+        if on_here is None:
+            return None
+        try:
+            duck = self.driver.duck_config(view["key"])
+        except Exception:  # pragma: no cover - an App with no compute config runs here
+            return None
+        if not duck.get("remote"):  # no compute declared: this machine
+            return None
+        return None if on_here(duck) else duck
+
+    def _remote_data_env(self, view: dict) -> tuple[dict[str, str], str | None]:
+        """The line's Records and Media as an instance elsewhere reaches them, directly: Records at their reachable
+        address over verified TLS (with the self-signed certificate to trust, when it is one), Media in an object
+        store. Raises :class:`AppUnavailable` naming what to change when it can't."""
+        from ..app import RECORDS_ENV
+        from .records import RecordsError, line_role
+
+        cfg = view["app"]
+        if cfg["state"] != "none":
+            raise AppUnavailable(503, "the App runs on other machines, so it can't keep a private state directory: "
+                                      'set [app] state = "none" (Records and Media hold what it keeps)')
+        if cfg.get("media") and self.driver.media.is_local:
+            raise AppUnavailable(503, "the App runs on other machines, which can't reach Media on the Catchment's "
+                                      "disk: move it to an object store with `duckstring catchment media move URI`")
+        env = self._app_data_env(view)
+        ca = None
+        if cfg.get("records"):
+            records = self.driver.records
+            try:
+                env[RECORDS_ENV] = records.url(line_role(view["name"], view["major"]), remote=True, verify=True)
+                ca = records.remote_ca()
+            except RecordsError as e:
+                raise AppUnavailable(503, f"the App runs on other machines, which can't reach its Records: {e}") from None
+        return env, ca
+
+    def _remote_config(self, view: dict, data_env: dict[str, str], ca: str | None) -> dict:
+        """What the agent needs to start the App: the environment a Catchment instance gets, minus this machine's
+        paths (the agent adds its own root and runtime)."""
+        cfg = view["app"]
+        env = dict(data_env)
+        env["DUCKSTRING_APP_PATH"] = base_path(view["name"], view["major"])
+        return {
+            "type": "config", "command": cfg["command"], "health": cfg.get("health"),
+            "health_prefix": "" if cfg["strip_path"] else base_path(view["name"], view["major"]),
+            "start_timeout": self.start_timeout, "stop_grace": STOP_GRACE_S, "env": env, "records_ca": ca,
+            "freshness": self.driver.app_freshness(view["key"], persisted=True),
+            "app": {"name": view["name"], "major": view["major"], "version": view["version"],
+                    "data_root": self.data_root, "sources": list(view["sources"]), "source_majors": view["sources"],
+                    "memory_limit": None},
+        }
+
+    async def _start_remote(self, key: str, view: dict, duck: dict) -> Instance:
+        """Start an instance on ``duck``'s compute through its launcher, and wait for its agent to report it ready."""
+        data_env, ca = await asyncio.to_thread(self._remote_data_env, view)
+        name, major = view["name"], view["major"]
+        runtime = app_runtime_dir(self.root, name, major)
+        (runtime / "logs").mkdir(parents=True, exist_ok=True)
+        db = self.driver.db
+        with locked(db):
+            iid = db.execute("INSERT INTO app_instance (pond_version_id, started_at, port, log_path, place) "
+                             "VALUES (?, ?, 0, '', 'remote')", (view["version_id"], _now_iso())).lastrowid
+            log_path = runtime / "logs" / f"{iid}.log"
+            db.execute("UPDATE app_instance SET log_path = ? WHERE id = ?",
+                       (str(log_path.relative_to(self.root)), iid))
+            db.commit()
+        inst = Instance(key=key, id=iid, version_id=view["version_id"], deployed_at=view["deployed_at"],
+                        proc=RemoteProc(), port=0, log_path=log_path, reserve_key=f"{key}#remote{iid}",
+                        where="remote", launch_key=instance_key(name, major, iid))
+        inst.config = self._remote_config(view, data_env, ca)
+        session = await self.tunnels.create(iid, lambda message: self._remote_control(inst, message))
+        inst.session, inst.port = session, session.port
+        with open(log_path, "ab") as out:
+            out.write(f"[duckstring] starting {name}@{major} {view['version']} on {duck.get('target') or 'remote'} "
+                      f"compute (instance {iid})\n".encode())
+        with self._mu:
+            self._instances.setdefault(key, []).append(inst)
+        try:
+            await asyncio.to_thread(self.driver.launcher.ensure, inst.launch_key, view["version"],
+                                    view["source_path"], {**duck, "app_instance": iid})
+        except Exception as e:
+            await asyncio.to_thread(self._stop, inst, "start_failed")
+            raise AppUnavailable(503, f"the App's compute didn't start: {e}") from None
+        await self._wait_remote_ready(inst, view)
+        return inst
+
+    def _remote_control(self, inst: Instance, message: dict) -> None:
+        """A control message from an instance's agent (in the server's loop)."""
+        kind = message.get("type")
+        if kind == "hello" and inst.config is not None:
+            asyncio.ensure_future(inst.session.control(inst.config))
+            if message.get("state") == "running" and inst.ready:
+                return  # a reconnect: it carries on
+        elif kind == "ready":
+            inst.remote_ready = True
+        elif kind == "log":
+            try:
+                with open(inst.log_path, "a", encoding="utf-8") as out:
+                    out.write(message.get("text") or "")
+            except OSError:
+                pass
+        elif kind == "holds":
+            inst.holds = message.get("sources") or {}
+        elif kind == "failed":
+            inst.error = message.get("error")
+        elif kind == "exited":
+            code = message.get("code")
+            inst.proc.returncode = int(code) if code is not None else -1
+
+    async def _wait_remote_ready(self, inst: Instance, view: dict) -> None:
+        launcher = self.driver.launcher
+        deadline = time.monotonic() + self.remote_start_timeout
+        while time.monotonic() < deadline:
+            if inst.remote_ready:
+                inst.ready = True
+                inst.last_used = time.monotonic()
+                with locked(self.driver.db):
+                    self.driver.db.execute("UPDATE app_instance SET ready_at = ? WHERE id = ?",
+                                           (_now_iso(), inst.id))
+                    self.driver.db.commit()
+                return
+            failed = inst.error or (launcher.launch_error(inst.launch_key)
+                                    if hasattr(launcher, "launch_error") else None)
+            if inst.proc.poll() is not None or failed or not launcher.is_running(inst.launch_key):
+                await asyncio.to_thread(self._stop, inst, "start_failed")
+                self._exited(view, "start_failed", inst.proc.returncode)
+                raise AppUnavailable(503, f"the App's instance elsewhere didn't start: "
+                                          f"{failed or 'see `duckstring app logs`'}")
+            await asyncio.sleep(0.2)
+        await asyncio.to_thread(self._stop, inst, "start_failed")
+        self._exited(view, "start_failed", None)
+        raise AppUnavailable(503, f"the App's instance elsewhere wasn't ready within {self.remote_start_timeout:.0f}s; "
+                                  "see `duckstring app logs`")
+
+    def _in_loop(self, coro, timeout: float = 5.0):
+        """Run ``coro`` on the server's loop from a worker thread (where ``_stop`` runs), and wait for it."""
+        loop = self.loop
+        if loop is None or loop.is_closed():
+            coro.close()
+            return None
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:  # on the loop itself: schedule it, never block the loop
+            asyncio.ensure_future(coro)
+            return None
+        try:
+            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout)
+        except Exception:
+            return None
+
+    def _launcher_running(self, inst: Instance) -> bool:
+        try:
+            return bool(self.driver.launcher.is_running(inst.launch_key))
+        except Exception:
+            return False
+
+    def _stop_remote(self, inst: Instance) -> None:
+        """Ask the agent to stop its App (the grace applies there), then end its machine through the launcher."""
+        proc = inst.proc
+        if proc.poll() is None and inst.session is not None:
+            if self._in_loop(inst.session.control({"type": "stop", "grace": STOP_GRACE_S})):
+                deadline = time.monotonic() + STOP_GRACE_S + 5
+                while proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                # Its agent exits once it has reported: let its machine end on its own before ending it.
+                deadline = time.monotonic() + 10
+                while self._launcher_running(inst) and time.monotonic() < deadline:
+                    time.sleep(0.1)
+        try:
+            self.driver.launcher.terminate(inst.launch_key)
+        except Exception:
+            log.exception("ending the machine of App instance %s", inst.id)
+        if proc.poll() is None:
+            proc.gone = True
+        self._in_loop(self.tunnels.close(inst.id))
 
     def _app_data_env(self, view: dict) -> dict[str, str]:
         """The line's Records and Media, made ready (plans/records-and-media.md): its schema and role in the
@@ -462,7 +690,9 @@ class AppSupervisor:
         engine itself."""
         inst.stopping = True
         proc = inst.proc
-        if proc.poll() is None:
+        if inst.remote:
+            self._stop_remote(inst)
+        elif proc.poll() is None:
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
@@ -533,6 +763,8 @@ class AppSupervisor:
             if inst.stopping or not inst.ready:
                 continue  # a start in progress is _wait_ready's to judge
             view = self.driver.app_view(inst.key)
+            if inst.remote and inst.proc.poll() is None and self._remote_lost(inst):
+                inst.proc.gone = True
             if inst.proc.poll() is not None:
                 if inst.stopping or self.closing:
                     continue  # stopped since the check above: the stopper records it
@@ -551,8 +783,32 @@ class AppSupervisor:
                   and now - inst.last_used >= view["app"]["idle_timeout_s"]):
                 self._stop(inst, "idle")
                 self._crashes.pop(inst.key, None)
+            elif inst.remote:
+                self._send_freshness(inst)
             else:
                 self._write_freshness(inst.key, app_runtime_dir(self.root, view["name"], view["major"]))
+
+    def _remote_lost(self, inst: Instance) -> bool:
+        """Whether an instance elsewhere is gone: its launcher no longer runs it, or its agent has been silent for
+        ``REMOTE_SILENCE_S``."""
+        session = inst.session
+        if session is None:
+            return True
+        try:
+            if not self.driver.launcher.is_running(inst.launch_key):
+                return True
+        except Exception:
+            pass
+        loop = self.loop
+        if loop is None:
+            return False
+        return loop.time() - session.last_contact > REMOTE_SILENCE_S
+
+    def _send_freshness(self, inst: Instance) -> None:
+        fresh = self.driver.app_freshness(inst.key, persisted=True)
+        if fresh != inst.sent_freshness and inst.session is not None:
+            if self._in_loop(inst.session.control({"type": "freshness", "data": fresh})):
+                inst.sent_freshness = fresh
 
     def _write_freshness(self, key: str, runtime: Path, force: bool = False) -> None:
         fresh = self.driver.app_freshness(key)

@@ -2709,7 +2709,7 @@ class Driver(TapsMixin, PuddlesMixin):
             served = self.served_major(name)
             return served if served in majors else max(majors)
 
-    def app_freshness(self, key: str) -> dict:
+    def app_freshness(self, key: str, persisted: bool = False) -> dict:
         """The App's freshness, each Source's, and when each Source's output last changed (``{"freshness": iso |
         None, "sources": {name: iso}, "changed": {name: iso}}``), which the AppSupervisor hands the App's process
         for ``pond.freshness()``. A Source's freshness moves on every Run, passes included; ``changed`` only when
@@ -2720,9 +2720,12 @@ class Driver(TapsMixin, PuddlesMixin):
                 return {"freshness": None, "sources": {}, "changed": {}}
             iso = lambda dt: _iso(dt) if dt != NEVER else None  # noqa: E731
             sources = [sp for sp in self.state.ponds[key].sources if sp in self.meta]
+            states = self.state.pond_states
+            # An instance on another machine reads the durable layer, which trails the local publish (persisted_f).
+            cap = (lambda sp, f: min(f, states[sp].persisted_f)) if persisted else (lambda sp, f: f)  # noqa: E731
             return {"freshness": iso(ps.end_f),
-                    "sources": {self.meta[sp]["name"]: iso(self.state.pond_states[sp].end_f) for sp in sources},
-                    "changed": {self.meta[sp]["name"]: iso(self.state.pond_states[sp].changed_f) for sp in sources}}
+                    "sources": {self.meta[sp]["name"]: iso(cap(sp, states[sp].end_f)) for sp in sources},
+                    "changed": {self.meta[sp]["name"]: iso(cap(sp, states[sp].changed_f)) for sp in sources}}
 
     def app_reserve(self, key: str, slot: str | None = None) -> str:
         """An instance of the App ``key`` is about to start: set its ``[pond] memory`` aside from the budget the
@@ -2825,7 +2828,7 @@ class Driver(TapsMixin, PuddlesMixin):
             if process:
                 self._process(_now())
 
-    def app_sources_now(self, key: str) -> dict[str, datetime]:
+    def app_sources_now(self, key: str, persisted: bool = False) -> dict[str, datetime]:
         """Each Source line's published freshness (``changed_f``) right now: what a read lease taken at this
         moment holds (plans/apps.md). A read can only resolve to that version or a newer one. Read without the
         lock: the state is replaced, never mutated in place, by the engine's functions."""
@@ -2833,8 +2836,11 @@ class Driver(TapsMixin, PuddlesMixin):
         pond = state.ponds.get(key)
         if pond is None:
             return {}
-        return {sp: state.pond_states[sp].changed_f for sp in pond.sources
-                if sp in state.pond_states and state.pond_states[sp].changed_f > NEVER}
+        states = state.pond_states
+        if persisted:  # an instance elsewhere: the version it can read is the newest in the durable layer
+            return {sp: min(states[sp].changed_f, states[sp].persisted_f) for sp in pond.sources
+                    if sp in states and min(states[sp].changed_f, states[sp].persisted_f) > NEVER}
+        return {sp: states[sp].changed_f for sp in pond.sources if sp in states and states[sp].changed_f > NEVER}
 
     def app_has_taps(self, key: str) -> bool:
         """Whether the App ``key`` has a Tap (read without the lock: the Taps are replaced whole on change)."""

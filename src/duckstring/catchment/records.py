@@ -410,6 +410,19 @@ class Records:
         first = self.listen.split(",")[0].strip()
         return first if first not in ("*", "0.0.0.0", "::") else socket.gethostname()
 
+    def _operator_certificate(self) -> bool:
+        return bool((self._setting(TLS_CERT_SETTING) or os.environ.get("DUCKSTRING_RECORDS_TLS_CERT"))
+                    and (self._setting(TLS_KEY_SETTING) or os.environ.get("DUCKSTRING_RECORDS_TLS_KEY")))
+
+    def remote_ca(self) -> str | None:
+        """The certificate something elsewhere trusts to verify the managed PostgreSQL (PEM): the self-signed one
+        made for its address. ``None`` for an operator's certificate (verified against the system's roots) and for
+        an external server (its URL says how)."""
+        if not self.managed or self._operator_certificate():
+            return None
+        pair = self.tls()
+        return pair[0].read_text() if pair else None
+
     def tls(self) -> tuple[Path, Path] | None:
         """The certificate and key a managed PostgreSQL serves TLS with: the operator's, else a self-signed one
         made for its address. None while it listens on this machine only (nothing reaches it from elsewhere)."""
@@ -786,18 +799,24 @@ class Records:
         dump.rename(dump.with_name(f"{DUMP}.restored-{time.strftime('%Y%m%dT%H%M%S')}"))
         log.info("records: restored %d line(s) from %s", len(lines), DUMP)
 
-    def url(self, role: str, host: str | None = None, start: bool = True, remote: bool = False) -> str:
+    def url(self, role: str, host: str | None = None, start: bool = True, remote: bool = False,
+            verify: bool = False) -> str:
         """A standard libpq URL signing ``role`` in (its search path is set on the role itself). With
         ``start=False`` it is built from the settings, never starting anything. ``remote``: for something on
-        another machine, at the managed PostgreSQL's reachable address and over TLS (``sslmode=require``)."""
+        another machine, at the managed PostgreSQL's reachable address and over TLS (``sslmode=require``);
+        ``verify`` checks the server too (``verify-full``: against :meth:`remote_ca`, which the caller adds as
+        ``sslrootcert``, or for an operator's certificate the system's roots)."""
         endpoint = (self._known_endpoint() if not start else None) or self.ensure()
         sslmode = endpoint.sslmode
+        extra = ""
         if remote and endpoint.managed:
             if is_loopback(self.listen):
                 raise RecordsError("Records' PostgreSQL listens on this machine only: set `duckstring catchment "
                                    "records --listen ADDRESS` for something elsewhere to reach it")
-            host, sslmode = host or self.host, "require"
-        query = f"?sslmode={sslmode}" if sslmode else ""
+            host, sslmode = host or self.host, ("verify-full" if verify else "require")
+            if verify and self._operator_certificate():  # else the caller trusts remote_ca()
+                extra = "&sslrootcert=system"
+        query = f"?sslmode={sslmode}{extra}" if sslmode else ""
         return (f"postgresql://{role}:{self.password(role)}@{host or endpoint.host}:{endpoint.port}/"
                 f"{endpoint.database}{query}")
 

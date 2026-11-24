@@ -79,7 +79,7 @@ class PoolAgent:
         # that says it already has.
         env.pop("DUCKSTRING_IN_POND_ENV", None)
         argv = [
-            sys.executable, "-m", "duckstring.duck",
+            sys.executable, "-m", job.get("module") or "duckstring.duck",
             "--pond", job["pond"],
             "--major", str(job["major"]),
             "--version", job["version"],

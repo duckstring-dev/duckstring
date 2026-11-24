@@ -447,7 +447,7 @@ class PoolLauncher:
     # ── the launcher seam ─────────────────────────────────────────────────────
 
     def ensure(self, pond_key: str, version: str, source_path: str, duck: dict | None = None) -> None:
-        from ..keys import split_pond_key
+        from ..keys import split_pond_key, worker_module
 
         with self._lock:
             if self._state.get(pond_key) in ("pending", "running"):
@@ -456,7 +456,8 @@ class PoolLauncher:
             name, major = split_pond_key(pond_key)
             # The Pond's Flock settings travel on each begin_run job (flock.job_settings), not here.
             self._jobs.append({"kind": "ensure", "pond": name, "major": major,
-                               "version": version, "source_path": source_path, "env": {}})
+                               "version": version, "source_path": source_path, "env": {},
+                               "module": worker_module(duck)})
             self._state[pond_key] = "pending"
 
     def terminate(self, pond_key: str, wait: bool = False) -> None:

@@ -241,6 +241,16 @@ def _level_guard(required: Level, allow_tap: bool = False):
     return Depends(dep)
 
 
+def duck_allowed(conn) -> bool:
+    """The Duck channel's check for a connection a guard can't take (the App tunnel's WebSocket)."""
+    state = conn.app.state
+    if not auth_configured(getattr(state, "db", None), getattr(state, "api_key", None)):
+        return True
+    token = getattr(state, "duck_token", None)
+    supplied = _extract_token(conn)
+    return bool(token and supplied and secrets.compare_digest(supplied, token))
+
+
 def _duck_guard():
     def dep(request: Request) -> None:
         state = request.app.state

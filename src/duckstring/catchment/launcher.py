@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ..keys import split_pond_key
+from ..keys import split_pond_key, worker_module
 
 
 def load_launcher_class(spec: str):
@@ -86,7 +86,7 @@ class SubprocessLauncher:
             env[REEXEC_ENV] = "1"
         self._procs[pond_key] = subprocess.Popen(
             [
-                python, "-m", "duckstring.duck",
+                python, "-m", worker_module(duck),
                 "--pond", name,
                 "--major", str(major),
                 "--version", version,

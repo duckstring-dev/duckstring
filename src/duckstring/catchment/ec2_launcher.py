@@ -38,7 +38,7 @@ import os
 import shlex
 from pathlib import Path
 
-from ..keys import split_pond_key
+from ..keys import split_pond_key, worker_module
 
 log = logging.getLogger("duckstring.ec2")
 
@@ -83,7 +83,7 @@ _UV_CACHE = f"export UV_CACHE_DIR={_REMOTE_ROOT}/uv-cache"
 
 def _userdata(*, pond: str, major: int, version: str, source_path: str, catchment_url: str,
               token: str, data_root: str | None, pip_spec: str | None,
-              region: str | None = None) -> str:
+              region: str | None = None, module: str = "duckstring.duck") -> str:
     """The cloud-init shell that boots the Duck. It fetches its own source artifact over the duck
     channel (the dir won't exist on the box), so nothing but the reachable Catchment URL + token is
     needed. ``pip_spec`` installs duckstring when the AMI doesn't already carry it.
@@ -92,7 +92,7 @@ def _userdata(*, pond: str, major: int, version: str, source_path: str, catchmen
     terminate it, so an idle Duck's machine never outlives it. A crash leaves it up, so its console
     can still be read (``diagnose``) until the liveness sweep terminates it."""
     cmd = [
-        "python3", "-m", "duckstring.duck",
+        "python3", "-m", module,
         "--pond", pond, "--major", str(major), "--version", version,
         "--catchment", catchment_url, f"--token={token}",
         "--root", _REMOTE_ROOT, "--source-path", source_path,
@@ -207,7 +207,7 @@ class Ec2Launcher:
         userdata = _userdata(
             pond=name, major=major, version=version, source_path=source_path,
             catchment_url=self.remote_base_url, token=self.token, data_root=self.data_root,
-            pip_spec=pip_spec, region=region,
+            pip_spec=pip_spec, region=region, module=worker_module(duck),
         )
         kwargs = {
             "ImageId": ami,

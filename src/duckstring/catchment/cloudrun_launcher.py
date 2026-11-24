@@ -22,7 +22,7 @@ import logging
 import os
 
 from ..duck.id_token import audience_args
-from ..keys import split_pond_key
+from ..keys import split_pond_key, worker_module
 from . import gcp_rest
 from .vm_boot import REMOTE_ROOT
 
@@ -222,7 +222,7 @@ class CloudRunLauncher:
         pool = (duck or {}).get("pool") or {}
         dc = (duck or {}).get("deploy_config") or pool.get("deploy_config") or {}
         args = [
-            "duckstring.duck", "--pond", name, "--major", str(major), "--version", version,
+            worker_module(duck), "--pond", name, "--major", str(major), "--version", version,
             "--catchment", self.remote_base_url, f"--token={self.token}",
             "--root", REMOTE_ROOT, "--source-path", source_path, f"--data-root={self.data_root or ''}",
             *audience_args(),

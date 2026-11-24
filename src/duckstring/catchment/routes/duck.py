@@ -30,7 +30,7 @@ import os
 import tarfile
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response, WebSocket
 from starlette.concurrency import run_in_threadpool
 
 from ...keys import pond_key
@@ -202,3 +202,27 @@ def artifact(name: str, major: int, request: Request):
         content=buf.getvalue(), media_type="application/x-tar",
         headers={"X-Duckstring-Version": meta["version"], "X-Duckstring-Source-Path": meta["source_path"]},
     )
+
+
+@router.websocket("/duck/{name}/{major}/app/{instance}/tunnel")
+async def app_tunnel(websocket: WebSocket, name: str, major: int, instance: int):
+    """An App instance's agent on another machine (plans/app-scaling.md): the tunnel that carries the Catchment's
+    connections to the App and the agent's control messages. Refused (403) for an instance the Catchment isn't
+    running, which tells the agent to stop."""
+    supervisor = getattr(websocket.app.state, "app_supervisor", None)
+    session = supervisor.tunnels.get(instance) if supervisor is not None else None
+    if not auth.duck_allowed(websocket) or session is None or session.closed:
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+
+    async def receive():
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            return None
+        return message.get("bytes") or b""
+
+    try:
+        await session.serve(receive, websocket.send_bytes)
+    except Exception:  # the socket went: the agent dials again
+        pass
