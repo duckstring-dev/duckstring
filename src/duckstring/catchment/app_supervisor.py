@@ -870,9 +870,9 @@ class AppSupervisor:
         took it down with it (or left it running, outside our control). Record it as shut down."""
         db = self.driver.db
         with locked(db):
-            rows = db.execute("SELECT ai.id, ai.pid, ai.place, ai.pond_version_id, ai.log_path, ai.started_at "
+            rows = db.execute("SELECT ai.id, ai.pid, ai.place, ai.pond_version_id, ai.log_path "
                               "FROM app_instance ai WHERE ai.stopped_at IS NULL").fetchall()
-            for iid, pid, place, version_id, log_path, started_at in rows:
+            for iid, pid, place, version_id, log_path in rows:
                 if place == "remote":  # its agent may dial in again: adopt it then (adopt), else it stops
                     self._orphans[iid] = {"version_id": version_id, "log_path": log_path, "since": time.monotonic()}
                     continue
