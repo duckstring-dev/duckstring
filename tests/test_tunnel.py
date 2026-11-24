@@ -13,7 +13,7 @@ from duckstring.catchment.tunnels import TunnelSession
 from duckstring.tunnel import WINDOW_BYTES, Mux
 
 
-async def _pair(app_port: int, *, delay: float = 0.0):
+async def _pair(app_port: int, *, delay: float = 0.0, small_buffers: bool = False):
     """A session (the Catchment's end) joined to an agent's Mux by two queues standing in for a WebSocket."""
     to_agent: asyncio.Queue = asyncio.Queue()
     to_catchment: asyncio.Queue = asyncio.Queue()
@@ -30,7 +30,15 @@ async def _pair(app_port: int, *, delay: float = 0.0):
         to_agent.put_nowait(data)
 
     async def connect():
-        return await asyncio.open_connection("127.0.0.1", app_port)
+        if not small_buffers:
+            return await asyncio.open_connection("127.0.0.1", app_port)
+        import socket
+
+        sock = socket.socket()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8192)  # the kernel can't absorb the stream
+        sock.setblocking(False)
+        await asyncio.get_running_loop().sock_connect(sock, ("127.0.0.1", app_port))
+        return await asyncio.open_connection(sock=sock)
 
     agent = Mux(send_up, on_open=connect)
 
@@ -102,13 +110,24 @@ def test_a_slow_reader_is_held_to_the_window():
             await writer.drain()
             writer.close()
 
-        server = await asyncio.start_server(slow, "127.0.0.1", 0)
-        session, agent, _, parts = await _pair(server.sockets[0].getsockname()[1])
+        import socket
+
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8192)  # inherited by the accepted socket
+        listener.bind(("127.0.0.1", 0))
+        server = await asyncio.start_server(slow, sock=listener)
+        session, agent, _, parts = await _pair(server.sockets[0].getsockname()[1], small_buffers=True)
         reader, writer = await asyncio.open_connection("127.0.0.1", session.port)
         writer.write(os.urandom(8 * WINDOW_BYTES))
-        await asyncio.sleep(0.3)
+        for _ in range(200):  # until the window is spent (waiting on the condition: a busy machine is slow)
+            await asyncio.sleep(0.025)
+            streams = list(session.mux.streams.values())
+            if streams and streams[0].credit <= 0:
+                break
         (stream,) = session.mux.streams.values()
         assert stream.credit <= 0  # held at the window, not buffered whole in the tunnel
+        await asyncio.sleep(0.2)
+        assert stream.credit <= 0 and stream.inbox.qsize() == 0  # and stays held: nothing more crossed
         got.put_nowait(True)
         await writer.drain()
         writer.write_eof()
