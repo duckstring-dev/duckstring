@@ -338,7 +338,8 @@ class AppSupervisor:
             from .app_scaling import Decision
 
             count = max(0, min(sc["instances"], int(hold["count"])))
-            extra = sorted(live, key=lambda i: (self._active(i, sc), not i.remote, -i.id))[:max(0, len(live) - count)]
+            # Drained first: the Catchment's (routing empties it first too), then the least busy, the newest.
+            extra = sorted(live, key=lambda i: (i.remote, self._active(i, sc), -i.id))[:max(0, len(live) - count)]
             decision = Decision(desired=count, drain=[i.id for i in extra], reason="the operator's count")
             if hold.get("until") is None and len(live) == count and all(i.ready for i in live):
                 await asyncio.to_thread(self.driver.set_app_hold, key, None)  # reached: scaling resumes

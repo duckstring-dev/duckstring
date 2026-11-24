@@ -326,3 +326,14 @@ def test_growth_stops_at_the_postgresql_connection_budget():
     Records.max_connections = lambda self: 21
     assert sup._connections_allow(views["a@1"])
     assert sup._connections_allow(views["c@1"])
+
+
+def test_scaling_down_drains_the_catchments_instance_first(live):
+    url, app, launcher, deploy = live
+    deploy(_toml('idle_timeout = "10m"\n'))
+    assert httpx.get(f"{url}/apps/web/v1/where", timeout=60).json()["instance"] == "1"  # on the Catchment
+    httpx.post(f"{url}/api/ponds/web/app/scale", json={"to": 2, "hold_s": 600}, timeout=30)
+    assert _wait(lambda: [(r["where"], r["ready"]) for r in _rows(url)["instances"]]
+                 == [("catchment", True), ("remote", True)], timeout=90)
+    httpx.post(f"{url}/api/ponds/web/app/scale", json={"to": 1, "hold_s": 600}, timeout=30)
+    assert _wait(lambda: [r["where"] for r in _rows(url)["instances"]] == ["remote"], timeout=60)
