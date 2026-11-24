@@ -411,7 +411,15 @@ true` / `media = true` (`app_config`; `migrate` = a command, only with one of th
 - **Spouts into Records**: destination `records:` expanded by `add_spout` to `records:{pond}_v{major}` (pond name must
   fit `RECORDS_NAME`); `egress/records.py` `RecordsEgressDriver(PostgresEgressDriver)` via `set_records`, schema owned
   by `duckstring_spouts` (`Records.spout_url`), readable by `duckstring_reader`; `Records.in_use` counts them.
-- Not built: App instances on other machines, a Records/Media move command.
+- **Moves** (`moves.py`, `driver.moves`): `catchment records move` / `media move` (CLI groups now) → `POST
+  /api/catchment/{records|media}/move` (full, confirm = the Catchment's name) → a background thread; `GET
+  /api/catchment/move` = progress. Records: check, window (`moves.blocks` → proxy and `_app_data_env` 503;
+  `take_spout_jobs` holds `records:` jobs; writing roles NOLOGIN + sessions ended), whole-db `pg_dump` with the
+  newest tools found, roles made on the target, restore, `_counts_sql` compared, switch (setting, or `pg.new` →
+  `pg` via `ManagedPostgres(base, "pg.new", major)`), old store deleted (`_drop_ours` on an external one).
+  `records.held` stops `keep_alive` restarting a cluster mid-swap. Media: two-pass copy, listings compared. A
+  failure before the switch undoes the target. Refused during a promotion, and promote refuses during a move.
+- Not built: App instances on other machines.
 - Tests: `tests/test_records.py`, `tests/test_app_data.py` (real PostgreSQL; skipped without one), `tests/test_install.py`,
   `frontend/src/lib/layout.test.ts`.
 

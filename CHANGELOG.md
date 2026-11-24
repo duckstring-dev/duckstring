@@ -45,6 +45,10 @@ An App can now keep data the Catchment holds for it, which Ponds can read and th
   TLS only (a self-signed certificate is made, or give your own); `--reader-url` prints a read-only URL for a BI tool.
 - **Backups**: `catchment download` and the state backup carry Records as a `pg_dump` (restored by a fresh
   Catchment) and Media (the state backup up to 256 MB).
+- **Moving them**: `duckstring catchment records move postgres://...` (or `managed`) moves every App's Records to
+  another PostgreSQL, and `--postgres-version 19` moves a managed one to a new PostgreSQL major. `duckstring
+  catchment media move s3://...` moves Media. Apps answer 503 while the copy is taken; the copy is verified before
+  the switch and the old store is deleted after it.
 
 PostgreSQL comes from the operating system's official packages: `duckstring install postgres` installs it (the
 PostgreSQL project's apt or yum repository, or Homebrew), and the image carries it. `duckstring install` also

@@ -222,5 +222,14 @@ Added the same day, before merging (the author asked for them):
   long-lived services that take inbound traffic, validated on each cloud).
 - **Spouts into Records**: `records:` delivers into `{pond}_v{major}`, readable by every App.
 
-Open: the move command for a changed `records`/`media` setting (a proposal is with the author), App instances on
-other machines, and the purge command's final name (`app purge` for now).
+- **Moves** (the author's calls: a downtime window for Records; a move deletes the old store; PostgreSQL major
+  upgrades are the same mechanism): `catchment records move managed|postgres://... [--postgres-version N]` and
+  `catchment media move local|s3://...`, in `catchment/moves.py`. Records: check the target (CREATEROLE and
+  CREATEDB, none of this Catchment's schemas or roles there), the window (Apps with Records 503, `records:` Spouts
+  wait, writing roles frozen), one `pg_dump` restored after the roles are made, row counts compared, switch, old
+  store deleted. A version move builds `records/pg.new` with the new major beside the old and swaps it in (a real
+  17 to 18 move is tested). Media: a first copy while Apps run, the changes in the window, listings compared,
+  switch, old files deleted. A failure before the switch undoes the target. While a move runs, `keep_alive` is held
+  off: it restarted the old cluster mid-swap in the first test run.
+
+Open: App instances on other machines, and the purge command's final name (`app purge` for now).
