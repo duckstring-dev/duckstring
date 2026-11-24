@@ -85,6 +85,83 @@ async def app_restart(name: str, request: Request, major: int | None = None, ver
     return {"ok": True}
 
 
+# ─── scaling (plans/app-scaling.md) ──────────────────────────────────────────────
+
+
+def _supervisor(request: Request):
+    supervisor = getattr(request.app.state, "app_supervisor", None)
+    if supervisor is None:
+        raise HTTPException(status_code=503, detail="this Catchment isn't running Apps")
+    return supervisor
+
+
+@router.get("/ponds/{name}/app/scale", dependencies=[auth.read])
+def app_scale(name: str, request: Request, major: int | None = None, version: str | None = None):
+    """The App line's scaling: its effective settings and where each comes from, the running instances with what
+    the scaler sees of them, recent decisions, and the pressure it is held under at its maximum."""
+    pond, mj = _app_line(request, name, major, version)
+    return {"pond": f"{pond}@{mj}", **_supervisor(request).scale_status(pond_key(pond, mj))}
+
+
+class _ScaleBody(BaseModel):
+    min_instances: int | None = None
+    max_instances: int | None = None
+    concurrency: int | None = None
+    connections: int | None = None
+    requests: float | None = None
+    cpu: float | None = None
+    memory: float | None = None
+    load: float | None = None
+    to: int | None = None  # set the count now
+    hold_s: float | None = None  # with `to`: keep it exactly for this long
+    release: bool = False  # drop a pinned count
+    clear: bool = False  # drop every override
+
+
+@router.post("/ponds/{name}/app/scale", dependencies=[auth.full])
+async def set_app_scale(name: str, body: _ScaleBody, request: Request, major: int | None = None,
+                        version: str | None = None):
+    """Override the App line's scaling settings (kept across redeploys), set its instance count now (``to``), or
+    clear the overrides."""
+    from datetime import datetime, timedelta, timezone
+
+    pond, mj = _app_line(request, name, major, version)
+    key = pond_key(pond, mj)
+    driver, supervisor = _driver(request), _supervisor(request)
+    fields = body.model_dump(exclude={"to", "hold_s", "release", "clear"})
+    for k in ("requests", "cpu", "memory", "load"):
+        if fields[k] is not None and not 0 < fields[k] <= 1:
+            raise HTTPException(status_code=422, detail=f"{k}: expected a share above 0, at most 1 (0.7 is 70%)")
+    for k in ("min_instances", "max_instances", "concurrency", "connections"):
+        if fields[k] is not None and fields[k] < (1 if k in ("max_instances", "concurrency") else 0):
+            raise HTTPException(status_code=422, detail=f"{k}: too low")
+    try:
+        if body.clear or any(v is not None for v in fields.values()):
+            await asyncio.to_thread(driver.set_app_scale, key, body.clear, **fields)
+        if body.release:
+            await asyncio.to_thread(driver.set_app_hold, key, None)
+        if body.to is not None:
+            sc = driver.app_view(key)["scaling"]
+            if not 0 <= body.to <= sc["instances"]:
+                raise ValueError(f"to: expected 0 to the maximum ({sc['instances']})")
+            until = (datetime.now(timezone.utc) + timedelta(seconds=body.hold_s)).isoformat() if body.hold_s else None
+            await asyncio.to_thread(driver.set_app_hold, key, body.to, until)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    supervisor._kick(key)
+    return {"pond": f"{pond}@{mj}", **supervisor.scale_status(key)}
+
+
+@router.post("/ponds/{name}/app/instances/{instance}/drain", dependencies=[auth.full])
+def drain_app_instance(name: str, instance: int, request: Request, major: int | None = None,
+                       version: str | None = None):
+    """Send no new sessions to one instance; it stops once its work is done."""
+    pond, mj = _app_line(request, name, major, version)
+    if not _supervisor(request).drain(pond_key(pond, mj), instance):
+        raise HTTPException(status_code=404, detail=f"no running instance {instance} of '{pond}@{mj}'")
+    return {"draining": instance}
+
+
 # ─── Records and Media across majors (app_lifecycle.py) ───────────────────────────
 
 

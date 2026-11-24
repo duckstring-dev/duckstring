@@ -58,7 +58,7 @@ async def ws(socket: WebSocket):
 def _toml(extra: str = "") -> str:
     return ('[pond]\nname = "dash"\nversion = "1.0.0"\ntype = "app"\nduck = "M"\n\n[sources]\nsales = "1.0.0"\n\n[app]\n'
             'command = "uvicorn main:api --port $PORT --root-path $DUCKSTRING_APP_PATH"\nhealth = "/healthz"\n'
-            'state = "none"\n' + extra)
+            'state = "none"\nmin_instances = 1\n' + extra)  # kept warm elsewhere: never on the Catchment
 
 
 @pytest.fixture
@@ -140,16 +140,16 @@ def test_an_instance_elsewhere_serves_through_the_tunnel(remote):
     assert launcher.procs["dash~1@1"].returncode == 0  # by its agent, stopping cleanly
 
 
-def test_a_lost_machine_ends_its_instance_and_the_next_request_starts_another(remote):
+def test_a_lost_machine_ends_its_instance_and_the_warm_floor_replaces_it(remote):
     url, root, app, launcher = remote
     _deploy_app(url, 'idle_timeout = "0"\n')
     assert httpx.get(f"{url}/apps/dash/v1/healthz", timeout=90).status_code == 200
     launcher.kill("dash~1@1")  # the machine vanishes
     supervisor = app.state.app_supervisor
     deadline = time.monotonic() + 15
-    while time.monotonic() < deadline and supervisor._of("dash@1"):
+    while time.monotonic() < deadline and any(i.id == 1 for i in supervisor._of("dash@1")):
         time.sleep(0.2)
-    assert not supervisor._of("dash@1")
+    assert not any(i.id == 1 for i in supervisor._of("dash@1"))
     assert httpx.get(f"{url}/apps/dash/v1/healthz", timeout=90).status_code == 200
     assert [k for k, _ in launcher.spawned] == ["dash~1@1", "dash~2@1"]
 

@@ -62,7 +62,7 @@ from ..engine import (
 from ..flock import job_settings as flock_job_settings
 from ..keys import pond_key
 from ..trickle_io import first_row
-from . import providers
+from . import app_scaling, providers
 from .puddles import PuddlesMixin
 from .taps import TapsMixin
 
@@ -482,6 +482,7 @@ class Driver(TapsMixin, PuddlesMixin):
         # override (pond_duck) ?? declared (pond_version, from pond.toml) ?? Catchment default (env).
         # A NULL override field inherits; loaded from pond_duck / pond_version in reload().
         self.duck_overrides: dict[str, dict] = {}   # key → nullable override columns
+        self.app_scale_overrides: dict[str, dict] = {}  # App key → its app_scale row (plans/app-scaling.md)
         self.duck_declared: dict[str, dict] = {}    # key → declared columns off the selected pond_version
         self.duck_pool_names: set[str] = set()      # defined Duck Pools (for the unknown-pool→catchment fallback)
         # Monotonic counter bumped on every state change — the UI long-polls /api/status against it, so
@@ -618,6 +619,13 @@ class Driver(TapsMixin, PuddlesMixin):
                     (pond_id,)
                 ))
                 self.duck_overrides[key] = _duck_override_row(duck_row)
+                if is_app:
+                    row = db.execute(f"SELECT {', '.join(_APP_SCALE_COLUMNS)} FROM app_scale WHERE pond_id = ?",
+                                     (pond_id,)).fetchone()
+                    if row is not None:
+                        self.app_scale_overrides[key] = dict(zip(_APP_SCALE_COLUMNS, row, strict=True))
+                    else:
+                        self.app_scale_overrides.pop(key, None)
                 declared = first_row(db.execute(
                     "SELECT duck_pool, flock_mode, flock_engine, oom_policy, flock_accept FROM pond_version "
                     "WHERE id = ?",
@@ -2676,10 +2684,73 @@ class Driver(TapsMixin, PuddlesMixin):
                 "key": key, "name": m["name"], "major": m["major"], "version": m["version"],
                 "version_id": m["version_id"], "deployed_at": m["deployed_at"], "source_path": m["source_path"],
                 "app": m["app"],
+                "scaling": app_scaling.effective(m["app"], self._live_scale_override(key)),
                 "sources": {self.meta[sp]["name"]: self.meta[sp]["major"] for sp in pond.sources if sp in self.meta},
                 "immediate_retries": pond.retry_immediately,
                 "is_failed": ps.is_failed, "is_killed": ps.is_killed,
             }
+
+    def _live_scale_override(self, key: str) -> dict | None:
+        """The App's override row with an expired hold dropped (caller holds the lock)."""
+        o = self.app_scale_overrides.get(key)
+        if o and o.get("hold_count") and o.get("hold_until") and o["hold_until"] <= _iso(_now()):
+            o = {**o, "hold_count": None, "hold_until": None}
+        return o
+
+    def set_app_scale(self, key: str, clear: bool = False, **fields) -> dict:
+        """Set (or with ``clear``, remove) the operator's overrides of an App line's scaling settings
+        (plans/app-scaling.md); ``None`` leaves a field as it is. Returns the effective settings."""
+        unknown = set(fields) - set(_APP_SCALE_COLUMNS)
+        if unknown:
+            raise ValueError(f"unknown scaling setting(s): {', '.join(sorted(unknown))}")
+        with self.lock:
+            m = self.meta.get(key)
+            if m is None or not m.get("is_app"):
+                raise KeyError(key)
+            row = {c: None for c in _APP_SCALE_COLUMNS} if clear else dict(
+                self.app_scale_overrides.get(key) or {c: None for c in _APP_SCALE_COLUMNS})
+            row.update({k: v for k, v in fields.items() if v is not None})
+            probe = app_scaling.effective(m["app"], row)
+            if row.get("min_instances") is not None and row["min_instances"] > probe["instances"]:
+                raise ValueError(f"min_instances ({row['min_instances']}) is more than the maximum "
+                                 f"({probe['instances']})")
+            if probe["instances"] > 1 and m["app"].get("state") == "local":
+                raise ValueError('several instances can\'t share a private state directory: the App needs '
+                                 '[app] state = "none"')
+            if all(v is None for v in row.values()):
+                self.db.execute("DELETE FROM app_scale WHERE pond_id = ?", (m["pond_id"],))
+                self.app_scale_overrides.pop(key, None)
+            else:
+                cols = ", ".join(_APP_SCALE_COLUMNS)
+                self.db.execute(
+                    f"INSERT INTO app_scale (pond_id, {cols}) VALUES (?, {', '.join('?' * len(_APP_SCALE_COLUMNS))}) "
+                    f"ON CONFLICT(pond_id) DO UPDATE SET " + ", ".join(f"{c} = excluded.{c}" for c in _APP_SCALE_COLUMNS),
+                    (m["pond_id"], *(row[c] for c in _APP_SCALE_COLUMNS)))
+                self.app_scale_overrides[key] = row
+            self.db.commit()
+            return app_scaling.effective(m["app"], self._live_scale_override(key))
+
+    def set_app_hold(self, key: str, count: int | None, until: str | None = None) -> None:
+        """Pin an App line's instance count (``app scale --to``; plans/app-scaling.md): ``until`` an ISO time (the
+        count holds, neither grown nor shrunk, until then), or ``None`` for until it is reached. ``count=None``
+        releases it."""
+        with self.lock:
+            m = self.meta.get(key)
+            if m is None or not m.get("is_app"):
+                raise KeyError(key)
+            row = dict(self.app_scale_overrides.get(key) or {c: None for c in _APP_SCALE_COLUMNS})
+            row["hold_count"], row["hold_until"] = count, (until if count is not None else None)
+            if all(v is None for v in row.values()):
+                self.db.execute("DELETE FROM app_scale WHERE pond_id = ?", (m["pond_id"],))
+                self.app_scale_overrides.pop(key, None)
+            else:
+                cols = ", ".join(_APP_SCALE_COLUMNS)
+                self.db.execute(
+                    f"INSERT INTO app_scale (pond_id, {cols}) VALUES (?, {', '.join('?' * len(_APP_SCALE_COLUMNS))}) "
+                    f"ON CONFLICT(pond_id) DO UPDATE SET " + ", ".join(f"{c} = excluded.{c}" for c in _APP_SCALE_COLUMNS),
+                    (m["pond_id"], *(row[c] for c in _APP_SCALE_COLUMNS)))
+                self.app_scale_overrides[key] = row
+            self.db.commit()
 
     def prepare_app_restart(self, key: str) -> None:
         """Before an App restarts: clear a failure or a Kill, so the fresh instance may serve."""
@@ -4984,6 +5055,10 @@ class Driver(TapsMixin, PuddlesMixin):
                     ]
                 runs.append(run)
             return runs
+
+
+_APP_SCALE_COLUMNS = ("min_instances", "max_instances", "concurrency", "connections", "requests", "cpu", "memory",
+                      "load", "hold_count", "hold_until")
 
 
 def _records_on_loopback(records) -> bool:

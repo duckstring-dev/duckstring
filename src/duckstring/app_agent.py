@@ -70,6 +70,7 @@ class Agent:
         self.last_contact = time.monotonic()
         self.connected = False
         self._holds: dict | None = None
+        self._samplers: dict = {}
         self._log_buffer: list[str] = []
 
     # ─── the tunnel ──────────────────────────────────────────────────────────
@@ -334,10 +335,39 @@ class Agent:
                 if holds != self._holds:
                     self._holds = holds
                     await self.control({"type": "holds", "sources": holds})
-                await self.control({"type": "alive", "state": self._state()})
+                await self.control({"type": "metrics", "state": self._state(), **self._metrics()})
             elif orphan_s is not None and time.monotonic() - self.last_contact > orphan_s:
                 log.warning("no contact with the Catchment for %.0f minutes: stopping", orphan_s / 60)
                 self.stop_requested.set()
+
+    def _metrics(self) -> dict:
+        """The App's CPU (share of this machine's cores, or its container's quota) and memory (share of the
+        container's limit, else the machine's), and the load it reported (``duckstring.app.report_load``)."""
+        out: dict = {"cpu": None, "memory": None, "load": None}
+        if self.proc is not None and self.proc.returncode is None:
+            try:
+                import psutil
+
+                root = self._samplers.get(self.proc.pid) or psutil.Process(self.proc.pid)
+                cpu, rss, seen = 0.0, 0, {}
+                for proc in [root, *root.children(recursive=True)]:
+                    proc = self._samplers.get(proc.pid, proc)
+                    seen[proc.pid] = proc
+                    cpu += proc.cpu_percent(None)
+                    rss += proc.memory_info().rss
+                self._samplers = seen
+                cores, limit = _limits(psutil)
+                out["cpu"] = cpu / 100.0 / cores
+                out["memory"] = rss / limit if limit else None
+            except Exception:
+                pass
+        path = self.runtime / "load" / str(self.instance)
+        try:
+            if time.time() - path.stat().st_mtime <= 30:
+                out["load"] = max(0.0, min(1.0, float(path.read_text().strip())))
+        except (OSError, ValueError):
+            pass
+        return out
 
     def _read_holds(self) -> dict[str, list[str]]:
         """The App's ``pond.hold()`` files: each live process's held versions, by Source name."""
@@ -353,6 +383,27 @@ class Agent:
                 if f:
                     out.setdefault(name, []).append(f)
         return out
+
+
+def _limits(psutil) -> tuple[float, int | None]:
+    """This machine's cores and memory for the App: its container's cgroup quota and limit where set."""
+    cores: float = psutil.cpu_count() or 1
+    memory: int | None = psutil.virtual_memory().total
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()[:2]
+        if quota != "max":
+            cores = max(0.01, int(quota) / int(period))
+    except (OSError, ValueError):
+        pass
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            value = Path(path).read_text().strip()
+            if value != "max" and int(value) < 2**60:
+                memory = int(value)
+                break
+        except (OSError, ValueError):
+            continue
+    return cores, memory
 
 
 def _orphan_s() -> float | None:

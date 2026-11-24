@@ -69,7 +69,8 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
     if command is not None and (not isinstance(command, str) or not command.strip()):
         raise ValueError("pond.toml [app] command: expected a command line")
     unknown = set(section) - {"command", "static", "idle_timeout", "state", "health", "strip_path", "download",
-                              "records", "media", "migrate", "instances"}
+                              "records", "media", "migrate", "instances", "min_instances", "concurrency",
+                              "connections", "stop_grace", "scale"}
     if unknown:
         raise ValueError(f"pond.toml [app]: unknown {', '.join(sorted(unknown))}")
     static = section.get("static")
@@ -114,6 +115,7 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
     if instances > 1 and state == "local":
         raise ValueError('pond.toml [app] instances: several instances can\'t share a private state directory; set '
                          'state = "none" and keep shared data in Records and Media')
+    scaling = _scaling(section, instances)
     health = section.get("health")
     if health is not None and (not isinstance(health, str) or not health.startswith("/")):
         raise ValueError('pond.toml [app] health: expected a path starting with "/"')
@@ -136,7 +138,64 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
         "media": media,
         "migrate": migrate,
         "instances": instances,
+        **scaling,
     }
+
+
+# Scaling (plans/app-scaling.md): the defaults of what `[app]` and `[app.scale]` leave out. An App deployed before
+# these existed has none of them in its stored configuration, so readers go through scale_settings().
+DEFAULT_CONCURRENCY = 4
+DEFAULT_STOP_GRACE_S = 10.0
+SCALE_DEFAULTS = {"requests": 0.7, "cpu": 0.7, "memory": 0.8, "load": 0.7, "after_s": 10.0, "socket_idle_s": 5.0}
+
+
+def scale_settings(cfg: dict) -> dict:
+    """An App's scaling settings with every default filled in: ``instances`` (the maximum), ``min_instances``,
+    ``concurrency``, ``connections``, ``stop_grace_s`` and ``scale`` (the default scaler's thresholds)."""
+    concurrency = cfg.get("concurrency") or DEFAULT_CONCURRENCY
+    return {
+        "instances": cfg.get("instances", 1),
+        "min_instances": cfg.get("min_instances", 0),
+        "concurrency": concurrency,
+        "connections": cfg["connections"] if cfg.get("connections") is not None else concurrency,
+        "stop_grace_s": cfg.get("stop_grace_s") or DEFAULT_STOP_GRACE_S,
+        "scale": {**SCALE_DEFAULTS, **(cfg.get("scale") or {})},
+    }
+
+
+def _scaling(section: dict, instances: int) -> dict:
+    def count(key: str, low: int, high: int, default):
+        value = section.get(key, default)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise ValueError(f"pond.toml [app] {key}: expected a number from {low} to {high}")
+        return value
+
+    min_instances = count("min_instances", 0, 64, 0)
+    if min_instances > instances:
+        raise ValueError(f"pond.toml [app] min_instances: {min_instances} is more than instances ({instances})")
+    concurrency = count("concurrency", 1, 10_000, DEFAULT_CONCURRENCY)
+    connections = count("connections", 0, 10_000, None)
+    stop_grace_s = _duration_s(section.get("stop_grace", "10s"), "[app] stop_grace")
+    scale = section.get("scale", {})
+    if not isinstance(scale, dict):
+        raise ValueError("pond.toml [app.scale]: expected a table")
+    unknown = set(scale) - {"requests", "cpu", "memory", "load", "after", "socket_idle"}
+    if unknown:
+        raise ValueError(f"pond.toml [app.scale]: unknown {', '.join(sorted(unknown))}")
+    out: dict = {}
+    for key in ("requests", "cpu", "memory", "load"):
+        if key in scale:
+            value = scale[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
+                raise ValueError(f"pond.toml [app.scale] {key}: expected a share above 0, at most 1 (0.7 is 70%)")
+            out[key] = float(value)
+    for key in ("after", "socket_idle"):
+        if key in scale:
+            out[f"{key}_s"] = _duration_s(scale[key], f"[app.scale] {key}")
+    return {"min_instances": min_instances, "concurrency": concurrency, "connections": connections,
+            "stop_grace_s": stop_grace_s, "scale": out}
 
 
 def base_path(name: str, major: int) -> str:
@@ -312,6 +371,40 @@ def records(**kwargs):
         raise RuntimeError("duckstring.app.records() needs psycopg in the App's environment: "
                            "uv add 'psycopg[binary]' (or connect to records_url() with another driver)") from None
     return psycopg.connect(records_url(), **kwargs)
+
+
+def records_pool(**kwargs):
+    """A ``psycopg_pool`` connection pool to the App line's Records, sized for this instance: up to its
+    ``connections`` budget (``DUCKSTRING_APP_CONNECTIONS``; plans/app-scaling.md), which the line's role enforces.
+    Needs ``psycopg_pool`` in the App's environment (``uv add psycopg_pool``)."""
+    try:
+        from psycopg_pool import ConnectionPool
+    except ImportError:
+        raise RuntimeError("duckstring.app.records_pool() needs psycopg_pool in the App's environment: "
+                           "uv add 'psycopg[binary]' psycopg_pool") from None
+    size = max(1, int(os.environ.get("DUCKSTRING_APP_CONNECTIONS") or 4))
+    kwargs.setdefault("min_size", 1)
+    kwargs.setdefault("max_size", size)
+    return ConnectionPool(records_url(), **kwargs)
+
+
+def report_load(load: float) -> None:
+    """Tell the Catchment how busy this instance is, from 0 (idle) to 1 (full), for what no outside measure sees
+    (a lock, a queue of its own): above ``[app.scale] load`` (0.7) for a while, the App gets another instance
+    (plans/app-scaling.md). A report counts for 30 seconds; a response header ``X-Duckstring-Load`` does the same.
+    Does nothing outside a Catchment."""
+    instance = os.environ.get("DUCKSTRING_APP_INSTANCE")
+    raw = os.environ.get(ENV)
+    if not instance or not raw:
+        return
+    runtime = json.loads(raw).get("runtime")
+    if not runtime:
+        return
+    path = Path(runtime) / "load" / instance
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(f"{max(0.0, min(1.0, float(load)))}")
+    tmp.replace(path)
 
 
 def media_url() -> str:

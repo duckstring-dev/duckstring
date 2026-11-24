@@ -36,6 +36,8 @@ dependencies = [
   # Builds each Pond's own environment from its pyproject.toml + uv.lock (plans/pond-environments.md).
   # A self-contained binary wheel; duckstring.environments finds it with uv.find_uv_bin().
   "uv>=0.5",
+  # CPU and memory of App instances' processes, for scaling them (plans/app-scaling.md).
+  "psutil>=5.9",
 ]
 
 [project.optional-dependencies]

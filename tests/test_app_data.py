@@ -692,7 +692,8 @@ def test_an_app_grows_to_several_instances_that_share_its_records(tmp_path, monk
     url = f"http://127.0.0.1:{port}"
     server, thread = _serve(tmp_path, port)
     try:
-        toml = _toml("busy", extra='records = true\nstate = "none"\ninstances = 3\n').replace(
+        # Growth at once under pressure (the default waits for it to last 10 s).
+        toml = _toml("busy", extra='records = true\nstate = "none"\ninstances = 3\n\n[app.scale]\nafter = "0"\n').replace(
             'type = "app"\n', 'type = "app"\nmemory = "300MB"\n')
         r = httpx.post(f"{url}/api/deploy", files={"pond": ("pond.zip", _zip({"pond.toml": toml,
                                                                                 "main.py": _SCALED_PY}),

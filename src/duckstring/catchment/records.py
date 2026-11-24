@@ -52,7 +52,14 @@ READER = "duckstring_reader"  # NOLOGIN: SELECT on every line's schema
 PONDS = "duckstring_ponds"    # LOGIN, a READER: Ponds, the viewer and the query surface read with it
 SPOUTS = "duckstring_spouts"  # LOGIN: owns the schemas Spouts deliver Pond output into (egress/records.py)
 DEFAULT_MEMORY = 512 * 2**20
-MAX_CONNECTIONS = 50
+MAX_CONNECTIONS = 50  # the fewest a managed PostgreSQL allows; more with more memory (max_connections_for)
+CONNECTION_MEMORY = 10 * 2**20  # what a connection may take, idle overhead and a query's work_mem
+
+
+def max_connections_for(memory: int) -> int:
+    """A managed PostgreSQL's ``max_connections`` for its memory (plans/app-scaling.md): one per
+    ``CONNECTION_MEMORY``, from ``MAX_CONNECTIONS`` up to 1000."""
+    return max(MAX_CONNECTIONS, min(1000, int(memory) // CONNECTION_MEMORY))
 START_TIMEOUT_S = 30.0
 
 LINE_NAME = RECORDS_NAME  # an App line's schema and role are ``{name}_v{major}``
@@ -280,7 +287,7 @@ class ManagedPostgres:
         kb = lambda n: f"{max(n, 0) // 1024}kB"  # noqa: E731
         settings = {
             "port": str(port), "listen_addresses": listen, "unix_socket_directories": "",
-            "max_connections": str(MAX_CONNECTIONS),
+            "max_connections": str(max_connections_for(memory)),
             "shared_buffers": kb(max(16 * 2**20, memory // 4)),
             "work_mem": "4MB", "maintenance_work_mem": kb(max(16 * 2**20, memory // 16)),
             "effective_cache_size": kb(memory),
@@ -363,6 +370,8 @@ class Records:
         self._lock = threading.RLock()
         self._ready: Endpoint | None = None
         self._provisioned: set[str] = set()
+        self._external_max: int | None = None  # an external server's max_connections, once asked
+        self._limits: dict[str, int] = {}  # line role -> the CONNECTION LIMIT set on it
         self._stopping = False  # the Catchment is shutting down: keep_alive starts nothing
         self.held = False  # a move is under way: keep_alive starts nothing (catchment/moves.py)
         self._last_warning = 0.0
@@ -413,6 +422,24 @@ class Records:
     def _operator_certificate(self) -> bool:
         return bool((self._setting(TLS_CERT_SETTING) or os.environ.get("DUCKSTRING_RECORDS_TLS_CERT"))
                     and (self._setting(TLS_KEY_SETTING) or os.environ.get("DUCKSTRING_RECORDS_TLS_KEY")))
+
+    def max_connections(self) -> int:
+        """The connections the PostgreSQL allows: a managed one's from its memory; an external one's as it says
+        (asked once)."""
+        if self.managed:
+            return max_connections_for(self.memory)
+        if self._external_max is None:
+            self._external_max = int(self.psql("SHOW max_connections").strip())
+        return self._external_max
+
+    def set_connection_limit(self, name: str, major: int, limit: int) -> None:
+        """Cap the connections an App line's role may hold at once: its instances' budget (plans/app-scaling.md),
+        so one App's pools can't take every connection."""
+        role = line_role(name, major)
+        if self._limits.get(role) == limit:
+            return
+        self.psql(f'ALTER ROLE "{role}" CONNECTION LIMIT {int(limit)}')
+        self._limits[role] = limit
 
     def remote_ca(self) -> str | None:
         """The certificate something elsewhere trusts to verify the managed PostgreSQL (PEM): the self-signed one
@@ -517,6 +544,8 @@ class Records:
                 raise RecordsError("the Catchment is shutting down")
             self._ready = None
             self._provisioned.clear()
+            self._limits.clear()
+            self._external_max = None
             if self.managed:
                 fresh = not self.pg.initialised()
                 endpoint = self._start_managed()
@@ -570,6 +599,8 @@ class Records:
             self.pg.stop()
             self._ready = None
             self._provisioned.clear()
+            self._limits.clear()
+            self._external_max = None
             if was and self._release is not None:
                 self._release()
 

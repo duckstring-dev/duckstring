@@ -32,6 +32,7 @@ from .app_supervisor import AppUnavailable
 router = APIRouter()
 
 COOKIE = "duckstring_key"
+LOAD_HEADER = "x-duckstring-load"  # an App reporting its own load (plans/app-scaling.md), stripped here
 # Hop-by-hop headers (RFC 9110 §7.6.1), never forwarded either way.
 _HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te",
         "trailer", "transfer-encoding", "upgrade"}
@@ -267,9 +268,16 @@ async def _forward_http(request: Request, supervisor, inst, strip_bearer: bool, 
         finally:
             await finish()
 
+    load = resp.headers.get(LOAD_HEADER)
+    if load is not None:  # the App's own measure of how busy it is (plans/app-scaling.md)
+        try:
+            supervisor.report_load(inst, float(load))
+        except ValueError:
+            pass
     out = StreamingResponse(body(), status_code=resp.status_code, background=BackgroundTask(finish))
-    out.raw_headers = [(k.lower(), v) for k, v in resp.headers.raw if k.decode("latin-1").lower() not in _HOP]
-    if view["app"].get("instances", 1) > 1 and _sticky(request, view) != inst.id:
+    out.raw_headers = [(k.lower(), v) for k, v in resp.headers.raw
+                       if k.decode("latin-1").lower() not in _HOP and k.decode("latin-1").lower() != LOAD_HEADER]
+    if view["scaling"]["instances"] > 1 and _sticky(request, view) != inst.id:
         # Several instances: keep this browser on the one it reached, for an App that keeps sessions in memory.
         path = base_path(view["name"], view["major"]) + "/"
         out.raw_headers.append((b"set-cookie", f"{_sticky_name(view)}={inst.id}; Path={path}; HttpOnly; SameSite=Lax"
@@ -325,7 +333,7 @@ async def forward_websocket(websocket: WebSocket, name: str, rest: str):
     headers = [(k, v) for k, v in _request_headers(websocket, strip_bearer, base_path(name, major))
                if k.lower() != "host" and not k.lower().startswith("sec-websocket-")]
     subprotocols = websocket.scope.get("subprotocols") or None
-    ticket = supervisor.begin(inst)
+    ticket = supervisor.begin(inst, socket=True)
     last_tap = time.monotonic()
 
     async def on_message():
@@ -345,12 +353,12 @@ async def forward_websocket(websocket: WebSocket, name: str, rest: str):
             return
         async with upstream:
             await websocket.accept(subprotocol=upstream.subprotocol)
-            await _pump(websocket, upstream, on_message)
+            await _pump(websocket, upstream, on_message, lambda: supervisor.touch(inst, ticket))
     finally:
         supervisor.end(inst, ticket)
 
 
-async def _pump(websocket: WebSocket, upstream, on_message) -> None:
+async def _pump(websocket: WebSocket, upstream, on_message, on_app_message=None) -> None:
     from websockets.exceptions import ConnectionClosed
 
     async def client_to_app():
@@ -368,6 +376,8 @@ async def _pump(websocket: WebSocket, upstream, on_message) -> None:
     async def app_to_client():
         try:
             async for message in upstream:
+                if on_app_message is not None:
+                    on_app_message()
                 if isinstance(message, str):
                     await websocket.send_text(message)
                 else:
