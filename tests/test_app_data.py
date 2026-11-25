@@ -3,6 +3,8 @@ Media directory when it starts, and reads other lines' Records. Needs PostgreSQL
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from test_app import _deploy, _zip  # noqa: F401  (shared App helpers)
 from test_runtime import runtime  # noqa: F401  (the live-Duck Catchment fixture)
@@ -731,11 +733,15 @@ def test_an_app_grows_to_several_instances_that_share_its_records(tmp_path, monk
 
         # Each instance stops on its own when idle; the others keep serving.
         supervisor = server.config.app.state.app_supervisor
-        instances = supervisor._instances["busy@1"]
-        before = len(instances)
-        instances[-1].last_used -= 3600
+        # The scaler may still be starting another from the waves; reconcile leaves a start alone, so wait for it.
+        deadline = time.monotonic() + 60
+        while any(not i.ready for i in supervisor._instances["busy@1"]) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        target = supervisor._instances["busy@1"][-1]
+        target.last_used -= 3600
         supervisor.reconcile()
-        assert len(supervisor._instances["busy@1"]) == before - 1
+        left = [i.id for i in supervisor._instances["busy@1"]]
+        assert target.id not in left and left
         assert httpx.get(f"{url}/apps/busy/v1/pid", timeout=30).status_code == 200
     finally:
         server.should_exit = True
