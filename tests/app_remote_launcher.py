@@ -9,6 +9,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import psutil
+
 from duckstring.keys import split_pond_key, worker_module
 
 
@@ -62,9 +64,13 @@ class FakeRemoteLauncher:
                 proc.kill()
 
     def kill(self, pond_key: str) -> None:
-        """The machine vanishing: the agent gets no say."""
+        """The machine vanishing: the agent gets no say, and nothing it started survives (the App runs in its own
+        process group, so killing the agent alone would leave it serving, as no vanished machine does)."""
         proc = self.procs.get(pond_key)
         if proc is not None:
+            if proc.poll() is None:
+                for child in psutil.Process(proc.pid).children(recursive=True):
+                    child.kill()
             proc.kill()
             proc.wait()
 
