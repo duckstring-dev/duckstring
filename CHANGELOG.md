@@ -16,7 +16,9 @@ An App can now keep data the Catchment holds for it, which Ponds can read and th
   sign-in, `{name}_v{major}`, in a PostgreSQL the Catchment runs itself (started the first time an App needs it, its
   memory set aside like an App's) or one it connects to (`duckstring catchment records --use postgres://...`). The
   App gets `DUCKSTRING_RECORDS_URL`, a standard connection URL for any driver; `duckstring.app.records()` returns a
-  psycopg connection. Every App can read every other App's Records; only its own are writable.
+  psycopg connection, and `duckstring.app.records_pool()` a connection pool sized to what one instance may hold
+  (`[app] connections`, default its `concurrency`; given as `DUCKSTRING_APP_CONNECTIONS`). Every App can read
+  every other App's Records; only its own are writable.
 - **Media** are an App's files. `[app] media = true` gives each line a folder on the Catchment's disk, or under an
   object-store prefix (`duckstring catchment media --use s3://...`). The App gets `DUCKSTRING_MEDIA_URL`;
   `duckstring.app.media()` is a filesystem rooted at it.

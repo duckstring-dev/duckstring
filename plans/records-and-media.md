@@ -1,6 +1,6 @@
 # Records and Media: Catchment-held App data
 
-Status: **built 2026-11-24** on branch `records-media` for 0.9.0 (see "As built"). Settled with the author
+Status: **built 2026-11-24** for 0.9.0, merged into `showcase-fixes` 2026-11-25 (see "As built"). Settled with the author
 2026-11-23/24. Supersedes the paragraph in
 `plans/apps.md` "State" that says an App's data reaches a pipeline only through an API an Inlet reads.
 
@@ -232,6 +232,6 @@ Added the same day, before merging (the author asked for them):
   switch, old files deleted. A failure before the switch undoes the target. While a move runs, `keep_alive` is held
   off: it restarted the old cluster mid-swap in the first test run.
 
-Open: the purge command's final name (`app purge` for now).
+The purge command keeps the name `app purge` (2026-11-25, settled for 0.9.0 unless the author renames it).
 
 App instances on other machines: `plans/app-scaling.md`.

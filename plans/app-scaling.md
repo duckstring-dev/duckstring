@@ -1,6 +1,6 @@
 # App scaling: instances on other machines
 
-Status: planned and built 2026-11-25 (phases 1 and 2; see As built), for 0.9.0, on branch `records-media` (worktree `../duckstring-records`). Follows
+Status: planned and built 2026-11-25 (phases 1 and 2; see As built), for 0.9.0; merged into `showcase-fixes` 2026-11-25. Follows
 `plans/records-and-media.md`, which built `[app] instances` on the Catchment's own machine.
 
 ## Why
