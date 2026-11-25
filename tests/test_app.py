@@ -841,3 +841,22 @@ def test_bulk_rebuild_and_repair_pass_over_an_app(catchment_client):
     r = client.post("/api/ponds/batch", json={"ponds": [{"name": "dash"}], "operations": ["repair"]})
     assert r.status_code == 200 and r.json()["errors"] == []
     assert not _app_entry(client)["repairing"]
+
+
+def test_media_reaches_an_abfss_url_through_duckstrings_storage(monkeypatch):
+    """app.media() handed the URL to fsspec, which doesn't know abfss:// (what a Catchment on Azure is given): every
+    App with Media there failed at import ("Protocol not known: abfss"). Found by the first Azure run of App scaling."""
+    pytest.importorskip("adlfs")
+    import importlib
+
+    from duckstring import app as app_module
+
+    registry = importlib.import_module("fsspec.registry")  # the module: fsspec.registry is a mapping attribute
+
+    # As in the App environment that failed: an fsspec whose registry has no "abfss" (newer ones do).
+    monkeypatch.delitem(registry.known_implementations, "abfss", raising=False)
+    monkeypatch.delitem(registry._registry, "abfss", raising=False)
+    monkeypatch.setenv("DUCKSTRING_MEDIA_URL", "abfss://media@acct.dfs.core.windows.net/apps/feedback/m1")
+    fs = app_module.media()
+    assert type(fs.fs).__name__ == "AzureBlobFileSystem" and fs.fs.account_name == "acct"
+    assert fs.path == "media/apps/feedback/m1"

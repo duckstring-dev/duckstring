@@ -439,7 +439,12 @@ def media():
                            "(or use media_path() for files on the Catchment's disk)") from None
     url = media_url()
     if "://" in url:
-        fs, path = fsspec.core.url_to_fs(url)
+        # Through Duckstring's storage, as the Catchment and Ponds reach Media: fsspec alone doesn't know abfss://
+        # (the scheme a Catchment on Azure is given) and wouldn't take the URI's credential options.
+        from .storage import get_storage
+
+        store = get_storage(url)
+        fs, path = store.fs, store._key()
     else:
         fs, path = fsspec.filesystem("file", auto_mkdir=True), url  # parents made, as an object store needs none
     return DirFileSystem(path, fs)
