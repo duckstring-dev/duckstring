@@ -737,7 +737,9 @@ def test_an_app_grows_to_several_instances_that_share_its_records(tmp_path, monk
         deadline = time.monotonic() + 60
         while any(not i.ready for i in supervisor._instances["busy@1"]) and time.monotonic() < deadline:
             time.sleep(0.2)
-        target = supervisor._instances["busy@1"][-1]
+        # A ready one: the scaler can still start another after that wait (the waves' CPU is still in its sample),
+        # and reconcile rightly leaves a start alone.
+        target = [i for i in supervisor._instances["busy@1"] if i.ready][-1]
         target.last_used -= 3600
         supervisor.reconcile()
         left = [i.id for i in supervisor._instances["busy@1"]]
