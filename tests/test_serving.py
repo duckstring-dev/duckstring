@@ -170,8 +170,10 @@ def test_full_connection_sees_all_tables(tmp_path, monkeypatch):
     assert serving_query(d, "SELECT count(*) FROM sales.secret_internal", sandboxed=False)["rows"] == [(3,)]
 
 
-def _publish_merge(tmp_path, name, major, table, runs):
-    """Publish a merge Trickle run by run, as a Duck does (one export per Run)."""
+def _publish_merge(tmp_path, name, major, table, runs, *, hold_last=False):
+    """Publish a merge Trickle run by run, as a Duck does (one export per Run). ``hold_last`` publishes the last
+    Run with compaction out of reach, so its change stays above the base whatever size the Parquet files are."""
+    import os
     from datetime import datetime
 
     from duckstring import trickle_io
@@ -182,12 +184,25 @@ def _publish_merge(tmp_path, name, major, table, runs):
     reg = tmp_path / f"{name}_registry.duckdb"
     con = duckdb.connect(str(reg))
     con.execute("SET TimeZone='UTC'")
-    for f_iso, rows in runs:
-        con.execute("CREATE OR REPLACE TEMP TABLE _s(id BIGINT, v BIGINT)")
-        con.executemany("INSERT INTO _s VALUES (?, ?)", rows)
+    for i, (f_iso, rows) in enumerate(runs):
+        # One literal statement: row-by-row inserts (and, on DuckDB 1.5, list parameters) are slow.
+        values = ",".join(f"({k},{v})" for k, v in rows)
+        con.execute("CREATE OR REPLACE TEMP TABLE _s AS SELECT id::BIGINT AS id, v::BIGINT AS v "
+                    f"FROM (VALUES {values}) t(id, v)")
         f = datetime.fromisoformat(f_iso)
-        trickle_io.merge_table(con, table, con.sql("SELECT * FROM _s"), f, ("id",))
-        ParquetDataPlane().export(con, data_dir, f=f)
+        held = hold_last and i == len(runs) - 1
+        before = os.environ.get("DUCKSTRING_COMPACT_THRESHOLD")
+        if held:
+            os.environ["DUCKSTRING_COMPACT_THRESHOLD"] = str(1 << 40)
+        try:
+            trickle_io.merge_table(con, table, con.sql("SELECT * FROM _s"), f, ("id",))
+            ParquetDataPlane().export(con, data_dir, f=f)
+        finally:
+            if held:
+                if before is None:
+                    os.environ.pop("DUCKSTRING_COMPACT_THRESHOLD", None)
+                else:
+                    os.environ["DUCKSTRING_COMPACT_THRESHOLD"] = before
     con.close()
 
 
@@ -246,10 +261,13 @@ def test_a_consolidated_merge_table_reads_as_its_reconstruction(tmp_path, monkey
             else:
                 state[k] = rng.randint(0, 3)  # often the value it had: an update that changes nothing
         runs.append((f"2026-01-{1 + run // 24:02d}T{run % 24:02d}:00:00+00:00", sorted(state.items())))
+    k = min(state)  # a last Run updating a key its base holds, left above the base: the retraction path is read
+    state[k] = (state[k] + 1) % 4
+    runs.append(("2026-01-02T06:00:00+00:00", sorted(state.items())))
     db, mk = _driver(tmp_path)
     _register(db, "sales", "1.0.0", "outlet", "ponds/sales/1.0.0", _cfg(serve_tables=["t"]), _RIPPLES)
     _add_output_tables(db, _pv_id(db, "sales", "1.0.0"), ["t"])
-    _publish_merge(tmp_path, "sales", 1, "t", runs)
+    _publish_merge(tmp_path, "sales", 1, "t", runs, hold_last=True)
     d = mk()
     data_dir = pond_data_dir(tmp_path, "sales", 1, None)
     expected = sorted(duckdb.sql(ParquetDataPlane().read_select(data_dir, "t")).fetchall())

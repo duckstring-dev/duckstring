@@ -660,8 +660,10 @@ def test_merge_log_view_agrees_with_the_current_state_through_folds_and_compacti
                 del state[k]
             else:
                 state[k] = rng.randint(0, 9)
-        con.execute("CREATE OR REPLACE TEMP TABLE _s(id BIGINT, v BIGINT)")
-        con.executemany("INSERT INTO _s VALUES (?, ?)", sorted(state.items()))
+        # One literal statement: row-by-row inserts (and, on DuckDB 1.5, list parameters) took most of a minute on CI.
+        values = ",".join(f"({k},{v})" for k, v in sorted(state.items()))
+        con.execute("CREATE OR REPLACE TEMP TABLE _s AS SELECT id::BIGINT AS id, v::BIGINT AS v "
+                    f"FROM (VALUES {values}) t(id, v)")
         f = t0 + timedelta(hours=run)
         trickle_io.merge_table(con, "t", con.sql("SELECT * FROM _s"), f, ("id",))
         dp.export(con, data_dir, f=f)
