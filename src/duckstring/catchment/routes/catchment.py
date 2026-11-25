@@ -38,7 +38,10 @@ _SERVING_TMP = ".serving-tmp"  # the sandbox's private spill dir (see serving._t
 # Top-level dirs rebuilt on demand, never shipped: Pond environments and uv's cache
 # (plans/pond-environments.md). Hundreds of MB, and an environment only works at the path and with the
 # interpreter it was built for, so a copy elsewhere is useless; deploys and Ducks rebuild them.
-_REBUILT_DIRS = {"envs", "uv-cache"}
+_REBUILT_DIRS = {"envs", "uv-cache", ".serving-cache"}  # .serving-cache: serving.consolidation files
+# Records' PostgreSQL files can't be copied while it runs: a pg_dump goes in instead (records/records.dump, which
+# a fresh Catchment restores). Its key travels with the dump only as the derived passwords it no longer needs.
+_DUMPED_DIRS = {"records"}
 
 
 def _db(request: Request) -> sqlite3.Connection:
@@ -349,6 +352,8 @@ def _root_files(root: Path) -> list[tuple[Path, str]]:
     for top in root.iterdir():  # not a plain rglob: never descend into the rebuilt dirs' many files
         if top.name in _REBUILT_DIRS and top.is_dir():
             continue
+        if top.name in _DUMPED_DIRS and top.is_dir():
+            continue
         paths.extend([top, *top.rglob("*")] if top.is_dir() else [top])
     for path in sorted(paths):
         if not path.is_file() or path.name.endswith(_SKIP_SUFFIXES) or path.name in _SKIP_NAMES:
@@ -384,6 +389,12 @@ def usage(request: Request):
         if view and view["app"].get("download"):
             state = app_state_dir(root, view["name"], view["major"])
             sizes += [f.stat().st_size for f in state.rglob("*") if f.is_file()] if state.is_dir() else []
+    records = driver.records
+    if records.managed and records.in_use() and records.pg.running():  # its dump, estimated by the database's size
+        try:
+            sizes.append(int(records.psql("SELECT pg_database_size(current_database())").strip()))
+        except Exception:
+            pass
     return {"total_bytes": sum(sizes), "file_count": len(files), "archive_bytes": _tar_size(sizes)}
 
 
@@ -428,6 +439,19 @@ def archive(request: Request):
     files = _root_files(root)
     q: queue.Queue = queue.Queue(maxsize=64)  # bounded: production blocks until the client drains
 
+    # Records as a dump, taken before the stream starts so a failure is an error response.
+    records_tmp = tempfile.mkdtemp(prefix="duckstring-records-")
+    records_dump = Path(records_tmp) / "records.dump"
+    try:
+        dumped = request.app.state.driver.records.dump(records_dump)
+    except Exception as exc:
+        shutil.rmtree(records_tmp, ignore_errors=True)
+        if app_tmp is not None:
+            shutil.rmtree(app_tmp, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=f"Records couldn't be dumped: {exc}") from exc
+    if dumped:
+        app_files = [*app_files, (records_dump, "records/records.dump")]
+
     def produce() -> None:
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -440,6 +464,7 @@ def archive(request: Request):
         finally:
             if app_tmp is not None:
                 shutil.rmtree(app_tmp, ignore_errors=True)
+            shutil.rmtree(records_tmp, ignore_errors=True)
             q.put(None)
 
     threading.Thread(target=produce, daemon=True).start()

@@ -83,7 +83,7 @@ duckstring pond hydrate --from-catchment
 duckstring pond run
 ```
 
-`pond run` in an App's directory serves it at http://127.0.0.1:8000/ (`--port` changes the port) in the App's `.venv`, with an empty base path. `freshness()` has nothing to report locally, so the caption doesn't show. [Testing with Puddles](testing_with_puddles.md) covers Puddles defined in code, for Sources you'd rather not copy.
+`pond run` in an App's directory serves it at http://127.0.0.1:8000/ (`--port` changes the port) in the App's `.venv`, with an empty base path. Files in `static` are served as the Catchment serves them, with other requests going to the command. `freshness()` has nothing to report locally, so the caption doesn't show. [Testing with Puddles](testing_with_puddles.md) covers Puddles defined in code, for Sources you'd rather not copy.
 
 ### Deploying
 
@@ -109,7 +109,7 @@ To change the App, edit it and deploy again. An App can be redeployed at the ver
 
 ## Addresses and paths
 
-Every App is served on the Catchment's own port, at `/apps/{name}/v{major}/`. `/apps/{name}/` redirects to the major version the Pond's bare name refers to, which is the first deployed until you run `duckstring pond promote` (see [Queries by name](upgrades.md#queries-by-name)). Use the versioned address in links that should never move.
+Every App is served on the Catchment's own port, at `/apps/{name}/v{major}/`. `/apps/{name}/` redirects to the major version the Pond's bare name refers to, which is the first deployed until you run `duckstring pond promote` (see [Queries by name](upgrades.md#queries-by-name)), or for an App with Records or Media, its [live major version](records_and_media.md#new-major-versions). Use the versioned address in links that should never move.
 
 A web framework served below a path has to know that path, so the links and assets it generates point at the right place. `strip_path` decides what the App sees:
 
@@ -247,9 +247,11 @@ Install with `uv add flask gunicorn duckstring`.
 
 The handle reads only the App's Sources, so always name the Source: `pond.read_table("reports.monthly_summary")`. Each read returns the newest data the Source has published at that moment, and the version a request may read stays available until its response has been sent, even if the Source publishes again meanwhile. Reads outside a request, such as a cache filled at startup or a background thread, should go inside `with pond.hold():`, which keeps what each Source has published now until the block ends.
 
+To cache what you build from a Source, rebuild it when the Source's entry in `pond.freshness()["changed"]` moves. Its freshness, in `["sources"]`, moves on every Run, including Runs that changed nothing.
+
 Web servers handle requests on several threads, so each thread gets its own DuckDB cursor as `pond.con`. `read_table` registers the table as a view on the calling thread's cursor, so query the view on the same thread, as the recipes do.
 
-An App can't publish tables or Objects. If it collects data that a pipeline should use, serve that over HTTP from the App and read it from an Inlet. [App Handle](../reference/python/app.md) lists what the handle offers.
+An App can't publish tables or Objects. Data it collects, such as form entries or uploads, belongs in its [Records and Media](records_and_media.md), which Ponds can read. [App Handle](../reference/python/app.md) lists what the handle offers.
 
 ## Keeping it fresh
 
@@ -275,7 +277,7 @@ Anything finer, such as single sign-on or a list of who may see a dashboard, is 
 
 ## Memory
 
-On the Catchment's own machine, Pond Runs share a memory budget as [memory slots](../reference/environment.md#ducks), four by default. While an App's process runs, it sets its `[pond] memory` aside from that budget, and the slots divide what's left. Set `memory` to what the whole App needs: the web framework, anything it holds in Python such as data frames, and DuckDB, which the App's handle limits to that amount. The memory comes back when the process stops.
+On the Catchment's own machine, Pond Runs share a memory budget as [memory slots](../reference/environment.md#ducks), four by default. While an instance of an App runs there, it sets its `[pond] memory` aside from that budget, and the slots divide what's left. Each instance sets aside its own, and an instance on other compute uses that machine's memory instead (see [Scaling Apps](scaling_apps.md)). Set `memory` to what the whole App needs: the web framework, anything it holds in Python such as data frames, and DuckDB, which the App's handle limits to that amount. The memory comes back when the process stops.
 
 An App that doesn't set `memory` sets nothing aside, and its DuckDB is limited to 256 MB. That suits a small App, since the budget already leaves room for the Catchment and the operating system. Set `memory` for an App that holds much data or runs larger queries.
 
@@ -285,7 +287,9 @@ DuckDB's limit applies in each process. With gunicorn's `--workers 2`, each work
 
 ## State
 
-`state = "local"`, the default, gives the App a directory at `$DUCKSTRING_APP_STATE` for a database or files. It survives restarts and redeploys, and is deleted only when the App's major version is removed. Use `state = "none"` for an App that keeps nothing, or keeps its state elsewhere, such as in a database of its own.
+`state = "local"`, the default, gives the App a directory at `$DUCKSTRING_APP_STATE` for files of its own, such as a cache or a SQLite database. It survives restarts and redeploys, and is deleted when the App's major version is removed. It belongs to one machine, so an App with more than one instance, or on other compute, needs `state = "none"`.
+
+Data the App collects, and that Ponds, other instances or the App's next major version should see, belongs in [Records and Media](records_and_media.md) instead: tables in PostgreSQL and files, kept by the Catchment.
 
 [`catchment download`](../reference/cli/catchment.md#download) and the state backup copy an App's state only through `[app] download`, a command that writes a consistent copy of it; see [`[app]`](../reference/pond_toml.md#app).
 
@@ -293,7 +297,9 @@ DuckDB's limit applies in each process. With gunicorn's `--workers 2`, each work
 
 The first request starts the App's process, and that request waits until the App is ready: `health` answers with a `2xx`, or without `health`, the port accepts connections. The process stops after `idle_timeout` with no request in flight (default `30m`; `"0"` keeps it running), and also on a redeploy, a Kill, removal, and when the Catchment shuts down. An open WebSocket or a response still streaming counts as in flight.
 
-A process that exits on its own, or isn't ready within 60 seconds, counts as a failure. The App is started again on the next request up to `immediate_retries` times in a row, which is 0 unless `pond.toml` sets it. After that the App fails: an [alert](monitoring_and_failures.md#alerts) fires as for any failed Pond, and requests get a `503` until you bring it back with `duckstring control wake`, `duckstring app restart` or a redeploy.
+A process that exits on its own, or isn't ready within 60 seconds, counts as a failure. The App is started again on the next request up to `immediate_retries` times in a row, which is 1 unless `pond.toml` sets it. After that the App fails: an [alert](monitoring_and_failures.md#alerts) fires as for any failed Pond, and requests get a `503` until you bring it back with `duckstring control wake`, `duckstring app restart` or a redeploy.
+
+While the App is failed, its Refreshes and Taps ask nothing of its Sources, as for any failed Pond, so a pipeline that runs only for the App waits too. Give a Source its own recurring Refresh if it should keep running regardless.
 
 To see what happened, [`duckstring app`](../reference/cli/app.md) lists the App's instances with why each stopped, and prints their output:
 
@@ -302,6 +308,8 @@ duckstring app instances sales_dashboard
 duckstring app logs sales_dashboard --follow
 ```
 
-## Current limits
+## More than one instance
 
-An App runs on the Catchment's own machine, as one process (with its own workers, if the server has them). Cloud compute and running several instances aren't currently supported for Apps. The command runs in a Python environment, so the App's server must be something Python can install; anything that builds to static files can be served with `static`.
+By default an App runs as one process on the Catchment's own machine. [Scaling Apps](scaling_apps.md) covers running several instances, on the Catchment or on cloud compute, started and stopped as load changes.
+
+The command runs in a Python environment, so the App's server must be something Python can install; anything that builds to static files can be served with `static`.

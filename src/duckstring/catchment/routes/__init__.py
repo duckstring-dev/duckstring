@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from .alerts import router as alerts_router
 from .app import router as app_router
+from .app_data import router as app_data_router
 from .catchment import router as catchment_router
 from .data import router as data_router
 from .deploy import router as deploy_router
@@ -10,6 +11,7 @@ from .duck import router as duck_router
 from .duct import router as duct_router
 from .orchestrate import router as orchestrate_router
 from .pool import router as pool_router
+from .puddles import router as puddles_router
 from .secrets import router as secrets_router
 from .serving import router as serving_router
 from .tap import router as tap_router
@@ -17,6 +19,7 @@ from .view import router as view_router
 
 router = APIRouter()
 router.include_router(catchment_router)
+router.include_router(app_data_router)
 router.include_router(deploy_router)
 router.include_router(data_router)
 router.include_router(orchestrate_router)
@@ -30,5 +33,6 @@ router.include_router(serving_router)
 router.include_router(alerts_router)
 router.include_router(tap_router)
 router.include_router(app_router)
+router.include_router(puddles_router)
 
 __all__ = ["router"]

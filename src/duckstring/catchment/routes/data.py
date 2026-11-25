@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import io
 import tempfile
+import threading
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -96,6 +98,17 @@ def _tune_read_con(con) -> None:
         pass  # tuning is best-effort — never fail a read because a PRAGMA was rejected
 
 
+def _queryable(dp, data_dir) -> list[str]:
+    """The tables a query can name: the published ones, and the Run reports (read by name, never listed)."""
+    from ...reports import REPORTS_TABLE
+    from ...trickle.io import load_sidecar, sidecar_tables
+
+    tables = dp.list_tables(data_dir)
+    if REPORTS_TABLE in sidecar_tables(load_sidecar(data_dir)):
+        tables.append(REPORTS_TABLE)
+    return tables
+
+
 def _open_pond(request: Request, pond_name: str, major: int):
     """An in-memory DuckDB connection with the Pond's exported tables registered as views — under a
     schema named after the Pond, and in ``main`` — so queries can name them ``"pond"."table"`` or
@@ -111,7 +124,7 @@ def _open_pond(request: Request, pond_name: str, major: int):
     _tune_read_con(con)  # spill instead of OOM (a big merge reconstruction) + cache Parquet footers over S3
     data_dir.duckdb_setup(con)  # object store → httpfs + credentials (no-op for local)
     con.execute(f'CREATE SCHEMA IF NOT EXISTS "{pond_name}"')
-    for table in dp.list_tables(data_dir):
+    for table in _queryable(dp, data_dir):
         select = dp.read_select(data_dir, table)
         con.execute(f'CREATE VIEW "{pond_name}"."{table}" AS {select}')
         con.execute(f'CREATE OR REPLACE VIEW "{table}" AS {select}')
@@ -142,6 +155,8 @@ class QueryRequest(BaseModel):
     ripple: Optional[str] = None
     sql: Optional[str] = None
     format: Optional[str] = None
+    at: Optional[str] = None  # read every table as it stood at this freshness (ISO 8601)
+    since: Optional[str] = None  # with at: the result's change from since to at, weighted in _duckstring_d
 
 
 @router.get("/ponds/{outlet}/ripples/{ripple_name}", dependencies=[auth.read])
@@ -316,6 +331,20 @@ def list_pond_tables(
     return {"tables": out}
 
 
+@router.get("/ponds/{name}/changes", dependencies=[auth.read])
+def list_pond_changes(
+    name: str, request: Request, major: Optional[int] = None, version: Optional[str] = None,
+    after: Optional[str] = None, upto: Optional[str] = None,
+):
+    """The freshnesses at which the line's published tables changed in ``(after, upto]``, oldest first, as far
+    back as it keeps: what an as-of reader (a Puddle) steps through. A Run that changed nothing isn't one."""
+    from ...dataplane import change_points
+
+    m = _resolve_major(request, name, major, version)
+    points = change_points(_data_dir(request, name, m), after=_point(after, "after"), upto=_point(upto, "upto"))
+    return {"changes": [p.isoformat() for p in points]}
+
+
 @router.get("/ponds/{name}/trace", dependencies=[auth.read])
 def trace_row(
     name: str, table: str, request: Request, where: Optional[str] = None,
@@ -474,7 +503,8 @@ def pond_freshness(
     from ...trickle.io import sidecar_tables
 
     try:
-        tables = {t: e.get("f") for t, e in sidecar_tables(_sidecar(request, name, m)).items()}
+        tables = {t: e.get("f") for t, e in sidecar_tables(_sidecar(request, name, m)).items()
+                  if not t.startswith("_duckstring_")}  # the Run reports aren't a table of the Pond's
     except Exception:
         tables = {}
     out["tables"] = {t: f for t, f in sorted(tables.items()) if allowed is None or t in allowed}
@@ -525,6 +555,104 @@ def table_runs(
         con.close()
 
 
+@router.get("/ponds/{name}/reports", dependencies=[auth.read])
+def pond_reports(
+    name: str, request: Request, f: Optional[str] = None, limit: int = 50,
+    major: Optional[int] = None, version: Optional[str] = None,
+):
+    """A Pond's Run reports (``pond.report()``). Without ``f``: its own reports, newest Run first (at most ``limit``,
+    up to 1000), as ``{reports: [{f, reports}]}``. With ``f``: that Run's own report and the upstream ones it read,
+    as ``{f, reports, upstream: [{pond, f, reports}]}``. A Pond that never reported has none."""
+    import json
+    from datetime import datetime
+
+    from ...reports import REPORTS_TABLE
+    from ...trickle.io import sidecar_tables
+
+    m = _resolve_major(request, name, major, version)
+    own = f"{name}@{m}"
+    if REPORTS_TABLE not in sidecar_tables(_sidecar(request, name, m)):
+        return {"reports": []} if f is None else {"f": f, "reports": None, "upstream": []}
+    con = _open_pond(request, name, m)
+    try:
+        table = f"{_qi(name)}.{_qi(REPORTS_TABLE)}"
+        if f is None:
+            rows = con.execute(f"SELECT run_f, reports FROM {table} WHERE pond = ? ORDER BY run_f DESC LIMIT ?",
+                               [own, max(1, min(limit, 1000))]).fetchall()
+            return {"reports": [{"f": rf.isoformat(), "reports": json.loads(r)} for rf, r in rows]}
+        at = datetime.fromisoformat(f.replace("Z", "+00:00"))
+        mine = con.execute(f"SELECT reports FROM {table} WHERE pond = ? AND run_f = ?", [own, at]).fetchall()
+        # The upstream reports a Run read are the ones it carried: stamped with its freshness.
+        up = con.execute(f"SELECT pond, run_f, reports FROM {table} WHERE pond <> ? AND {_qi(_F)} = ? "
+                         "ORDER BY pond, run_f", [own, at]).fetchall()
+        return {"f": f, "reports": json.loads(mine[0][0]) if mine else None,
+                "upstream": [{"pond": k, "f": rf.isoformat(), "reports": json.loads(r)} for k, rf, r in up]}
+    finally:
+        con.close()
+
+
+# ── cancelling a running query ──────────────────────────────────────────────────────────────────────────────
+#
+# The data viewer names each count and page request (``query_id``, the same for the count and pages of one query) so
+# a person can stop a long one: ``POST /query/cancel`` interrupts the DuckDB connections running it. A cancel that
+# arrives before the query starts (the count and the page race it) is remembered, briefly, and refuses it.
+
+_running: dict[str, list] = {}
+_cancelled: dict[str, float] = {}
+_running_lock = threading.Lock()
+_CANCEL_KEEP_S = 60.0
+CANCELLED = "Query cancelled"
+
+
+@contextmanager
+def _tracked(query_id: Optional[str], con):
+    """Run a query on ``con`` under ``query_id`` (``None``: untracked), so a cancel can interrupt it."""
+    import time
+
+    if not query_id:
+        yield
+        return
+    with _running_lock:
+        now = time.monotonic()
+        for qid in [q for q, at in _cancelled.items() if now - at > _CANCEL_KEEP_S]:
+            del _cancelled[qid]
+        if query_id in _cancelled:
+            raise HTTPException(status_code=400, detail=CANCELLED)
+        _running.setdefault(query_id, []).append(con)
+    try:
+        yield
+    except duckdb.InterruptException as exc:
+        raise HTTPException(status_code=400, detail=CANCELLED) from exc
+    finally:
+        with _running_lock:
+            cons = _running.get(query_id, [])
+            if con in cons:
+                cons.remove(con)
+            if not cons:
+                _running.pop(query_id, None)
+
+
+class CancelRequest(BaseModel):
+    query_id: str
+
+
+@router.post("/query/cancel", dependencies=[auth.read])
+def cancel_query(body: CancelRequest):
+    """Stop the data viewer's query ``query_id``: interrupt it where it runs, and refuse it if it hasn't started.
+    ``cancelled`` says whether anything was running."""
+    import time
+
+    with _running_lock:
+        cons = list(_running.get(body.query_id, []))
+        _cancelled[body.query_id] = time.monotonic()
+    for con in cons:
+        try:
+            con.interrupt()
+        except Exception:  # noqa: BLE001 — it finished as the cancel arrived
+            pass
+    return {"cancelled": bool(cons)}
+
+
 class CountRequest(BaseModel):
     pond: str
     major: Optional[int] = None
@@ -536,6 +664,7 @@ class CountRequest(BaseModel):
     pk: Optional[list] = None
     f_lo: Optional[str] = None  # inclusive lower freshness bound (ISO), or None = unbounded
     f_hi: Optional[str] = None  # inclusive upper freshness bound (ISO), or None = unbounded
+    query_id: Optional[str] = None  # names the query so it can be cancelled (``/query/cancel``)
 
 
 def _merge_f_base(request: Request, body, major: int):
@@ -549,11 +678,25 @@ def _merge_f_base(request: Request, body, major: int):
     return (_sidecar(request, body.pond, major).get(body.table) or {}).get("f_base")
 
 
+def _log(request: Request, body, major: int):
+    """The data viewer's paged view of a Trickle table (:mod:`..browse`): an append table newest Run first (within
+    a freshness window when set), a merge table's log when no window is set. ``None`` for the other views."""
+    from datetime import datetime
+
+    from ..browse import append_log, merge_log
+
+    if body.trickle == "append":
+        at = lambda iso: datetime.fromisoformat(iso.replace("Z", "+00:00")) if iso else None  # noqa: E731
+        return append_log(_data_dir(request, body.pond, major), body.table, _sidecar(request, body.pond, major),
+                          at(body.f_lo), at(body.f_hi))
+    if body.trickle != "merge" or not body.pk or body.f_lo or body.f_hi:
+        return None
+    return merge_log(_data_dir(request, body.pond, major), body.table, _sidecar(request, body.pond, major), body.pk)
+
+
 def _base_sql(body, *, f_base=None) -> str:
-    """The query a count/page operates on: a Trickle's windowed/consolidated view (its changelog read clamped
-    to ``> f_base``), a custom ``sql``, or a plain ``SELECT *`` of a table. The reconstructed merge main is
-    referenced as a view — never materialised — so the pager's Top-N streams it instead of spilling a
-    gigabyte-scale copy to temp."""
+    """The query a count/page operates on: a Trickle's windowed view (its changelog read clamped to ``> f_base``),
+    a custom ``sql``, or a plain ``SELECT *`` of a table."""
     if body.trickle in ("append", "merge"):
         return _trickle_base_sql(
             body.pond, body.table, body.trickle, body.pk or [], body.f_lo, body.f_hi, f_base=f_base
@@ -563,22 +706,6 @@ def _base_sql(body, *, f_base=None) -> str:
     if body.table:
         return f"SELECT * FROM {_qi(body.pond)}.{_qi(body.table)}"
     return f"SELECT * FROM {_qi(body.pond)}"
-
-
-def _merge_deleted_count_sql(pond: str, table: str, pk: list, f_base) -> str:
-    """Count the deleted tombstones the browse shows — distinct PKs in the hot changelog above ``f_base`` whose
-    latest event (freshness desc, retractions last) is a retraction ``d < 0`` — matching :func:`_trickle_base_sql`'s
-    ``_deleted``. A small scan of the post-base changelog (not the base)."""
-    from ...trickle_io import changelog_name
-
-    clog = f"{_qi(pond)}.{_qi(changelog_name(table))}"
-    fcol, dcol = _qi(_F), _qi(_D)
-    part = ", ".join(_qi(c) for c in pk)
-    where = f" WHERE {fcol} > {_ts_lit(f_base)}" if f_base else ""
-    return (
-        f"SELECT count(*) FROM (SELECT {dcol}, row_number() OVER (PARTITION BY {part} "
-        f"ORDER BY {fcol} DESC, {dcol} DESC) AS _ds_rn FROM {clog}{where}) WHERE _ds_rn = 1 AND {dcol} < 0"
-    )
 
 
 @router.post("/query/count", dependencies=[auth.read])
@@ -592,33 +719,33 @@ def query_count(body: CountRequest, request: Request,
     use. A per-pond ``table``/``trickle`` browse stays on the Pond's own exported snapshot (and is
     serviceable-gated for non-full callers).
 
-    The **unwindowed current state of a merge** main is counted *without scanning the base*: the active count is
-    ``count(cold base)`` (metadata) + the changelog's net Z-set weight (:meth:`DataPlane.consolidated_count_select`),
-    plus the small deleted-tombstone count — so the scrollbar sizes near-instantly even at hundreds of millions of
-    rows. A *windowed* merge count falls through to the (already small) windowed changelog query."""
+    A merge table's default view (its log, :mod:`..browse`) is counted without scanning the base: the base's rows
+    (metadata) plus the change images above it (a scan of the weight column), so the scrollbar sizes near-instantly
+    at hundreds of millions of rows. A *windowed* merge count falls through to the windowed changelog query."""
     full = principal.level >= auth.Level.FULL
     if body.sql:
         from ..serving import serving_count
 
         try:
-            return {"count": serving_count(request.app.state.driver, body.sql, sandboxed=not full)}
+            return {"count": serving_count(request.app.state.driver, body.sql, sandboxed=not full,
+                                           track=lambda cur: _tracked(body.query_id, cur))}
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     m = _resolve_major(request, body.pond, body.major, body.version)
     _require_serviceable(request, body.pond, m, body.table, full)
     con = _open_pond(request, body.pond, m)
     try:
-        if body.trickle == "merge" and body.pk and not (body.f_lo or body.f_hi):
-            from ...dataplane import get_data_plane
-
-            meta = _sidecar(request, body.pond, m).get(body.table) or {}
-            active_sql = get_data_plane().consolidated_count_select(_data_dir(request, body.pond, m), body.table, meta)
-            active = first_row(con.execute(active_sql))[0]
-            deleted = first_row(con.execute(_merge_deleted_count_sql(body.pond, body.table, body.pk, meta.get("f_base"))))[0]
-            return {"count": int(active) + int(deleted)}
-        base = _base_sql(body, f_base=_merge_f_base(request, body, m))
-        (count,) = first_row(con.execute(f"SELECT COUNT(*) FROM ({base}) AS _ds_count"))
-        return {"count": count}
+        with _tracked(body.query_id, con):
+            log = _log(request, body, m)
+            if log is not None:  # its files' row counts: footers, and a count where a file is filtered
+                return {"count": log.count(con)}
+            base = _base_sql(body, f_base=_merge_f_base(request, body, m))
+            (count,) = first_row(con.execute(f"SELECT COUNT(*) FROM ({base}) AS _ds_count"))
+            return {"count": count}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
@@ -639,6 +766,7 @@ class PageRequest(BaseModel):
     order_desc: bool = False
     limit: int = 200
     offset: int = 0
+    query_id: Optional[str] = None  # names the query so it can be cancelled (``/query/cancel``)
 
 
 def _json_safe(v):
@@ -669,7 +797,10 @@ def query_page(body: PageRequest, request: Request,
 
         try:
             return serving_page(request.app.state.driver, body.sql, sandboxed=not full,
-                                limit=limit, offset=offset, order_by=body.order_by, order_desc=body.order_desc)
+                                limit=limit, offset=offset, order_by=body.order_by, order_desc=body.order_desc,
+                                track=lambda cur: _tracked(body.query_id, cur))
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     m = _resolve_major(request, body.pond, body.major, body.version)
@@ -687,15 +818,19 @@ def query_page(body: PageRequest, request: Request,
     # MESSAGE to the caller (a 400), never a bare, opaque 500. The connection spills to disk (`_tune_read_con`)
     # so a large merge reconstruction is slow, not fatal.
     #
-    # A merge main's default view reconstructs latest-per-PK over base ⊎ changelog — an aggregate a LIMIT can't
-    # push past — but the changelog is clamped to `> f_base` (the rest is already folded into the base), so a
-    # checkpointed table reads only its small hot tier + a LIMIT-pushed base scan. With no ORDER BY the
-    # LIMIT/OFFSET pushes to the Parquet scan (O(page)); an explicit column sort pays the Top-N it needs.
+    # A merge table's default view is its log (newest changes, then the base), paged region by region with its
+    # page's keys looked up for their status, so it never consolidates the change log. A windowed view of a merge
+    # table is the records changed in the window. With no ORDER BY the LIMIT/OFFSET pushes to the Parquet scan
+    # (O(page)); an explicit column sort pays the Top-N it needs.
     con = None
     try:
         con = _open_pond(request, body.pond, m)
-        base = _base_sql(body, f_base=_merge_f_base(request, body, m))
-        return _page(con.execute(f"SELECT * FROM ({base}) AS _ds_page{order} LIMIT {limit + 1} OFFSET {offset}"))
+        with _tracked(body.query_id, con):
+            log = _log(request, body, m)
+            if log is not None:
+                return _page(log.page(con, offset, limit + 1, order_by=body.order_by, desc=body.order_desc))
+            base = _base_sql(body, f_base=_merge_f_base(request, body, m))
+            return _page(con.execute(f"SELECT * FROM ({base}) AS _ds_page{order} LIMIT {limit + 1} OFFSET {offset}"))
     except HTTPException:
         raise
     except Exception as exc:
@@ -790,6 +925,8 @@ async def query(body: QueryRequest, request: Request, principal: auth.Principal 
         name = request.app.state.driver.meta.get(tap.pond, {}).get("name")
         if body.pond and body.pond != name:
             raise HTTPException(status_code=403, detail=f"this key belongs to a Tap on '{name}'")
+        if body.at or body.since:
+            raise HTTPException(status_code=422, detail="a Tap reads the newest data only: at and since need a key")
         tap_gate(request, tap)
         return await run_in_threadpool(_tap_query, request, tap, body)
     if not body.pond:
@@ -847,13 +984,21 @@ def _copy_bytes(con, sql: str, fmt: str) -> bytes:
 
 
 def _pond_query(request: Request, body: QueryRequest):
-    con = _open_pond(request, body.pond, _resolve_major(request, body.pond, body.major, body.version))
+    at, since = _point(body.at, "at"), _point(body.since, "since")
+    if since is not None and at is None:
+        raise HTTPException(status_code=422, detail="since needs at: the change is from since to at")
+    if since is not None and since > at:
+        raise HTTPException(status_code=422, detail="since must be at or before at")
+    major = _resolve_major(request, body.pond, body.major, body.version)
     sql = body.sql
     if not sql:
         if body.ripple:
             sql = f'SELECT * FROM "{body.pond}"."{body.ripple}" LIMIT 10'
         else:
             sql = f'SELECT * FROM "{body.pond}" LIMIT 10'
+    if at is not None:
+        return _as_of_query(request, body, major, sql, at, since)
+    con = _open_pond(request, body.pond, major)
 
     fmt = (body.format or "").lower()
     try:
@@ -867,6 +1012,108 @@ def _pond_query(request: Request, body: QueryRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         con.close()
+
+
+def _point(value: Optional[str], name: str):
+    """An ISO 8601 freshness from a request (UTC when it names no offset)."""
+    if not value:
+        return None
+    from datetime import datetime, timezone
+
+    try:
+        point = datetime.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"{name} must be an ISO 8601 time, not {value!r}") from None
+    return point if point.tzinfo else point.replace(tzinfo=timezone.utc)
+
+
+def _register_as_of(con, catalog: str, data_dir, pond: str, point, warnings: list[str], refused: dict) -> None:
+    """Views over every table of the Pond as it stood at ``point``, in ``catalog``: ``"{pond}"."{table}"`` and bare,
+    as :func:`_open_pond` names them. A plain table is read at its newest version at or before ``point``, a Trickle
+    at its rows up to it. A Trickle that no longer keeps ``point`` (a merge table's base compacted past it, an
+    append table's history trimmed past it) gets no view and goes in ``refused`` with the earliest point it keeps;
+    a plain table whose version at ``point`` is gone is read at its newest, with a warning. A table with nothing
+    published at ``point`` gets no view."""
+    from ...dataplane import earliest_readable, get_data_plane
+
+    dp = get_data_plane()
+    con.execute(f'CREATE SCHEMA {catalog}."{pond}"')
+    for table in _queryable(dp, data_dir):
+        earliest, exact = earliest_readable(data_dir, table)
+        if earliest is not None and point < earliest:
+            if exact:
+                refused[table] = earliest
+                continue
+            warnings.append(f"'{table}' keeps no version at or before {point.isoformat()}: its newest was read")
+        try:
+            select = dp.read_select(data_dir, table, as_of=point, pin=point)
+        except FileNotFoundError:
+            continue
+        con.execute(f'CREATE VIEW {catalog}."{pond}"."{table}" AS {select}')
+        con.execute(f'CREATE VIEW {catalog}.main."{table}" AS {select}')
+
+
+def _as_of_query(request: Request, body: QueryRequest, major: int, sql: str, at, since):
+    """``sql`` over the Pond's tables as they stood at ``at``. With ``since``, the change in its result from
+    ``since`` to ``at`` instead: the rows only ``at`` gives, weighted ``+1`` in ``_duckstring_d``, and those only
+    ``since`` gives, ``-1`` (multiplicity counted, so a row twice at ``at`` and once at ``since`` is one ``+1``).
+    Each point's tables live in their own in-memory catalog, so the same SQL runs against both."""
+    from fastapi.responses import JSONResponse
+
+    data_dir = _data_dir(request, body.pond, major)
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    _tune_read_con(con)
+    data_dir.duckdb_setup(con)
+    warnings: list[str] = []
+    refused: dict = {}
+    try:
+        points = [("ds_at", at)] + ([("ds_since", since)] if since is not None else [])
+        for catalog, point in points:
+            con.execute(f"ATTACH ':memory:' AS {catalog}")
+            _register_as_of(con, catalog, data_dir, body.pond, point, warnings, refused)
+        try:
+            if since is None:
+                con.execute("USE ds_at")
+                result = sql
+            else:
+                con.execute("USE ds_at")
+                con.execute(f"CREATE TEMP TABLE _ds_at AS {sql}")
+                con.execute("USE ds_since")
+                con.execute(f"CREATE TEMP TABLE _ds_since AS {sql}")
+                cols = [d[0] for d in con.execute("SELECT * FROM _ds_at LIMIT 0").description]
+                if "_duckstring_d" in cols:
+                    raise HTTPException(status_code=422, detail=(
+                        "the query returns a _duckstring_d column, which a change from since adds: select the "
+                        "table's own columns"))
+                result = ("SELECT *, CAST(1 AS BIGINT) AS _duckstring_d FROM "
+                          "(SELECT * FROM _ds_at EXCEPT ALL SELECT * FROM _ds_since) "
+                          "UNION ALL SELECT *, CAST(-1 AS BIGINT) AS _duckstring_d FROM "
+                          "(SELECT * FROM _ds_since EXCEPT ALL SELECT * FROM _ds_at)")
+            fmt = (body.format or "").lower()
+            headers = {"X-Duckstring-Warning": "; ".join(warnings)} if warnings else None
+            if fmt:
+                return Response(content=_copy_bytes(con, result, fmt), headers=headers,
+                                media_type=_FORMATS.get(fmt, ("application/octet-stream",))[0])
+            return JSONResponse(content=_jsonable(_rows(con.execute(result))), headers=headers)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            named = [t for t in refused if t in str(exc)]
+            if named:
+                t = named[0]
+                raise HTTPException(status_code=422, detail=(
+                    f"'{body.pond}.{t}' holds nothing from before {refused[t].isoformat()} (it was created then, or "
+                    f"trimmed since), so it can't be read as of {min(p for _, p in points).isoformat()}")) from exc
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        con.close()
+
+
+def _jsonable(rows: list[dict]) -> list:
+    from fastapi.encoders import jsonable_encoder
+
+    return jsonable_encoder(rows)
 
 
 def _missing_table_hint(con, pond: str, table: str) -> str:

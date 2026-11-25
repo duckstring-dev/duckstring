@@ -17,7 +17,9 @@ The reserved ``_duckstring_*`` system-column namespace is rejected on plain outp
 
 from __future__ import annotations
 
+import threading
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 
@@ -36,6 +38,9 @@ def _as_storage(data_dir) -> Storage:
 # The Trickle subpackage owns this namespace (its system columns live in it); re-exported here so the data
 # plane and Trickle share a single source of truth (see duckstring/trickle/context.py).
 from .trickle.context import SYSTEM_PREFIX as RESERVED_PREFIX  # noqa: E402
+
+# Tables in the reserved namespace that a Pond publishes: the Run reports (duckstring.reports).
+SYSTEM_TABLES = (f"{RESERVED_PREFIX}reports",)
 
 # Write modes the interface can express. Only ``overwrite`` is implemented in Phase 1; the others are
 # the history-preserving Trickle write paths, reserved here so call sites don't hard-code a mode.
@@ -56,14 +61,15 @@ class DataPlane:
     (``read_select`` / ``list_tables`` / ``table_path``)."""
 
     def export(self, con, data_dir: Path, *, mode: str = "overwrite", f=None, retain_from=KEEP_ALL,
-               held=frozenset()) -> None:
+               held=frozenset(), exact_ints: bool = False) -> None:
         """Publish every table in ``con``'s registry to ``data_dir`` for cross-Pond consumption.
 
         ``mode`` selects the write semantic (only ``"overwrite"`` in Phase 1). ``f`` is the run's
         freshness, which names the overwrite versions this publish writes. ``retain_from`` is the
         Catchment's retention bound for superseded versions (see :func:`prune_versions`). ``held`` names
-        tables the run checked as unchanged, which keep their published copy. Rejects any table carrying a
-        reserved (``_duckstring_*``) column."""
+        tables the run checked as unchanged, which keep their published copy. ``exact_ints`` publishes a
+        128-bit integer column (an integer ``SUM``) as ``BIGINT`` rather than ``DOUBLE`` (the line's flag; see
+        :func:`_out`). Rejects any table carrying a reserved (``_duckstring_*``) column."""
         raise NotImplementedError
 
     def read_select(self, data_dir: Path, table: str, *, as_of=None, pin=None, con=None) -> str:
@@ -120,7 +126,7 @@ class DataPlane:
             if base_sql is None:
                 raise FileNotFoundError(data_dir.uri(table))
             return base_sql
-        clog_sql = _read_parquet_files(clog, as_of)
+        clog_sql = _clog_select(snap, as_of)
         pk = tuple(meta.get("pk", ()))
         if con is not None:
             return materialise_reconstruct(con, base_sql, clog_sql, snap["f_base"], pk, upper=as_of)
@@ -143,7 +149,7 @@ class DataPlane:
         if not clog:
             return f"SELECT {base_cnt}"
         lo = f' WHERE "{F_COL}" > {_ts(snap["f_base"])}' if snap["f_base"] is not None else ""
-        delta = f'(SELECT coalesce(sum("{D_COL}"), 0) FROM ({_read_parquet_files(clog, as_of)}){lo})'
+        delta = f'(SELECT coalesce(sum("{D_COL}"), 0) FROM ({_clog_select(snap, as_of)}){lo})'
         return f"SELECT {base_cnt} + {delta}"
 
     def list_tables(self, data_dir) -> list[str]:
@@ -213,16 +219,22 @@ def _read_parquet_glob(glob: str, as_of=None) -> str:
     return sel
 
 
-def _read_parquet_files(uris: list[str], as_of=None) -> str:
+def _read_parquet_files(uris: list[str], as_of=None, since=None) -> str:
     """A ``SELECT`` over an explicit list of Parquet files, clamped to ``as_of`` like
-    :func:`_read_parquet_glob`. A read names its files when it is planned, so a file a later publish adds
-    (another Run's part, a new base) never joins it."""
+    :func:`_read_parquet_glob`, and to ``_duckstring_f >= since`` when given (a floor inside a union of parts).
+    A read names its files when it is planned, so a file a later publish adds (another Run's part, a new base)
+    never joins it."""
     from .trickle.io import F_COL, _ts
 
     files = ", ".join(f"'{u}'" for u in uris)
     sel = f"SELECT * FROM read_parquet([{files}], union_by_name=true)"
+    preds = []
     if as_of is not None:
-        sel += f' WHERE "{F_COL}" <= {_ts(as_of)}'
+        preds.append(f'"{F_COL}" <= {_ts(as_of)}')
+    if since is not None:
+        preds.append(f'"{F_COL}" >= {_ts(since)}')
+    if preds:
+        sel += " WHERE " + " AND ".join(preds)
     return sel
 
 
@@ -267,6 +279,94 @@ def _base_tokens(store, table: str) -> dict:
     return tokens
 
 
+def earliest_readable(store, table: str) -> tuple:
+    """``(earliest, exact)``: the earliest freshness ``table`` can be read as of, and whether a read before it fails
+    (a merge table before its oldest kept base, an append table below its floor) rather than falling back to a
+    version kept (a plain table, read at its newest by :func:`select_version`)."""
+    from datetime import datetime
+
+    from .trickle.io import load_sidecar, part_f, sidecar_tables, table_parts
+
+    store = _as_storage(store)
+    entry = sidecar_tables(load_sidecar(store)).get(table) or {}
+    mode = entry.get("mode")
+    if mode == "merge":
+        tokens = [t for t in _base_tokens(store, table) if t is not None]
+        return (min(tokens) if tokens else None), True
+    if mode == "append":
+        floor = entry.get("floor")
+        return (datetime.fromisoformat(floor) if floor else None), True
+    versions = []
+    for n in table_parts(store, f"{table}__v"):
+        try:
+            versions.append(part_f(n))
+        except ValueError:
+            continue
+    return (min(versions) if versions else None), False
+
+
+def change_points(store, after=None, upto=None) -> list:
+    """The freshnesses at which ``store``'s published tables changed in ``(after, upto]``, oldest first: append
+    parts, a merge table's base tokens, bands and change log parts, plain-table versions."""
+    from datetime import datetime
+
+    from . import trickle_io
+    from .trickle.io import changelog_name, load_sidecar, part_f, part_lo, sidecar_tables, table_parts, warm_name
+
+    store = _as_storage(store)
+    sidecar = load_sidecar(store)
+    points: set = set()
+    con = None
+
+    def stamps(table: str, name: str) -> set:
+        """The Runs a combined file holds: its rows keep their stamps (union_parts)."""
+        nonlocal con
+        if con is None:
+            import duckdb
+
+            con = duckdb.connect()
+            con.execute("SET TimeZone = 'UTC'")
+            store.duckdb_setup(con)
+        rows = con.execute(f"SELECT DISTINCT {trickle_io.F_COL} FROM ({_read_parquet_files([store.uri(table, name)])})"
+                           ).fetchall()
+        return {_as_utc(r[0]) for r in rows if r[0] is not None}
+
+    def add(table: str, names, *, inside: bool):
+        for n in names:
+            try:
+                points.update({part_lo(n), part_f(n)})
+            except ValueError:
+                continue
+            if inside and trickle_io.is_union(n):
+                # A combined file names only its ends. An append history's or a change log's rows keep the stamp of
+                # the Run that wrote them, so the Runs inside are read back; a warm band's are consolidated away.
+                points.update(stamps(table, n))
+
+    for table, entry in sidecar_tables(sidecar).items():
+        if table.startswith("_duckstring_"):
+            continue  # the Run reports change with every reporting Run, not with the data
+        mode = entry.get("mode")
+        if mode == "append":
+            add(table, table_parts(store, table), inside=True)
+        elif mode == "merge":
+            points.update(t for t in _base_tokens(store, table) if t is not None)
+            add(warm_name(table), table_parts(store, warm_name(table)), inside=False)
+            add(changelog_name(table), table_parts(store, changelog_name(table)), inside=True)
+        else:
+            add(f"{table}__v", table_parts(store, f"{table}__v"), inside=False)
+            if entry.get("f") and not table_parts(store, f"{table}__v"):
+                points.add(datetime.fromisoformat(entry["f"]))
+    if con is not None:
+        con.close()
+    return sorted(p for p in points if (after is None or p > after) and (upto is None or p <= upto))
+
+
+def _as_utc(value):
+    from datetime import timezone
+
+    return value.astimezone(timezone.utc) if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
 def _pick_token(tokens: dict, upper, f_base):
     """The base token a read at ``upper`` uses: the newest at or below it. With none (a read older than every
     retained base), the newest at or below the sidecar's ``f_base``, else none."""
@@ -279,8 +379,10 @@ def _pick_token(tokens: dict, upper, f_base):
         if older:
             import logging
 
-            logging.getLogger(__name__).warning(
-                "no published base at or below %s; reading the base at %s", upper, older[-1])
+            # A read as of NEVER (a first Run's look at the state before it) has no base by definition: not news.
+            level = logging.DEBUG if upper is not None and upper.year == 1 else logging.WARNING
+            logging.getLogger(__name__).log(
+                level, "no published base at or below %s; reading the base at %s", upper, older[-1])
             return older[-1]
     return None
 
@@ -291,7 +393,7 @@ def merge_snapshot(store, table: str, sidecar: dict, as_of=None) -> dict:
     part URIs, disjoint in freshness)."""
     from datetime import datetime
 
-    from .trickle.io import base_dir_name, changelog_name, part_f, table_parts, warm_name
+    from .trickle.io import base_dir_name, changelog_name, live_parts, part_f, part_lo, table_parts, warm_name
 
     store = _as_storage(store)
     entry = sidecar.get(table) or {}
@@ -313,35 +415,73 @@ def merge_snapshot(store, table: str, sidecar: dict, as_of=None) -> dict:
     band_names = [n for n in table_parts(store, warm) if within(part_f(n), token)]
     f_warm = max((part_f(n) for n in band_names), default=token)
     clog = changelog_name(table)
-    hot_names = [n for n in table_parts(store, clog) if within(part_f(n), f_warm)]
+    # The hot files above the newest band: a union reaching below the band (a retention fold cut through it) or
+    # past the read is read with row predicates (hot_after, and as_of as every read).
+    hot_names = [n for n in live_parts(table_parts(store, clog))
+                 if (f_warm is None or part_f(n) > f_warm) and (upper is None or part_lo(n) <= upper)]
+    hot_after = f_warm if f_warm is not None and any(part_lo(n) <= f_warm for n in hot_names) else None
     hot = [store.uri(clog, n) for n in hot_names]
     bands = [store.uri(warm, n) for n in band_names]
     for name, uris in ((clog, hot), (warm, bands)):  # an unstamped publish writes a tier as one file
         if not table_parts(store, name) and store.exists(f"{name}.parquet"):
             uris.append(store.uri(f"{name}.parquet"))
-    return {"base": base, "f_base": token, "bands": bands, "hot": hot, "f_warm": f_warm,
+    return {"base": base, "f_base": token, "bands": bands, "hot": hot, "f_warm": f_warm, "hot_after": hot_after,
             "base_names": tokens.get(token, []) if token is not None else [],
             "band_names": band_names, "hot_names": hot_names}
+
+
+def _clog_select(snap: dict, as_of=None) -> str:
+    """The change log above a merge snapshot's base: its bands and hot files (disjoint in freshness), with a hot
+    union's rows at or below the newest band left out (:func:`merge_snapshot`'s ``hot_after``)."""
+    from .trickle.io import F_COL, _ts
+
+    if snap.get("hot_after") is None or not snap["hot"]:
+        return _read_parquet_files(snap["bands"] + snap["hot"], as_of)
+    hot = f'SELECT * FROM ({_read_parquet_files(snap["hot"], as_of)}) WHERE "{F_COL}" > {_ts(snap["hot_after"])}'
+    if not snap["bands"]:
+        return hot
+    return f'SELECT * FROM ({_read_parquet_files(snap["bands"], as_of)}) UNION ALL BY NAME {hot}'
 
 
 def parts_snapshot(store, table: str, sidecar: dict, as_of=None) -> list[str]:
     """The part names a read of an append-only parts directory as of ``as_of`` uses: those at or below the
     read's freshness and, for a reader at or past the table's floor, at or above it (parts below the floor are
     retention's or a rebuild's drops, kept on disk only for readers still behind it)."""
-    from datetime import datetime
 
-    from .trickle.io import CHANGELOG_SUFFIX, WARM_SUFFIX, base_table_name, part_f, table_parts
+    from .trickle.io import CHANGELOG_SUFFIX, WARM_SUFFIX, live_parts, part_f, part_lo, table_parts
 
     store = _as_storage(store)
     upper = _run_upper(sidecar, as_of)
-    names = [n for n in table_parts(store, table) if upper is None or part_f(n) <= upper]
+    # The files a read uses (a union's constituents out), any holding a row at or below the read's freshness: a
+    # union reaching past it is read with the as-of predicate every part read carries.
+    names = [n for n in live_parts(table_parts(store, table)) if upper is None or part_lo(n) <= upper]
     if table.endswith((CHANGELOG_SUFFIX, WARM_SUFFIX)):
         return names  # a merge main's tiers: chosen by merge_snapshot, or windowed by a delta read
-    floor_iso = (sidecar.get(base_table_name(table)) or {}).get("floor")
-    floor = datetime.fromisoformat(floor_iso) if floor_iso else None
-    if floor is not None and (upper is None or floor <= upper):
+    floor = _parts_floor(sidecar, table, upper)
+    if floor is not None:
         names = [n for n in names if part_f(n) >= floor]
     return names
+
+
+def _parts_floor(sidecar: dict, table: str, upper):
+    """The floor a read of parts directory ``table`` at ``upper`` starts from: the table's floor when the reader
+    is at or past it, else ``None`` (a reader still behind it reads the parts below)."""
+    from datetime import datetime
+
+    from .trickle.io import base_table_name
+
+    floor_iso = (sidecar.get(base_table_name(table)) or {}).get("floor")
+    floor = datetime.fromisoformat(floor_iso) if floor_iso else None
+    return floor if floor is not None and (upper is None or floor <= upper) else None
+
+
+def _parts_since(sidecar: dict, table: str, names: list[str], as_of=None):
+    """The row predicate a read of ``names`` needs for the floor: the floor, when a union among them reaches below
+    it (append retention raised the floor inside one), else ``None``."""
+    from .trickle.io import part_lo
+
+    floor = _parts_floor(sidecar, table, _run_upper(sidecar, as_of))
+    return floor if floor is not None and any(part_lo(n) < floor for n in names) else None
 
 
 def gc_tiers(store, retain_from=KEEP_ALL) -> int:
@@ -371,6 +511,9 @@ def gc_tiers(store, retain_from=KEEP_ALL) -> int:
     removed = 0
     for table, entry in sidecar_tables(sidecar).items():
         mode = entry.get("mode")
+        if mode in ("append", "merge"):
+            for d in ([table] if mode == "append" else [changelog_name(table)]) + [f"{table}{DROPLOG_SUFFIX}"]:
+                removed += _gc_constituents(store, d, bound)
         if mode == "merge":
             snap = merge_snapshot(store, table, sidecar, bound)
             token, f_warm = snap["f_base"], snap["f_warm"]
@@ -397,11 +540,12 @@ def gc_tiers(store, retain_from=KEEP_ALL) -> int:
             floor = datetime.fromisoformat(floor_iso) if floor_iso else None
             clog = changelog_name(table)
             cut = f_warm if floor is None else min(f_warm, floor)
-            newest = _run_upper(sidecar, None)
-            for n in table_parts(store, clog):
-                # Never the newest Run's part: at a bootstrap it is the empty marker at the floor, which keeps a
-                # covered consumer's delta empty rather than a coverage miss (a fold never takes it either).
-                if part_f(n) <= cut and part_f(n) != newest:
+            parts = table_parts(store, clog)
+            for n in parts[:-1]:
+                # Never the newest part: after a bootstrap it is the empty marker at the floor, which keeps a
+                # covered consumer's delta empty rather than a coverage miss (a fold never takes it either). It is
+                # the newest change of all, so a window above it has nothing to miss.
+                if part_f(n) <= cut:
                     store.remove(clog, n)
                     removed += 1
         if mode in ("append", "merge"):
@@ -418,6 +562,36 @@ def gc_tiers(store, retain_from=KEEP_ALL) -> int:
                     if part_f(n) < floor:
                         store.remove(d, n)
                         removed += 1
+    return removed
+
+
+def _gc_constituents(store, d: str, bound) -> int:
+    """Remove the files of parts directory ``d`` that a union holds, once ``bound`` has passed the publish that
+    wrote the union: a read planned before then may name them (every such read belongs to a Run dispatched
+    before that publish), and a read planned after takes the union (:func:`~duckstring.trickle.io.live_parts`)."""
+    from .trickle.io import is_union, part_f, part_lo, part_made, table_parts
+
+    names = table_parts(store, d)
+    unions = []
+    for n in names:
+        if is_union(n):
+            try:
+                made = part_made(n)
+            except ValueError:
+                continue
+            if bound is None or made <= bound:
+                unions.append((part_lo(n), part_f(n), n))
+    if not unions:
+        return 0
+    removed = 0
+    for n in names:
+        try:
+            lo, hi = part_lo(n), part_f(n)
+        except ValueError:
+            continue
+        if any(u != n and ulo <= lo and hi <= uhi for ulo, uhi, u in unions):
+            store.remove(d, n)
+            removed += 1
     return removed
 
 
@@ -528,13 +702,23 @@ def registry_tables(con) -> list[str]:
     as a same-named *view* so SQL can ``FROM table`` it — those must NOT be published (``SHOW TABLES``
     lists views too, so this filtered ``duckdb_tables()`` query is what stops a Pond from re-exporting a
     full copy of every Source it reads). Only the registry's own database counts: a database a Ripple
-    attaches to read from (another DuckDB file, SQLite, Postgres) is never republished."""
-    return [
+    attaches to read from (another DuckDB file, SQLite, Postgres) is never republished.
+
+    An append table is the exception: its rows sit in a hidden table and its name is a view over them and the
+    rows moved out to published files (``trickle.io.append_store``), so its view counts."""
+    from . import trickle_io as trickle
+
+    tables = {
         t for (t,) in con.execute(
             "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main' "
-            "AND database_name = current_database() ORDER BY table_name"
+            "AND database_name = current_database()"
         ).fetchall() if not t.startswith(RESERVED_PREFIX)
-    ]
+    }
+    tables |= {t for (t,) in con.execute(
+        "SELECT view_name FROM duckdb_views() WHERE schema_name = 'main' AND database_name = current_database() "
+        "AND NOT temporary AND comment = ?", [trickle.APPEND_VIEW_COMMENT]).fetchall()
+        if not t.startswith(RESERVED_PREFIX)}
+    return sorted(tables)
 
 
 def validate_publish(con, table: str) -> None:
@@ -572,7 +756,9 @@ def publish_plan(con, data_dir: Path, f=None, held=frozenset(), *, write: bool =
     droplogs = {f"{t}{trickle.DROPLOG_SUFFIX}" for t in meta}
     warms = {trickle.warm_name(t) for t in meta}
     colds = {trickle.cold_base_name(t) for t, m in meta.items() if m.get("mode") == "merge"}
-    tables = registry_tables(con)
+    # Plus the framework's own published Trickles (the Run reports), which the reserved prefix keeps out of
+    # registry_tables: published like any other, hidden from listings (list_tables).
+    tables = registry_tables(con) + [t for t in SYSTEM_TABLES if t in meta]
     f_iso = f.astimezone(timezone.utc).isoformat() if f is not None else None
     existing = trickle.load_sidecar(data_dir)
     kept = held_tables(data_dir, held, existing)
@@ -636,15 +822,34 @@ def _run_inputs(con, f, existing: dict) -> dict:
     return inputs
 
 
+class _HoldAll(frozenset):
+    """``held`` for a Run that called ``pond.skip()``: every name is held (see :data:`HOLD_ALL`)."""
+
+    def __contains__(self, name) -> bool:
+        return True
+
+    def __repr__(self) -> str:
+        return "HOLD_ALL"
+
+
+# A skipped Run's ``held``: it publishes no new version of any plain table and commits no Object, since
+# ``pond.skip()`` says nothing it publishes changed. Without it every skipped Run copied every plain table into
+# a new version, and kept them all: retention keeps versions back to the line's ``changed_f``, which a skip holds
+# (the transit showcase, a one-row table with 360 identical versions after three hours). Trickle tables need
+# nothing: an unchanged write adds no part.
+HOLD_ALL: frozenset = _HoldAll()
+
+
 def held_tables(data_dir, held, sidecar=None) -> set[str]:
     """Which of ``held`` can be held at publish: overwrite tables with a published version to keep. A name
-    without one (never published, or an Object) is published as usual."""
+    without one (never published, or an Object) is published as usual. :data:`HOLD_ALL` holds every one."""
     from . import trickle_io as trickle
 
-    if not held:
+    if not held and held is not HOLD_ALL:
         return set()
     entries = trickle.sidecar_tables(trickle.load_sidecar(data_dir) if sidecar is None else sidecar)
-    return {t for t in held if entries.get(t, {}).get("mode", "overwrite") == "overwrite" and t in entries
+    names = entries if held is HOLD_ALL else held
+    return {t for t in names if entries.get(t, {}).get("mode", "overwrite") == "overwrite" and t in entries
             and trickle.table_versions(data_dir, t)}
 
 
@@ -682,8 +887,14 @@ def fingerprint(relation) -> str:
     return f"{tag}:{digest}"
 
 
+# Serialises creating the registry's shared system tables: a Pond's Ripples are threads with a cursor each on
+# one registry, and two creating the same table at once fail with "Catalog write-write conflict on create".
+SYSTEM_DDL_LOCK = threading.Lock()
+
+
 def _ensure_fp_table(con) -> None:
-    con.execute(f'CREATE TABLE IF NOT EXISTS "{FP_TABLE}" (table_name VARCHAR PRIMARY KEY, fp VARCHAR, f TIMESTAMPTZ)')
+    with SYSTEM_DDL_LOCK:
+        con.execute(f'CREATE TABLE IF NOT EXISTS "{FP_TABLE}" (table_name VARCHAR PRIMARY KEY, fp VARCHAR, f TIMESTAMPTZ)')
 
 
 def registry_fingerprints(con) -> dict[str, str]:
@@ -733,8 +944,17 @@ class ParquetDataPlane(DataPlane):
     base ⊎ changelog (see :meth:`DataPlane.read_select`)."""
 
     def export(self, con, data_dir, *, mode: str = "overwrite", f=None, retain_from=KEEP_ALL,
-               held=frozenset()) -> None:
-        """See :meth:`DataPlane.export`. ``retain_from`` drives version retention after the publish (see
+               held=frozenset(), exact_ints: bool = False) -> None:
+        """See :meth:`DataPlane.export`. ``exact_ints`` holds for every file this publish writes, the base a
+        merge table's first load staged included (:func:`_out`)."""
+        token = _EXACT_INTS.set(exact_ints)
+        try:
+            self._export(con, data_dir, mode=mode, f=f, retain_from=retain_from, held=held)
+        finally:
+            _EXACT_INTS.reset(token)
+
+    def _export(self, con, data_dir, *, mode: str, f, retain_from, held) -> None:
+        """The publish itself. ``retain_from`` drives version retention after the publish (see
         :func:`prune_versions`); the default keeps every version. ``held`` names the overwrite tables this run
         checked as unchanged: they keep their published version and sidecar entry (:func:`publish_plan`)."""
         from datetime import datetime, timezone
@@ -782,13 +1002,20 @@ class ParquetDataPlane(DataPlane):
                     vstore = data_dir.child(trickle.version_dir_name(table))
                     vstore.mkdir()
                     with vstore.copy_to(trickle.part_name(version_f)) as uri:
-                        con.execute(f"COPY ({_concrete_select(con, table)}) TO '{uri}' (FORMAT PARQUET)")
+                        con.execute(f"COPY ({_out(con, _concrete_select(con, table), table=table)}) TO '{uri}' "
+                                    "(FORMAT PARQUET)")
             for main in merge_mains:
                 _publish_tiered_main(con, data_dir, main, f)
+            # Before the commit, so a table's first union and its format mark land in the same sidecar. A union
+            # holds only rows already published, so a read that picks it before the commit reads the same rows.
+            _union_tiers(con, data_dir, [t for t in tables if t in incremental], meta, f, retain_from)
             if f is not None:
                 # Before the commit, so the registry is never behind its sidecar.
                 retry_on_lock(lambda: record_published(con, f))
             publish_plan(con, data_dir, f, held=kept)  # commit: every file it declares is in place
+            for table in tables:
+                if (meta.get(table) or {}).get("mode") == "append":
+                    fold_append(con, data_dir, table)  # its older runs read from the files just committed
             if retain_from is not KEEP_ALL:
                 prune_versions(data_dir, retain_from)  # after the new version is in place
             gc_tiers(data_dir, retain_from)  # superseded tiers no in-flight read can use
@@ -822,7 +1049,8 @@ class ParquetDataPlane(DataPlane):
             names = parts_snapshot(data_dir, table, sidecar, as_of)
             if not names:  # nothing at the read's freshness: an empty relation with the table's columns
                 return f"{_read_parquet_files([data_dir.uri(table, parts[0])])} LIMIT 0"
-            return _read_parquet_files([data_dir.uri(table, n) for n in names], as_of)
+            return _read_parquet_files([data_dir.uri(table, n) for n in names], as_of,
+                                       since=_parts_since(sidecar, table, names, as_of))
         if trickle.base_chunks(data_dir, table):  # log-structured merge-main base → the snapshot's chunks
             base = merge_snapshot(data_dir, table, sidecar, as_of)["base"]
             if not base:
@@ -831,6 +1059,39 @@ class ParquetDataPlane(DataPlane):
         if not data_dir.exists(f"{table}.parquet"):
             raise FileNotFoundError(data_dir.uri(f"{table}.parquet"))
         return f"SELECT * FROM read_parquet('{data_dir.uri(table + '.parquet')}')"
+
+    def columns_select(self, data_dir, table: str, *, as_of=None, pin=None) -> str:
+        """A ``SELECT`` with ``table``'s columns as read as of ``as_of``, for binding only (it may return no rows).
+        A parts directory binds its newest part in the read's snapshot alone: a table only gains columns, and
+        binding the whole read opened every part's footer (``union_by_name``), a cost that grew with each Run."""
+        from . import trickle_io as trickle
+
+        data_dir = _as_storage(data_dir)
+        if trickle.table_parts(data_dir, table):
+            names = parts_snapshot(data_dir, table, trickle.load_sidecar(data_dir), as_of)
+            if names:
+                return f"{_read_parquet_files([data_dir.uri(table, names[-1])])} LIMIT 0"
+        return self.read_select(data_dir, table, as_of=as_of, pin=pin)
+
+    def read_window(self, data_dir, table: str, *, after, as_of, sidecar=None) -> str:
+        """A ``SELECT`` over the rows of the parts directory ``table`` (an append history, or a merge main's
+        ``__changelog``) stamped in ``(after, as_of]``, reading only the parts in that window, chosen by name. A
+        delta read used to read every part up to ``as_of`` and filter, so its cost grew with the number of Runs
+        published (the transit showcase). Parts are one Run each (or that Run's chunks), named by its freshness.
+        With no part in the window, an empty relation with the table's columns. Raises ``FileNotFoundError``
+        when the table has no parts at all."""
+        from . import trickle_io as trickle
+
+        data_dir = _as_storage(data_dir)
+        parts = trickle.table_parts(data_dir, table)
+        if not parts:
+            raise FileNotFoundError(data_dir.uri(table))
+        sidecar = trickle.load_sidecar(data_dir) if sidecar is None else sidecar
+        names = [n for n in parts_snapshot(data_dir, table, sidecar, as_of) if trickle.part_f(n) > after]
+        if not names:
+            return f"{_read_parquet_files([data_dir.uri(table, parts[-1])])} LIMIT 0"
+        sel = _read_parquet_files([data_dir.uri(table, n) for n in names], as_of)
+        return f'SELECT * FROM ({sel}) WHERE "{trickle.F_COL}" > {trickle._ts(after)}'
 
     def list_tables(self, data_dir) -> list[str]:
         from . import trickle_io as trickle
@@ -847,7 +1108,8 @@ class ParquetDataPlane(DataPlane):
         # exists (no checkpoint yet → no `{main}.parquet`), so surface it from the sidecar.
         mains = {t for t, m in trickle.sidecar_tables(trickle.load_sidecar(data_dir)).items()
                  if m.get("mode") == "merge"}
-        return sorted(files | versioned | parts | mains)
+        # The framework's own published tables (the Run reports) are read by name, never listed.
+        return sorted(t for t in files | versioned | parts | mains if not t.startswith(RESERVED_PREFIX))
 
 
 def _export_parts(con, data_dir, table: str, f, *, chunk: bool = False) -> None:
@@ -874,18 +1136,39 @@ def _export_parts(con, data_dir, table: str, f, *, chunk: bool = False) -> None:
     # A Z-set part's row order means nothing, so DuckDB may write it in any order: 30% quicker for a 13.4M-row
     # change (0.84 s against 0.60 s, 2026-10-25). An append history keeps its order.
     unordered = table.endswith((trickle.CHANGELOG_SUFFIX, trickle.WARM_SUFFIX, trickle.DROPLOG_SUFFIX))
-    reg_fs = {r[0] for r in con.execute(f'SELECT DISTINCT "{trickle.F_COL}" FROM "{table}"').fetchall()
+    # The runs the registry holds: an append table's local rows (its older runs are published, and read through
+    # its view from those files), any other table's own.
+    hot = trickle.hot_name(table)
+    src = hot if chunk and trickle._table_exists(con, hot) else table  # never converts: the Ripple's write does
+    reg_fs = {r[0] for r in con.execute(f'SELECT DISTINCT "{trickle.F_COL}" FROM "{src}"').fetchall()
               if r[0] is not None}
-    if not reg_fs and f is not None:
-        reg_fs = {f}  # synthesize a 0-row marker part (the `WHERE = f` below selects nothing → empty part)
     existing: dict = {}  # freshness -> its part's file names (more than one when chunked)
-    for n in part_store.parquet_names():
-        existing.setdefault(trickle.part_f(n), []).append(n)
+    unions = []  # (lo, hi) of each union of parts (plans/showcase-fixes.md item 4): every freshness inside is published
+    names = part_store.parquet_names()
+    for n in names:
+        if trickle.is_union(n):
+            unions.append((trickle.part_lo(n), trickle.part_f(n)))
+        else:
+            existing.setdefault(trickle.part_f(n), []).append(n)
+
+    def in_union(fi) -> bool:
+        return any(lo <= fi <= hi for lo, hi in unions)
+
+    if not reg_fs and not names and f is not None:
+        # Synthesize a 0-row marker part (the `WHERE = f` below selects nothing → empty part), only while the
+        # directory holds no part: one is enough. Named after each Run, a table that bootstrapped and then never
+        # changed gained one per Run (the transit showcase: 359 per table after three hours, all read downstream).
+        reg_fs = {f}
     # Write the parts not yet on disk; *always* (re)write the current run's f, whose content may have changed
-    # this run (a same-f re-merge, or a replay) — older f's are immutable history and are skipped if present.
-    to_write = (reg_fs - set(existing)) | ({f} if (f is not None and f in reg_fs) else set())
+    # this run (a same-f re-merge, or a replay) — older f's are immutable history and are skipped if present. A
+    # freshness inside a union is published and never rewritten: a union only takes parts below every Run of the
+    # Pond's own still to publish.
+    to_write = {fi for fi in reg_fs - set(existing) if not in_union(fi)}
+    if f is not None and f in reg_fs and not in_union(f):
+        to_write.add(f)
     for fi in to_write:
-        select = f'SELECT * FROM "{table}" WHERE "{trickle.F_COL}" = {trickle._ts(fi)}'
+        select = _out(con, f'SELECT * FROM "{src}" WHERE "{trickle.F_COL}" = {trickle._ts(fi)}',
+                      table=trickle.base_table_name(table))
         written = _write_part_chunks(con, part_store, fi, select) if chunk else []
         if not written:
             with part_store.copy_to(trickle.part_name(fi)) as uri, _unordered(con, unordered):
@@ -929,6 +1212,139 @@ def _write_part_chunks(con, part_store, fi, select: str) -> list[str]:
         stage.move_into(part_store, src, dest)
     part_store.rmtree(".chunks")
     return names
+
+
+# ─── tiered unions of per-run parts (plans/showcase-fixes.md item 4) ─────────────────────────────────────────
+#
+# Each Run that changes a Trickle table adds a file per parts directory, so a table a Pond refreshes often gains
+# thousands of small files, and every listing and read grows with them. A union concatenates consecutive files
+# into one (``{lo}~{hi}~{made}.parquet``) and consolidates nothing: every row keeps its ``_duckstring_f``, which
+# every read selects rows by, so no read changes and the floor never moves. Tiers by size keep a row from being
+# rewritten more than a few times: a run of TIER_FILES files under cap/TIER_FILES is unioned, then a run of
+# TIER_FILES under the cap, packed into files of at most the cap (the table's compaction threshold).
+
+TIER_FILES_ENV = "DUCKSTRING_TIER_FILES"
+
+
+def _tier_files() -> int:
+    """How many consecutive files of one tier are unioned (``DUCKSTRING_TIER_FILES``, default 64; below 2 = never)."""
+    import os
+
+    try:
+        return int(os.environ.get(TIER_FILES_ENV, "64"))
+    except ValueError:
+        return 64
+
+
+def plan_unions(names: list[str], sizes: dict, *, f, bound=None, floor=None, above=None, cap: int,
+                fan: int) -> list[list[str]]:
+    """The unions to write in a parts directory: groups of consecutive files out of ``names`` (the directory's
+    :func:`~duckstring.trickle.io.live_parts`), each to become one file. A file may join one when it ends before
+    ``f`` (the publish's own Run) and at or below ``bound`` (no Run of the Pond's own still to publish can write
+    there), starts at or above ``floor`` and above ``above`` (a merge change log's newest band), is no chunk of a
+    larger Run, and is under ``cap``. A run of at least ``fan`` such files under ``cap // fan`` is one tier, then
+    under ``cap`` the next, each packed into groups of at most ``cap`` bytes."""
+    from . import trickle_io as trickle
+
+    if fan < 2 or f is None:
+        return []
+
+    def eligible(n) -> bool:
+        if trickle.is_chunk(n) or sizes.get(n, cap) >= cap:
+            return False
+        try:
+            lo, hi = trickle.part_lo(n), trickle.part_f(n)
+        except ValueError:
+            return False
+        return (hi < f and (bound is None or hi <= bound) and (floor is None or lo >= floor)
+                and (above is None or lo > above))
+
+    ok = {n for n in names if eligible(n)}
+    grouped: set[str] = set()
+    groups: list[list[str]] = []
+
+    def pack(run: list[str]) -> None:
+        if len(run) < fan:
+            return
+        cur: list[str] = []
+        total = 0
+        for n in run + [None]:
+            if n is None or (cur and total + sizes[n] > cap):
+                if len(cur) >= 2:
+                    groups.append(cur)
+                    grouped.update(cur)
+                cur, total = [], 0
+            if n is not None:
+                cur.append(n)
+                total += sizes[n]
+
+    for limit in (cap // fan, cap):
+        run: list[str] = []
+        for n in names:
+            if n in ok and n not in grouped and sizes[n] < limit:
+                run.append(n)
+            else:
+                pack(run)
+                run = []
+        pack(run)
+    return groups
+
+
+def union_parts(con, data_dir, table: str, f, bound=None, *, floor=None, above=None) -> int:
+    """Write the unions :func:`plan_unions` picks in parts directory ``table`` (an append history, a droplog, a
+    merge change log). The files they take stay until :func:`gc_tiers` collects them. Marks the table format 2
+    (:func:`~duckstring.trickle.io.mark_unioned`) when it holds a union, so the next sidecar says so. A union
+    that fails (columns whose types don't combine) is logged and skipped: never a failed publish. Returns the
+    number written."""
+    import logging
+
+    from . import trickle_io as trickle
+
+    if f is None:
+        return 0
+    base = trickle.base_table_name(table)
+    names = trickle.live_parts(trickle.table_parts(data_dir, table))
+    if any(trickle.is_union(n) for n in names):
+        trickle.mark_unioned(con, base)  # a registry rebuilt from the published state starts at format 1
+    fan = _tier_files()
+    if fan < 2 or len(names) < fan:
+        return 0
+    cap = max(_MIN_CHUNK_BYTES, _compact_threshold(con, base))
+    sizes = data_dir.parquet_sizes(table)
+    store = data_dir.child(table)
+    written = 0
+    for group in plan_unions(names, sizes, f=f, bound=bound, floor=floor, above=above, cap=cap, fan=fan):
+        name = trickle.range_name(trickle.part_lo(group[0]), trickle.part_f(group[-1]), f)
+        try:
+            with store.copy_to(name) as uri:
+                select = _read_parquet_files([data_dir.uri(table, n) for n in group])
+                con.execute(f"COPY ({select}) TO '{uri}' (FORMAT PARQUET)")
+        except Exception as exc:  # noqa: BLE001 - a union is housekeeping; the parts it would take stay
+            logging.getLogger(__name__).warning("could not union %d parts of %s: %s", len(group), table, exc)
+            continue
+        written += 1
+    if written:
+        trickle.mark_unioned(con, base)
+    return written
+
+
+def _union_tiers(con, data_dir, tables, meta: dict, f, retain_from) -> None:
+    """Union the per-run parts of every parts directory this publish writes (:func:`union_parts`), bounded by the
+    Catchment's ``retain_from`` (a standalone publish: every Run before ``f``)."""
+    from datetime import datetime
+
+    from . import trickle_io as trickle
+
+    bound = retain_from if isinstance(retain_from, datetime) else None
+    for table in tables:
+        base = trickle.base_table_name(table)
+        m = meta.get(base) or {}
+        floor = datetime.fromisoformat(m["floor"]) if m.get("floor") else None
+        above = None
+        if table == trickle.changelog_name(base):
+            above = trickle._f_warm(con, base) or trickle._f_base(con, base)  # older change log rows are banded
+            floor = None
+        union_parts(con, data_dir, table, f, bound, floor=floor, above=above)
 
 
 def _export_companions(con, data_dir, f) -> None:
@@ -992,20 +1408,25 @@ def _export_companions(con, data_dir, f) -> None:
                         keys = ", ".join(q(c) for c in by)
                         rows += (f' UNION ALL BY NAME SELECT {keys}, {q(trickle.F_COL)}, true AS "_duckstring_gone" '
                                  f'FROM {q(drops)} WHERE {fcond}')
+                    rows, wide = _state_out(con, rows)
                     with dstore.copy_to(part) as uri:
                         con.execute(f"COPY ({rows}) TO '{uri}' (FORMAT PARQUET)")
                     entry.update(full=last["full"], by=by, delta_rows=delta_rows)
                 else:
+                    rows, wide = _state_out(con, f'SELECT * FROM "{reg}"')
                     with store.copy_to(part) as uri:
-                        con.execute(f'COPY (SELECT * FROM "{reg}") TO \'{uri}\' (FORMAT PARQUET)')
+                        con.execute(f"COPY ({rows}) TO '{uri}' (FORMAT PARQUET)")
                     entry.update(full=f_iso, by=by, delta_rows=0)
                     full_written.append((kind, base, part))
                 if trickle._table_exists(con, drops):
                     con.execute(f'DELETE FROM {q(drops)} WHERE {q(trickle.F_COL)} <= {trickle._ts(f)}')  # published
             else:
+                rows, wide = _state_out(con, f'SELECT * FROM "{reg}"')
                 with store.copy_to(part) as uri:
-                    con.execute(f'COPY (SELECT * FROM "{reg}") TO \'{uri}\' (FORMAT PARQUET)')
+                    con.execute(f"COPY ({rows}) TO '{uri}' (FORMAT PARQUET)")
                 full_written.append((kind, base, part))
+            if wide:
+                entry["int128"] = wide  # published as DECIMAL(38,0); cast back to HUGEINT when loaded
             state_section[f"{kind}/{base}"] = entry
     if state_section:  # record the snapshots in the sidecar's `state` section (skipped by read/diff surfaces)
         sidecar = trickle.load_sidecar(data_dir)
@@ -1039,6 +1460,7 @@ def _load_state_companion(con, store, kind: str, table: str, entry: dict | None)
     deltas = [n for n in snap_store.parquet_names("deltas") if trickle.part_f(n) > trickle.part_f(full)]
     if kind != "agg" or not deltas or not entry.get("by"):
         con.execute(f"CREATE OR REPLACE TABLE {reg} AS SELECT * FROM read_parquet('{snap_store.uri(full)}')")
+        _restore_int128(con, reg, entry)
         return True
     keys = ", ".join(trickle._q(c) for c in entry["by"])
     parts = [f"SELECT *, false AS \"_duckstring_gone\", 0 AS _src FROM read_parquet('{snap_store.uri(full)}')"]
@@ -1050,7 +1472,66 @@ def _load_state_companion(con, store, kind: str, table: str, entry: dict | None)
         f"SELECT *, row_number() OVER (PARTITION BY {keys} ORDER BY _src DESC) AS _rn FROM ({union})"
         f") WHERE _rn = 1 AND NOT \"_duckstring_gone\""
     )
+    _restore_int128(con, reg, entry)
     return True
+
+
+def _restore_int128(con, reg: str, entry: dict) -> None:
+    """Cast a loaded state companion's 128-bit integer columns back from the ``DECIMAL(38,0)`` they were
+    published as (:func:`_state_out`)."""
+    from . import trickle_io as trickle
+
+    for c, t in (entry.get("int128") or {}).items():
+        con.execute(f"ALTER TABLE {reg} ALTER COLUMN {trickle._q(c)} TYPE {t}")
+
+
+# Whether this publish writes a 128-bit integer column (an integer ``SUM``'s ``HUGEINT``) as ``BIGINT`` rather than
+# letting DuckDB's Parquet writer make it ``DOUBLE``, which reads 9 as 9.0 and rounds above 2^53. Set per publish
+# from the line's flag (``pond.exact_ints``: lines first deployed from 0.9 on); older lines keep ``DOUBLE``, which
+# their Sinks' contracts record. Read by every path that writes a table's files (:func:`_out`).
+_EXACT_INTS: ContextVar[bool] = ContextVar("duckstring_exact_ints", default=False)
+_INT128 = {"HUGEINT": ("BIGINT", -(2**63), 2**63 - 1), "UHUGEINT": ("UBIGINT", 0, 2**64 - 1)}
+
+
+def _out(con, select: str, exact: bool | None = None, table: str | None = None) -> str:
+    """``select`` as published: with exact integers (the line's flag, else this publish's), each ``HUGEINT``
+    column as ``BIGINT`` (``UHUGEINT`` as ``UBIGINT``). A value outside that range fails the publish with an
+    error naming the column, rather than being rounded."""
+    from . import trickle_io as trickle
+
+    if not (_EXACT_INTS.get() if exact is None else exact):
+        return select
+    rel = con.sql(select)
+    swaps = []
+    for c, t in zip(rel.columns, rel.types, strict=True):
+        spec = _INT128.get(str(t))
+        if spec is None:
+            continue
+        to, lo, hi = spec
+        q = trickle._q(c)
+        where = f"{table}.{c}" if table else c
+        msg = (f"'{where}' holds a value outside {to}'s range; cast it to DECIMAL(38,0) (or DOUBLE) in the "
+               f"Ripple to publish it").replace("'", "''")
+        swaps.append(f"CASE WHEN {q} BETWEEN {lo} AND {hi} THEN CAST({q} AS {to}) "
+                     f"ELSE error('{msg}') END AS {q}")
+    if not swaps:
+        return select
+    return f"SELECT * REPLACE ({', '.join(swaps)}) FROM ({select})"
+
+
+def _state_out(con, select: str) -> tuple[str, dict[str, str]]:
+    """An aggregate's or scan's state ``select`` as published, and the columns it changed: a ``HUGEINT`` (or
+    ``UHUGEINT``) column as ``DECIMAL(38,0)``, which Parquet holds exactly, so a Duck that rebuilds its
+    registry from published state carries on summing exactly (:func:`_load_state_companion` casts it back).
+    Before, it came back ``DOUBLE``, and a sum above 2^53 lost its last digits."""
+    from . import trickle_io as trickle
+
+    rel = con.sql(select)
+    cols = {c: str(t) for c, t in zip(rel.columns, rel.types, strict=True) if str(t) in _INT128}
+    if not cols:
+        return select, {}
+    swaps = ", ".join(f"CAST({trickle._q(c)} AS DECIMAL(38,0)) AS {trickle._q(c)}" for c in cols)
+    return f"SELECT * REPLACE ({swaps}) FROM ({select})", cols
 
 
 def _concrete_select(con, table: str) -> str:
@@ -1091,7 +1572,13 @@ def _published_bytes(data_dir, table: str) -> int:
         files += [(trickle.changelog_name(table), n) for n in snap["hot_names"]]
     else:
         files = [(table, n) for n in parts_snapshot(data_dir, table, sidecar)]
-    return total + sum(data_dir.size(*f) for f in files)
+    # One listing per directory: a size per file was a request per file on an object store, every publish.
+    sizes: dict[str, dict[str, int]] = {}
+    for d, n in files:
+        if d not in sizes:
+            sizes[d] = data_dir.parquet_sizes(d)
+        total += sizes[d].get(n, 0)
+    return total
 
 
 def _delta_rows_last(con, table: str, mode: str, f) -> int:
@@ -1184,6 +1671,7 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
     plane = ParquetDataPlane()  # hydration reads the flat layer (every backend also writes it)
     sidecar = trickle.load_sidecar(store)
     hydrated: list[str] = []
+    append_cut: dict = {}  # an append table's cut: its runs at or below it are read from their files
     for table, entry in trickle.sidecar_tables(sidecar).items():
         if tables is not None and table not in tables:
             continue
@@ -1205,7 +1693,24 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
                 trickle._drop_relation(con, cold)
                 con.execute(f'CREATE VIEW {trickle._q(cold)} AS {sql}')
                 loaded = True
-        else:  # append parts dir, or an overwrite table's newest version (or the earlier single file)
+        elif mode == "append" and trickle.table_parts(store, table):
+            # Only the recent runs come back into the registry, by compaction's rule; the view reads the rest from
+            # their published files, as after a publish (fold_append).
+            names = parts_snapshot(store, table, sidecar)
+            f_cold = _cold_cut(store, table, names, None, _compact_threshold())
+            hot_names = [n for n in names if f_cold is None or trickle.part_f(n) > f_cold]
+            uris = [store.uri(table, n) for n in (hot_names or names[:1] or trickle.table_parts(store, table)[:1])]
+            sql = _read_parquet_files(uris, since=_parts_since(sidecar, table, hot_names))
+            if f_cold is not None:
+                sql = f'SELECT * FROM ({sql}) WHERE "{trickle.F_COL}" > {trickle._ts(f_cold)}'
+            if not hot_names:
+                sql += " LIMIT 0"
+            trickle._drop_relation(con, table)
+            con.execute(f'CREATE OR REPLACE TABLE {trickle._q(trickle.hot_name(table))} AS {sql}')
+            _set_append_view(con, table, _cold_select(store, table, sidecar, names, f_cold) if f_cold else None)
+            append_cut[table] = f_cold
+            loaded = True
+        else:  # an overwrite table's newest version (or the earlier single file)
             if (trickle.table_versions(store, table) or trickle.table_parts(store, table)
                     or store.exists(f"{table}.parquet")):
                 sql = plane._raw_read_select(store, table)
@@ -1215,14 +1720,21 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
             parts = trickle.table_parts(store, companion)
             if not parts:
                 continue
-            if companion == trickle.changelog_name(table) and mode == "merge":
+            since = None
+            hot = companion == trickle.changelog_name(table) and mode == "merge"
+            if hot:
                 # The hot parts above the newest band; folded parts a reader may still need stay on disk,
                 # but their rows are in the bands.
                 names = snap["hot_names"]
             else:
                 names = parts_snapshot(store, companion, sidecar)
+                since = _parts_since(sidecar, companion, names)
             uris = [store.uri(companion, n) for n in (names or parts[:1])]
-            sql = _read_parquet_files(uris) + ("" if names else " LIMIT 0")
+            if names and hot and snap.get("hot_after") is not None:
+                sql = (f'SELECT * FROM ({_read_parquet_files(uris)}) '
+                       f'WHERE "{trickle.F_COL}" > {trickle._ts(snap["hot_after"])}')  # a union cut by a band
+            else:
+                sql = _read_parquet_files(uris, since=since) + ("" if names else " LIMIT 0")
             con.execute(f'CREATE OR REPLACE TABLE {trickle._q(companion)} AS {sql}')
             loaded = True
         from datetime import datetime
@@ -1232,12 +1744,15 @@ def hydrate_registry(con, data_dir, tables=None) -> list[str]:
         loaded = loaded or bool(bands)
         if mode in ("merge", "append") and loaded:
             trickle._record_meta(con, table, mode, tuple(entry.get("pk") or ()))
+            if int(entry.get("format_version") or 1) >= 2:
+                trickle.mark_unioned(con, table)  # its parts include unions: keep saying so
             if entry.get("floor"):
                 trickle._advance_floor(con, table, bootstrap_f=datetime.fromisoformat(entry["floor"]))
             if f_base is not None:
                 trickle._set_f_base(con, table, f_base)
             # The warm watermark is the newest band still above the base (a band at or below it is stale).
             f_warm = max(trickle.part_f(n) for n in bands) if bands else f_base
+            f_warm = append_cut.get(table, f_warm)
             if f_warm is not None:
                 trickle._set_f_warm(con, table, f_warm)
             if mode == "merge":
@@ -1484,9 +1999,20 @@ def _mirror_dir(src: Path, dest, parts: tuple[str, ...], drop_before=None) -> in
         if p.name not in existing:
             dest.put_file(p, *parts, p.name)
             copied += 1
+    from .trickle.io import is_union, part_lo
+
+    unions = []  # local unions of parts: a destination file one holds was collected locally (gc_tiers)
+    for name in local_files:
+        if is_union(name):
+            try:
+                unions.append((part_lo(name), part_f(name), name))
+            except ValueError:
+                continue
     for name in existing - local_files:
         if state_tree:
             dest.remove(*parts, name)  # keep-latest snapshots: local is authoritative + complete
+        elif unions and _held_by(name, unions):
+            dest.remove(*parts, name)  # its rows are in a union both sides hold
         elif drop_before is not None:
             mark, inclusive = drop_before
             ff = _file_f(name, part_f)
@@ -1496,6 +2022,17 @@ def _mirror_dir(src: Path, dest, parts: tuple[str, ...], drop_before=None) -> in
         if state_tree:
             dest.rmtree(*parts, name)
     return copied
+
+
+def _held_by(name: str, unions) -> bool:
+    """Whether part file ``name`` lies inside one of ``unions`` (``(lo, hi, name)``) other than itself."""
+    from .trickle.io import part_f, part_lo
+
+    try:
+        lo, hi = part_lo(name), part_f(name)
+    except ValueError:
+        return False
+    return any(ulo <= lo and hi <= uhi and u != name for ulo, uhi, u in unions)
 
 
 def _file_f(name: str, part_f) -> "datetime | None":  # noqa: F821 - forward ref for the docstring type
@@ -1508,6 +2045,90 @@ def _file_f(name: str, part_f) -> "datetime | None":  # noqa: F821 - forward ref
         return part_f(stem)
     except Exception:
         return None
+
+
+# ─── an append table's older runs read from where they are published (attention FINDINGS 9) ──────────────────
+#
+# An append table's history was kept whole in the registry as well as published: 3.7 GB in a registry beside 3.2 GB
+# published after two days of page views. Its rows are written to a hidden table behind a view
+# (``trickle.io.append_store``); by compaction's rule (a merge main's warm fold), a publish moves its oldest runs out
+# of the registry, leaving about one threshold of recent runs local, and repoints the view at the published files for
+# the rest. The cut, ``f_cold``, is kept as the table's ``f_warm``. Whatever reads the table (a conflict check, a
+# recompute, Ripple SQL) reads its whole history through the view; only writes go to the local rows, and they are
+# always newer than the cut.
+
+
+def _cold_cut(store, table: str, names: list[str], f_cold, threshold: int):
+    """Where append table ``table``'s registry rows should start, by compaction's rule: when the published runs above
+    ``f_cold`` outgrow twice the threshold, the oldest of them go, leaving about one threshold, and never the newest
+    Run. Returns the new cut (``f_cold`` when nothing moves)."""
+    from . import trickle_io as trickle
+
+    part_store = store.child(table)
+    sizes: dict = {}
+    for n in names:
+        fi = trickle.part_f(n)
+        if f_cold is None or fi > f_cold:
+            sizes[fi] = sizes.get(fi, 0) + part_store.size(n)
+    remaining = sum(sizes.values())
+    if remaining < 2 * threshold:
+        return f_cold
+    cut = f_cold
+    for fi in sorted(sizes)[:-1]:  # oldest first; never the newest run, which a caught-up reader's delta needs
+        if remaining <= threshold:
+            break
+        remaining -= sizes[fi]
+        cut = fi
+    return cut
+
+
+def _cold_select(store, table: str, sidecar: dict, names: list[str], f_cold) -> str | None:
+    """The published rows of append table ``table`` at or below ``f_cold``: every file holding one (a union reaching
+    past the cut keeps only its rows at or below it), at or above the floor. ``None`` when there are none."""
+    from . import trickle_io as trickle
+
+    cold = [n for n in names if trickle.part_lo(n) <= f_cold]
+    if not cold:
+        return None
+    sel = _read_parquet_files([store.uri(table, n) for n in cold], since=_parts_since(sidecar, table, cold))
+    return f'SELECT * FROM ({sel}) WHERE "{trickle.F_COL}" <= {trickle._ts(f_cold)}'
+
+
+def _set_append_view(con, table: str, cold_sql: str | None) -> None:
+    from . import trickle_io as trickle
+
+    q = trickle._q
+    hot = q(trickle.hot_name(table))
+    sql = f"SELECT * FROM ({cold_sql}) UNION ALL BY NAME SELECT * FROM {hot}" if cold_sql else f"SELECT * FROM {hot}"
+    con.execute(f"CREATE OR REPLACE VIEW {q(table)} AS {sql}")
+    con.execute(f"COMMENT ON VIEW {q(table)} IS '{trickle.APPEND_VIEW_COMMENT}'")
+
+
+def fold_append(con, data_dir, table: str) -> None:
+    """After a publish, move append table ``table``'s older runs out of the registry by compaction's rule (see the
+    section note), and point its view at the files now holding them. Repointed on every publish once a cut exists,
+    so the view follows the files a union or retention leaves. One transaction: a concurrent read sees the rows
+    once. Nothing to do for a table written before its rows had a store of their own (its next write converts it)."""
+    from . import trickle_io as trickle
+
+    if not trickle._table_exists(con, trickle.hot_name(table)):
+        return
+    store = _as_storage(data_dir)
+    sidecar = trickle.load_sidecar(store)
+    names = parts_snapshot(store, table, sidecar)
+    f_cold = _cold_cut(store, table, names, trickle._f_warm(con, table), _compact_threshold(con, table))
+    if f_cold is None:
+        return
+    con.execute("BEGIN")
+    try:
+        con.execute(f'DELETE FROM {trickle._q(trickle.hot_name(table))} '
+                    f'WHERE "{trickle.F_COL}" <= {trickle._ts(f_cold)}')
+        _set_append_view(con, table, _cold_select(store, table, sidecar, names, f_cold))
+        trickle._set_f_warm(con, table, f_cold)
+        con.execute("COMMIT")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
 
 
 def _compact_threshold(con=None, main=None) -> int:
@@ -1563,7 +2184,7 @@ def _publish_tiered_main(con, data_dir: Path, main: str, f) -> None:
 
     clog_store = data_dir.child(clog)
     f_warm = trickle._f_warm(con, main) or trickle._f_base(con, main)
-    hot = [n for n in trickle.table_parts(data_dir, clog)
+    hot = [n for n in trickle.live_parts(trickle.table_parts(data_dir, clog))  # a union counts once, at its hi
            if f_warm is None or trickle.part_f(n) > f_warm]
     hot_bytes = sum(clog_store.size(n) for n in hot)
 
@@ -1597,7 +2218,7 @@ def _publish_tiered_main(con, data_dir: Path, main: str, f) -> None:
 BOOT_STAGING = ".boot"
 
 
-def stage_boot_base(con, data_dir, main: str, rows_sql: str) -> str | None:
+def stage_boot_base(con, data_dir, main: str, rows_sql: str, exact_ints: bool = False) -> str | None:
     """Write a merge main's first load (``rows_sql``) as size-bounded Parquet chunks under the local
     ``data_dir``'s :data:`BOOT_STAGING`, in the order the rows arrive, and return a ``SELECT`` over them for
     the registry's base to be a view of. :func:`_publish_local_base` moves them into ``{main}__base/`` at
@@ -1609,7 +2230,7 @@ def stage_boot_base(con, data_dir, main: str, rows_sql: str) -> str | None:
     data_dir = _as_storage(data_dir)
     size = max(_MIN_CHUNK_BYTES, int(_compact_threshold(con, main)))
     with data_dir.copy_dir_to(BOOT_STAGING, main) as uri:  # clears an earlier attempt's chunks
-        con.execute(f"COPY ({rows_sql}) TO '{uri}' "
+        con.execute(f"COPY ({_out(con, rows_sql, exact_ints, table=main)}) TO '{uri}' "
                     f"(FORMAT PARQUET, FILE_SIZE_BYTES {size}, ROW_GROUP_SIZE {_ROW_GROUP_ROWS})")
     names = data_dir.parquet_names(BOOT_STAGING, main)
     if not names:
@@ -1739,7 +2360,8 @@ def _export_bands(con, data_dir: Path, main: str) -> None:
         if rows and not band_store.exists(dest):
             band_store.mkdir()
             with band_store.copy_to(dest) as uri:
-                con.execute(f'COPY (SELECT * FROM {q(pending)} WHERE {above}) TO \'{uri}\' (FORMAT PARQUET)')
+                con.execute(f"COPY ({_out(con, f'SELECT * FROM {q(pending)} WHERE {above}', table=main)}) "
+                            f"TO '{uri}' (FORMAT PARQUET)")
 
     con.execute("BEGIN TRANSACTION")
     try:
@@ -1916,7 +2538,7 @@ def _publish_base_chunks(con, data_dir: Path, main: str, f, chunk_bytes: int) ->
     staging_name = base_name + ".tmp"
     staging_store = data_dir.child(staging_name)
     size = max(_MIN_CHUNK_BYTES, int(chunk_bytes))
-    ordered = _base_order_select(con, main, trickle.cold_base_name(main))
+    ordered = _out(con, _base_order_select(con, main, trickle.cold_base_name(main)), table=main)
     written = []
     with data_dir.copy_dir_to(staging_name) as staging_uri:  # clears staging, yields the dir target
         con.execute(

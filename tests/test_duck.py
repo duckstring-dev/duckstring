@@ -169,6 +169,92 @@ def test_duck_immediate_retry_then_failed_event(tmp_path):
     assert join_attempts == [0, 1]
 
 
+# a → b → c, a → side, and opt reads a (required) and b (optional).
+CHAIN = {"a": [], "b": ["a"], "c": ["b"], "side": ["a"], "opt": ["a", "b"]}
+
+
+@pytest.mark.timeout(5)
+def test_a_run_that_gives_up_leaves_nothing_waiting_on_it(tmp_path):
+    """A Ripple failing for good gives up its Run, so the Ripples below it can never reach that freshness. Their
+    demand for it went too: otherwise the Duck never went idle, and 30 s later its watchdog reported the Run as
+    "stuck", which replaced the Ripple's own error on the Pond (attention FINDINGS 17)."""
+    con = ledger.connect(tmp_path / "pond.db")
+    core = DuckCore("p", con, CHAIN, optional={"opt": {"b"}})
+    assert core.begin_run(T0, T0) == ["a"]
+    assert sorted(core.ripple_completed("a", T0)) == ["b", "opt", "side"]  # opt waits on a only
+    assert core.ripple_failed("b", T0) == []
+    assert core.state.states["c"].demand == []  # c can't reach T0 without b
+    core.ripple_completed("side", T0)
+    core.ripple_completed("opt", T0)  # a Ripple reading b optionally still runs
+    assert core.idle()
+    assert [e.kind for e in core.events if e.kind in ("failed", "run_completed")] == ["failed"]
+
+    # The next Run asks every Ripple again and completes.
+    assert core.begin_run(T0 + STEP, T0) == ["a"]
+    for name in ("a", "b", "side", "opt", "c"):
+        core.ripple_completed(name, T0)
+    assert core.events[-1].kind == "run_completed" and core.events[-1].f == T0 + STEP
+
+
+@pytest.mark.timeout(5)
+def test_a_run_giving_up_keeps_the_runs_pipelined_behind_it(tmp_path):
+    con = ledger.connect(tmp_path / "pond.db")
+    core = DuckCore("p", con, CHAIN, optional={"opt": {"b"}})
+    t1 = T0 + STEP
+    core.begin_run(T0, T0)
+    core.ripple_completed("a", T0)
+    core.begin_run(t1, T0)  # a second Run, dispatched while the first is in flight
+    assert core.ripple_failed("b", T0) == []
+    assert core.state.states["c"].demand == [t1]  # only the failed Run's demand went
+    for name in ("side", "opt", "a"):
+        core.ripple_completed(name, T0)
+    for name in ("b", "side", "opt", "c"):
+        core.ripple_completed(name, T0)
+    assert core.idle() and core.events[-1].kind == "run_completed" and core.events[-1].f == t1
+
+
+@pytest.mark.timeout(5)
+def test_a_replaced_duck_gives_up_without_retrying(tmp_path):
+    """A Duck told its version was replaced (a redeploy) doesn't spend immediate retries on the old code: the Run
+    gives up at once and the Catchment runs it again on the new version (attention FINDINGS 8)."""
+    con = ledger.connect(tmp_path / "pond.db")
+    core = DuckCore("sales", con, SALES)
+    core.begin_run(T0, T0, retry_immediately=2)
+    core.ripple_completed("daily", T0)
+    core.ripple_completed("tiers", T0)
+    core.replaced = True
+    assert core.ripple_failed("join", T0) == []
+    assert [e.kind for e in core.events if e.ripple == "join"] == ["failed"] and core.idle()
+
+
+@pytest.mark.timeout(5)
+def test_a_replaced_duck_hands_back_the_runs_it_has_not_started(tmp_path):
+    """A redeploy left a busy Duck working through every Run it had taken, on the old code (attention FINDINGS 5).
+    Told it was replaced, it keeps the Run in progress and hands back the ones no Ripple has started."""
+    con = ledger.connect(tmp_path / "pond.db")
+    core = DuckCore("sales", con, SALES)
+    fs = [T0 + timedelta(minutes=i) for i in range(4)]
+    for f in fs:
+        core.begin_run(f, T0)
+    core.ripple_completed("daily", T0)
+    core.ripple_completed("tiers", T0)  # the Run at fs[0] is in progress (join); fs[1] has started daily and tiers
+    started = {s.start_f for s in core.state.states.values()}
+    assert fs[1] in started and fs[2] not in started
+    core.events.clear()
+    assert core.release_unstarted(T0) == fs[2:]
+    assert [(e.kind, e.f) for e in core.events] == [("released", f) for f in fs[2:]]
+    assert all(t <= fs[1] for s in core.state.states.values() for t in s.demand)
+    core.ripple_completed("join", T0)  # fs[0] done; fs[1] goes on to the end, and then the Duck is idle
+    for name in ("daily", "tiers", "join"):
+        if core.state.states[name].is_running:
+            core.ripple_completed(name, T0)
+    core.ripple_completed("join", T0) if core.state.states["join"].is_running else None
+    assert core.idle()
+    assert [e.f for e in core.events if e.kind == "run_completed"] == fs[:2]
+    # A restarted old Duck doesn't pick the handed-back Runs up from its ledger.
+    assert not [f for f in fs[2:] if f in ledger.load_state(con, SALES).states["daily"].demand]
+
+
 @pytest.mark.timeout(5)
 def test_retry_on_lock_queues_then_raises():
     import duckdb
@@ -256,3 +342,39 @@ def test_duck_recovery_reruns_only_incomplete(tmp_path):
     sim2.launch(launched)
     sim2.run(4)
     assert ledger.read_pond_end_f(con2) == T0
+
+
+@pytest.mark.timeout(5)
+def test_a_new_version_reruns_ripples_an_earlier_version_completed(tmp_path):
+    """The ledger is the major line's, so it outlives a redeploy. A Run that failed at its last Ripple and was
+    dispatched again after a fix: the Catchment starts every Ripple of the new version, but the new Duck found
+    the roots complete for that freshness (written by the broken version) and ran only the last one. The roots
+    never reported, so the Pond showed running for good, and the last Ripple ran on the broken version's output
+    (plans/showcase-fixes.md item 17)."""
+    parents = {"daily": [], "tiers": [], "join": ["daily", "tiers"]}
+    con = ledger.connect(tmp_path / "pond.db")
+    old = DuckCore("sales@1", con, parents, version="1.0.1")
+    assert sorted(old.begin_run(T0, T0)) == ["daily", "tiers"]
+    old.ripple_completed("daily", T0)
+    assert old.ripple_completed("tiers", T0) == ["join"]
+    old.ripple_failed("join", T0)  # no retries: the Run fails at join
+
+    new = DuckCore("sales@1", con, parents, version="1.0.2")
+    assert sorted(new.begin_run(T0, T0)) == ["daily", "tiers"]  # every Ripple, as the Catchment expects
+
+    again = DuckCore("sales@1", con, parents, version="1.0.2")  # a restart of the same version resumes
+    assert sorted(again.begin_run(T0, T0)) == ["daily", "tiers"]  # interrupted mid-run: launched again
+    again.ripple_completed("daily", T0)
+    assert again.ripple_completed("tiers", T0) == ["join"]
+    restarted = DuckCore("sales@1", con, parents, version="1.0.2")
+    assert restarted.begin_run(T0, T0) == ["join"]  # only what this version hasn't completed
+
+
+@pytest.mark.timeout(5)
+def test_a_ledger_from_before_versions_were_recorded_still_resumes(tmp_path):
+    parents = {"a": [], "b": ["a"]}
+    con = ledger.connect(tmp_path / "pond.db")
+    old = DuckCore("p@1", con, parents)  # no version, as before the column existed
+    old.begin_run(T0, T0)
+    old.ripple_completed("a", T0)
+    assert DuckCore("p@1", con, parents, version="1.0.0").begin_run(T0, T0) == ["b"]

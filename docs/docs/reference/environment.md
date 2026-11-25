@@ -30,6 +30,7 @@ Run only one Catchment process against a state directory, and only one Catchment
 | Variable | Default | Description |
 |---|---|---|
 | `DUCKSTRING_COMPACT_THRESHOLD` | `268435456` (256 MiB) | The size a merge Trickle's change log must reach before it's folded into the table's base. Can be set per table with `merge_table(compact_threshold=...)`. |
+| `DUCKSTRING_TIER_FILES` | `64` | How many consecutive small files of a Trickle table are combined into one. Each Run that changes a Trickle table publishes a file, and combining them keeps the file count from growing with the number of Runs. Combined files are capped at the table's compaction threshold. Below `2`, files are never combined. |
 | `DUCKSTRING_S3_ENDPOINT` | none | An S3-compatible endpoint, such as MinIO, for the data root. Equivalent to `?endpoint=` on the URI. |
 | `DUCKSTRING_VOLUMES` | `auto` | How a `/Volumes/...` data root or state backup is reached: `mount` uses it as a local path, `api` goes through the Databricks Files API. `auto` uses the Files API where `/Volumes` isn't mounted, as in a Databricks App. |
 
@@ -51,7 +52,7 @@ These are read wherever Duckstring reaches a Databricks workspace: a `/Volumes/.
 | Variable | Default | Description |
 |---|---|---|
 | `DUCKSTRING_MEMORY_LIMIT` | DuckDB's default | Memory limit for each Duck's DuckDB, such as `12GB`. Also sets the size at which the Flock takes over a computation. Set it to about 80% of the Duck's memory. On the Catchment's own machine, the memory slots below set each Duck's limit instead. |
-| `DUCKSTRING_RUN_SLOTS` | `4` | How many Ducks run at once on the Catchment's own machine. Each gets an equal share of the memory budget as its DuckDB limit; a Pond that would run beyond them waits, in the order it became ready, and shows as waiting for memory. A Duck running alone may take the spare slots, keeping one for another Pond. A Run that runs out of memory is retried once with every slot, without counting against its failure budget. A running [App](pond_toml.md#app) sets its `[pond] memory` aside from the budget first, and the slots share the rest. `0` turns this off, leaving each Duck to size itself. |
+| `DUCKSTRING_RUN_SLOTS` | `4` | How many Ducks run at once on the Catchment's own machine. Each gets an equal share of the memory budget as its DuckDB limit; a Pond that would run beyond them waits, in the order it became ready, and shows as waiting for memory. A Duck running alone may take the spare slots, keeping one for another Pond. A Run that runs out of memory is retried once with every slot, without counting against its failure budget. Each running [App](pond_toml.md#app) instance sets its `[pond] memory` aside from the budget first, as does the Catchment's own PostgreSQL for [Records](../guides/records_and_media.md#memory-and-connections), and the slots share the rest. `0` turns this off, leaving each Duck to size itself. |
 | `DUCKSTRING_MEMORY_BUDGET` | 80% of the machine's memory (or the container's limit, when lower), less 2 GB | The memory the slots divide, such as `100GB`, less what running [Apps](pond_toml.md#app) set aside. |
 | `DUCKSTRING_IDLE_MEMORY` | `256MB` | The DuckDB limit a Duck drops to when it has nothing running, which releases what it was caching. |
 | `DUCKSTRING_DUCK_LAUNCHER` | built in | `module:Class` of a custom launcher that replaces how Ducks are started. |
@@ -64,6 +65,10 @@ These are read wherever Duckstring reaches a Databricks workspace: a `/Volumes/.
 | Variable | Default | Description |
 |---|---|---|
 | `DUCKSTRING_APP_START_TIMEOUT` | `60` | Seconds a request that starts an [App](pond_toml.md#app) waits for the App to be ready. Past that, the request gets a `503`, and the start counts as a failed one. |
+| `DUCKSTRING_APP_REMOTE_START_TIMEOUT` | `900` | Seconds an instance on other compute has to become ready, since its machine boots and builds the App's environment first. See [Scaling Apps](../guides/scaling_apps.md). |
+| `DUCKSTRING_APP_SCALER` | built in | `module:Class` of a scaler that replaces how the Catchment decides an App's number of instances. See [Scaling Apps](../guides/scaling_apps.md#a-scaler-of-your-own). |
+| `DUCKSTRING_PG_BIN` | found | The `bin` directory of the PostgreSQL server the Catchment runs for [Records](../guides/records_and_media.md). Without it, the server [`duckstring install`](cli/install.md) recorded is used, else one in the usual places for Homebrew, Postgres.app and the PostgreSQL packages, else one on `PATH`. |
+| `DUCKSTRING_RECORDS_TLS_CERT`, `DUCKSTRING_RECORDS_TLS_KEY` | none | A certificate and key for the Catchment's own PostgreSQL to serve TLS with, when [`catchment records --tls-cert`](cli/catchment.md#records) isn't set. |
 
 The variables an App's own process receives, such as `PORT` and `DUCKSTRING_APP_PATH`, are listed under [`[app]`](pond_toml.md#app).
 

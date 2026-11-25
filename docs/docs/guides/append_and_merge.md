@@ -28,12 +28,14 @@ from duckstring import ripple
 @ripple
 def ingest(pond):
     batch = pond.con.sql("SELECT ... AS order_id, ... AS product_id, ... AS quantity FROM ...")
-    pond.append_table("order_line", batch, pk="order_id", fail_on_conflict=False)
+    pond.append_table("order_line", batch, pk="order_id")
 ```
 
 Each row is stamped with the run's freshness. Downstream, `pond.read_delta("orders.order_line")` returns just the rows added since that Pond last ran.
 
-`pk` is optional. With it, `append_table` checks by default that the key is unique within the batch and not already in the table, and raises before writing if it isn't. Here the order IDs are unique by construction, so `fail_on_conflict=False` skips the check, which saves reading the table's history on every run.
+By default `append_table` doesn't read the table: every row is appended as given, which keeps each run's write in proportion to its batch. `pk` is optional, and declaring one is a promise that the key is unique. Here the order IDs are unique by construction.
+
+If a batch can repeat rows the table already has, `on_conflict="keep_prior"` drops any row whose key is already there, and `on_conflict="fail"` raises before writing when one arrives with different values. Both read the table's history on every run. Without `pk`, the whole row is the key.
 
 A retried run, or one replayed after a crash, has the same freshness, and its rows replace the ones it wrote before rather than duplicating them.
 
@@ -128,6 +130,19 @@ def announce_large_orders(pond):
 `delta.zset` holds the changed rows with a `_duckstring_d` weight: `+1` for a row added and `-1` for a row removed, with an update appearing as both. `delta.upserts` is the rows present after the change, and `delta.deletes` the keys removed.
 
 Always handle `is_full`. It's `True` on the Pond's first run, after a [rebuild](../reference/cli/control.md#rebuild), when the Pond has fallen behind the Source's retained history, and whenever the Source is a plain table that was republished. In those cases the delta is the whole current table, and treating it as a batch of new rows would double-count.
+
+A Ripple that keeps an output up to date from changes has one more case: an output that is new while the Pond isn't, because the Ripple was added to a Pond that has already run, or the table was deleted to refill it. Its delta is then only the latest window. Check [`pond.is_new`](../reference/python/trickle_io.md#is_new) beside `is_full`, and fill the output from the Source's full state:
+
+```python
+@ripple
+def large_orders(pond):
+    delta = pond.read_delta("orders.order_line")
+    if delta.is_full or pond.is_new("large_orders"):
+        pond.merge_table("large_orders", pond.read_table("orders.order_line").filter("quantity >= 50"),
+                         pk="order_id")
+    else:
+        pond.apply_zset("large_orders", delta.zset.filter("quantity >= 50"), pk="order_id")
+```
 
 ## Skipping downstream work
 

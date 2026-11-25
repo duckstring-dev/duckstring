@@ -93,14 +93,29 @@ class Epoch:
         """The current number of rows in ``ref``, without scanning a merge table's base."""
         return io.count_current(self.con, ref)
 
+    def is_new(self, name: str) -> bool:
+        """Whether the table ``name`` holds nothing written before this run: it doesn't exist, or this run is
+        a replay of the one that first wrote it. Hand-written incremental code fills a new output from its
+        sources' full state, as for a full read::
+
+            d = t.read_delta("orders")
+            if d.is_full or t.is_new("totals"):
+                t.merge_table("totals", <from t.read_table("orders")>, pk="id")
+            else:
+                t.apply_zset("totals", <from d.zset>, pk="id")
+
+        See :func:`trickle.io.is_new`."""
+        return io.is_new(self.con, name, self.f)
+
     # ─── writing ───────────────────────────────────────────────────────────────
 
-    def append_table(self, name: str, relation, *, pk=None, fail_on_conflict=True, retain_t=None,
-                     retain_n=None) -> bool:
+    def append_table(self, name: str, relation, *, pk=None, on_conflict="skip_check", log_drops=True,
+                     retain_t=None, retain_n=None, **removed) -> bool:
         """Append ``relation`` to the append Trickle ``name`` at this run's epoch. See
         :func:`trickle.io.append_table`. Returns whether rows were appended."""
-        return io.append_table(self.con, name, relation, self.f, io.normalize_pk(pk),
-                               fail_on_conflict=fail_on_conflict, retain_t=retain_t, retain_n=retain_n)
+        io.reject_removed(removed, f"append_table('{name}')", {True: "fail", False: "skip_check"})
+        return io.append_table(self.con, name, relation, self.f, io.normalize_pk(pk), on_conflict=on_conflict,
+                               log_drops=log_drops, retain_t=retain_t, retain_n=retain_n)
 
     def merge_table(self, name: str, relation, *, pk, retain_t=None, retain_n=None, **kw) -> bool:
         """Merge the complete current state ``relation`` into the merge Trickle ``name``, recording only what

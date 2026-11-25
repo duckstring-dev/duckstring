@@ -171,7 +171,7 @@ Each run of `catalog` adds its changes to the log, stamped with the run's freshn
 
 ### Main Table
 
-The main table holds the current state, one row per primary key for a merge. It's what `read_table` returns and what the data viewer shows.
+The main table holds the current state, one row per primary key for a merge. It's what `read_table` returns and what a query of the table reads. The data viewer shows a merge table newest first: the rows written by recent runs, then the rest, with rows a later write replaced shown in grey and deleted rows in red. An append table is shown newest run first.
 
 <figure class="ds-figure">
   <img src="/img/docs/trickle-viewer.webp" alt="The data viewer on catalog.product, a merge Trickle, with the Freshness bounds outlined and freshness and updates columns" width="1368" height="520" />

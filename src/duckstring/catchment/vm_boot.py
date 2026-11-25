@@ -44,7 +44,8 @@ def boot_script(args: list[str], pip_spec: str) -> str:
         f"export HOME=/root UV_CACHE_DIR={REMOTE_ROOT}/uv-cache",
         "curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh",
         "uv venv /opt/duckstring --python 3.12",
-        f"uv pip install --python /opt/duckstring/bin/python {shlex.quote(pip_spec)}",
+        # Several specs, space-separated, install together (a wheel and a pre-release dependency's wheel).
+        "uv pip install --python /opt/duckstring/bin/python " + " ".join(shlex.quote(p) for p in pip_spec.split()),
         f"{run} && shutdown -h now",
     ]
     return "\n".join(lines) + "\n"

@@ -688,7 +688,7 @@ def test_builder_held_ripple_dimension_stays_incremental(tmp_path, monkeypatch):
 
     def run(f, pf):
         p = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"fact": 1, "dim": 1}, f=f, previous_f=pf,
-                 source_f={"fact": f.isoformat(), "dim": f.isoformat()})
+                 read_positions={"fact": f.isoformat(), "dim": f.isoformat()})
         (p.trickle("fact.f", p=1.0).join(p.trickle("dim.m", p=1.0), on="code")
            .select("s0.id, s0.code, s1.label").merge("o", pk="id"))
         publish(snk, snk_dir, f=f)
@@ -822,13 +822,13 @@ def test_builder_chain_matches_comprehensive_join(tmp_path):
 # ─── builder .append() terminal (monotonic transforms + conflict handling) ───────
 
 
-def _enriched(tmp_path, snk, snk_dir, f, pf, *, fail_on_conflict=True, log_drops=True, dim_p=0.3):
+def _enriched(tmp_path, snk, snk_dir, f, pf, *, on_conflict="fail", log_drops=True, dim_p=0.3):
     """Append-enrich the order-line spine with the product dim (one output row per order_id). ``dim_p=1.0``
     forces the incremental path (skips the change-fraction threshold) so a tiny dim drives a Z-set delta."""
     pond = Pond("e", "1.0.0", snk, root=tmp_path, source_majors={"sales": 1, "catalog": 1}, f=f, previous_f=pf)
     (pond.trickle("sales.order_line").join(pond.trickle("catalog.product", p=dim_p), on="product_id")
          .select("s0.order_id, s0.product_id, s0.qty, s1.price")
-         .append("enriched", pk="order_id", fail_on_conflict=fail_on_conflict, log_drops=log_drops))
+         .append("enriched", pk="order_id", on_conflict=on_conflict, log_drops=log_drops))
     publish(snk, snk_dir, f=f)
 
 
@@ -843,7 +843,7 @@ def test_builder_append_drops_conflicts_and_logs(tmp_path):
 
     # p1 reprice, forced down the incremental path (dim_p=1.0) so ΔO carries the retraction explicitly.
     pr([("p1", 50), ("p2", 9)], ts(2))
-    _enriched(tmp_path, snk, snk_dir, ts(2), ts(1), fail_on_conflict=False, dim_p=1.0)
+    _enriched(tmp_path, snk, snk_dir, ts(2), ts(1), on_conflict="keep_prior", dim_p=1.0)
     # Order 10 stays frozen at its original enriched price (the past is not rewritten).
     assert rows(snk, snk_dir, "enriched", "order_id, price") == [(10, 5), (11, 9)]
     # Both dropped rows are logged to the __droplog companion: the retraction (−1, old price 5) and the
@@ -860,7 +860,7 @@ def test_builder_append_drops_conflicts_and_logs(tmp_path):
 
     # A new order still flows through while the conflict is tolerated.
     ol([(10, "p1", 2), (11, "p2", 1), (12, "p2", 4)], ts(3))
-    _enriched(tmp_path, snk, snk_dir, ts(3), ts(2), fail_on_conflict=False)
+    _enriched(tmp_path, snk, snk_dir, ts(3), ts(2), on_conflict="keep_prior")
     assert rows(snk, snk_dir, "enriched", "order_id, price") == [(10, 5), (11, 9), (12, 9)]
     snk.close()
 
@@ -878,7 +878,7 @@ def test_builder_append_spine_pk_fast_path_same_f_replay(tmp_path):
     snk_dir = tmp_path / "ponds" / "e" / "m1" / "data"
 
     def run(f, pf):
-        _enriched(tmp_path, snk, snk_dir, f, pf, fail_on_conflict=False, log_drops=False)
+        _enriched(tmp_path, snk, snk_dir, f, pf, on_conflict="keep_prior", log_drops=False)
 
     ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
     pr([("p1", 5), ("p2", 9)], ts(1))
@@ -1406,3 +1406,55 @@ def test_merge_retention_keeps_the_published_state(reg, tmp_path):
         T.merge_table(reg, "dim", _state(reg, sorted(state.items())), ts(h), ("id",), retain_n=1)
         publish(reg, snk, f=ts(h))
         assert rows(reg, snk, "dim", "id, v") == sorted(state.items()), f"run {h}"
+
+
+def test_pond_append_table_takes_on_conflict(tmp_path):
+    """plans/showcase-fixes.md item 19: the Pond handle passes on_conflict and log_drops through, and the removed
+    fail_on_conflict names its replacement."""
+    con = duckdb.connect(str(tmp_path / "r.duckdb"))
+    p = Pond("o", "1.0.0", con, root=tmp_path, f=ts(1))
+    p.append_table("t", con.sql("SELECT 1 AS id, 'a' AS v"), pk="id")
+    p2 = Pond("o", "1.0.0", con, root=tmp_path, f=ts(2), previous_f=ts(1))
+    assert not p2.append_table("t", con.sql("SELECT 1 AS id, 'b' AS v"), pk="id", on_conflict="keep_prior")
+    assert con.sql('SELECT id, v, _duckstring_d FROM "t__droplog"').fetchall() == [(1, "b", 1)]
+    with pytest.raises(TypeError, match="fail_on_conflict=True is now on_conflict='fail'"):
+        p2.append_table("t", con.sql("SELECT 2 AS id, 'c' AS v"), pk="id", fail_on_conflict=True)
+
+
+def test_is_new_lets_hand_written_code_fill_an_output_added_to_a_running_pond(tmp_path):
+    """``pond.is_new``: a hand-written incremental Ripple added to a Pond that has run gets only the window,
+    so it checks its output and fills it from the Source's full state. Through the Pond handle with its own
+    data dir, so a merge bootstrap is staged (``stage_base``), and its retry at the same ``f`` is still new."""
+    f_con, f_dir = _producer(tmp_path, "fact")
+    snk = duckdb.connect(str(tmp_path / "snk.duckdb"))
+    snk_dir = tmp_path / "ponds" / "o" / "m1" / "data"
+
+    def order(f, qty):
+        T.append_table(f_con, "f", f_con.sql(f"SELECT {f.hour} AS id, {qty} AS qty"), f, ("id",))
+        publish(f_con, f_dir, f=f)
+
+    def big(f, pf):
+        p = Pond("o", "1.0.0", snk, root=tmp_path, source_majors={"fact": 1}, f=f, previous_f=pf,
+                 own_data_dir=snk_dir)
+        d = p.read_delta("fact.f")
+        if d.is_full or p.is_new("big"):
+            p.merge_table("big", p.read_table("fact.f").filter("qty >= 2"), pk="id")
+        else:
+            p.apply_zset("big", d.zset.filter("qty >= 2"), pk="id")
+        return p
+
+    for h, qty in ((1, 5), (2, 1), (3, 7)):
+        order(ts(h), qty)
+    p = big(ts(3), ts(2))  # added at run 3: the window holds order 3 alone
+    assert p.is_new("big")  # a retry of this run would fill it again
+    with pytest.raises(ValueError, match="own tables"):
+        p.is_new("fact.f")
+    publish(snk, snk_dir, f=ts(3))
+    assert rows(snk, snk_dir, "big", "id, qty") == [(1, 5), (3, 7)]
+
+    order(ts(4), 9)
+    p = big(ts(4), ts(3))
+    assert not p.is_new("big")
+    publish(snk, snk_dir, f=ts(4))
+    assert rows(snk, snk_dir, "big", "id, qty") == [(1, 5), (3, 7), (4, 9)]
+    snk.close()

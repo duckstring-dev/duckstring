@@ -258,6 +258,13 @@ DUCKSTRING_FLOCK_BIGQUERY_LOCATION=australia-southeast1
 
 Give the scratch prefix a lifecycle rule as well, since everything in it is temporary. DuckDB stays the authority on results: BigQuery only gets constructs measured to agree with DuckDB, and every result is cast to DuckDB's schema and checked against a local recompute of a sample before it's used. [Offloading Large Recomputes](offloading_large_recomputes.md#bigquery) has the detail.
 
+## Apps on cloud compute
+
+An App whose `pond.toml` sets `duck` runs its extra instances on the named compute, as a Pond's Ducks do (see [Scaling Apps](scaling_apps.md#instances-on-other-compute)). Run them on Compute Engine, with a pool such as `heavy` above or `dedicated`: instances connect to Records directly, and Cloud Run jobs started by the Catchment can't reach a private address. They also need their App's data:
+
+- Media in Cloud Storage, set before any App keeps Media: `duckstring catchment media --use gs://acme-lake/media`.
+- Records they can reach. A Catchment on Cloud Run serves only its HTTP port, so keep Records in Cloud SQL there, with a private IP the Compute Engine VMs reach. A Catchment on a VM can serve its own: set `duckstring catchment records --listen 0.0.0.0 --host` to the VM's internal address, and add a firewall rule letting the Duck VMs in on the Records port, which `duckstring catchment records` shows.
+
 ## Where data goes
 
 A Pond running on the Catchment's own machine publishes locally first, then copies its output to the bucket in the background. A Pond on a cloud Duck publishes straight to the bucket. A Pond downstream on a different machine waits until its Source's output has reached the bucket, never reading output that isn't there yet.

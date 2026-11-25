@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 
 from ...keys import pond_key
 from .. import auth
@@ -82,3 +83,121 @@ async def app_restart(name: str, request: Request, major: int | None = None, ver
     request.app.state.app_restarts.add(task)  # held until done, so the task isn't collected mid-start
     task.add_done_callback(request.app.state.app_restarts.discard)
     return {"ok": True}
+
+
+# ─── scaling (plans/app-scaling.md) ──────────────────────────────────────────────
+
+
+def _supervisor(request: Request):
+    supervisor = getattr(request.app.state, "app_supervisor", None)
+    if supervisor is None:
+        raise HTTPException(status_code=503, detail="this Catchment isn't running Apps")
+    return supervisor
+
+
+@router.get("/ponds/{name}/app/scale", dependencies=[auth.read])
+def app_scale(name: str, request: Request, major: int | None = None, version: str | None = None):
+    """The App line's scaling: its effective settings and where each comes from, the running instances with what
+    the scaler sees of them, recent decisions, and the pressure it is held under at its maximum."""
+    pond, mj = _app_line(request, name, major, version)
+    return {"pond": f"{pond}@{mj}", **_supervisor(request).scale_status(pond_key(pond, mj))}
+
+
+class _ScaleBody(BaseModel):
+    min_instances: int | None = None
+    max_instances: int | None = None
+    concurrency: int | None = None
+    connections: int | None = None
+    requests: float | None = None
+    cpu: float | None = None
+    memory: float | None = None
+    load: float | None = None
+    to: int | None = None  # set the count now
+    hold_s: float | None = None  # with `to`: keep it exactly for this long
+    release: bool = False  # drop a pinned count
+    clear: bool = False  # drop every override
+
+
+@router.post("/ponds/{name}/app/scale", dependencies=[auth.full])
+async def set_app_scale(name: str, body: _ScaleBody, request: Request, major: int | None = None,
+                        version: str | None = None):
+    """Override the App line's scaling settings (kept across redeploys), set its instance count now (``to``), or
+    clear the overrides."""
+    from datetime import datetime, timedelta, timezone
+
+    pond, mj = _app_line(request, name, major, version)
+    key = pond_key(pond, mj)
+    driver, supervisor = _driver(request), _supervisor(request)
+    fields = body.model_dump(exclude={"to", "hold_s", "release", "clear"})
+    for k in ("requests", "cpu", "memory", "load"):
+        if fields[k] is not None and not 0 < fields[k] <= 1:
+            raise HTTPException(status_code=422, detail=f"{k}: expected a share above 0, at most 1 (0.7 is 70%)")
+    for k in ("min_instances", "max_instances", "concurrency", "connections"):
+        if fields[k] is not None and fields[k] < (1 if k in ("max_instances", "concurrency") else 0):
+            raise HTTPException(status_code=422, detail=f"{k}: too low")
+    try:
+        if body.clear or any(v is not None for v in fields.values()):
+            await asyncio.to_thread(driver.set_app_scale, key, body.clear, **fields)
+        if body.release:
+            await asyncio.to_thread(driver.set_app_hold, key, None)
+        if body.to is not None:
+            sc = driver.app_view(key)["scaling"]
+            if not 0 <= body.to <= sc["instances"]:
+                raise ValueError(f"to: expected 0 to the maximum ({sc['instances']})")
+            until = (datetime.now(timezone.utc) + timedelta(seconds=body.hold_s)).isoformat() if body.hold_s else None
+            await asyncio.to_thread(driver.set_app_hold, key, body.to, until)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    supervisor._kick(key)
+    return {"pond": f"{pond}@{mj}", **supervisor.scale_status(key)}
+
+
+@router.post("/ponds/{name}/app/instances/{instance}/drain", dependencies=[auth.full])
+def drain_app_instance(name: str, instance: int, request: Request, major: int | None = None,
+                       version: str | None = None):
+    """Send no new sessions to one instance; it stops once its work is done."""
+    pond, mj = _app_line(request, name, major, version)
+    if not _supervisor(request).drain(pond_key(pond, mj), instance):
+        raise HTTPException(status_code=404, detail=f"no running instance {instance} of '{pond}@{mj}'")
+    return {"draining": instance}
+
+
+# ─── Records and Media across majors (app_lifecycle.py) ───────────────────────────
+
+
+@router.post("/ponds/{name}/app/migrate", dependencies=[auth.full])
+async def app_migrate(name: str, request: Request, major: int | None = None, version: str | None = None):
+    """Migrate a trial line again from the live one: its Records and Media copied afresh (what was written there is
+    discarded) and its ``[app] migrate`` run over them."""
+    from ..app_lifecycle import LifecycleError
+
+    app_name, app_major = _app_line(request, name, major, version)
+    driver = _driver(request)
+    try:
+        await asyncio.to_thread(driver.lifecycle.rerun_trial, request.app.state.app_supervisor, app_name, app_major)
+    except LifecycleError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    return {"migrated": f"{app_name}@{app_major}", "from": driver.lifecycle.live_major(app_name)}
+
+
+class _PurgeBody(BaseModel):
+    confirm: str | None = None  # the Catchment's name
+
+
+@router.post("/app-data/{name}/{major}/purge", dependencies=[auth.full])
+async def app_purge(name: str, major: int, body: _PurgeBody, request: Request):
+    """Delete an App line's Records and Media for good (a retired line's, a trial's, or a removed App's). Refused
+    for a deployed live line. Needs the Catchment's name as confirmation."""
+    from ..app_lifecycle import LifecycleError
+    from .catchment import _catchment_name
+
+    driver = _driver(request)
+    expected = _catchment_name(driver.db)
+    if (body.confirm or "") != expected:
+        raise HTTPException(status_code=422, detail=f"purging deletes {name}@{major}'s Records and Media for "
+                                                    f"good; confirm with the Catchment's name: {expected!r}")
+    try:
+        await asyncio.to_thread(driver.lifecycle.purge, request.app.state.app_supervisor, name, major)
+    except LifecycleError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    return {"purged": f"{name}@{major}"}

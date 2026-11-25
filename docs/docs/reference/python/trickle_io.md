@@ -23,23 +23,27 @@ All three write methods stamp rows with `pond.f`, are safe to repeat at the same
 ### `append_table`
 
 ```python
-pond.append_table(name, relation, *, pk=None, fail_on_conflict=True, retain_t=None, retain_n=None) -> bool
+pond.append_table(name, relation, *, pk=None, on_conflict="skip_check", log_drops=True, retain_t=None,
+                  retain_n=None) -> bool
 ```
 
-Appends the rows of `relation` to the append Trickle `name`, creating it on first use. Rows are only ever added; nothing is compared with existing rows unless `pk` is set.
+Appends the rows of `relation` to the append Trickle `name`, creating it on first use. Rows are only ever added. By default nothing is compared with the rows already in the table.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `name` | `str` | | Table name. |
 | `relation` | `duckdb.DuckDBPyRelation` | | The new rows. |
-| `pk` | `str` or list of `str` | `None` | The table's primary key. Recorded for downstream consumers and the data viewer, and checked when `fail_on_conflict` is true. |
-| `fail_on_conflict` | `bool` | `True` | With `pk` set, check that the key is unique within `relation` and not already in the table's history, and raise before writing if not. `False` skips the check. Has no effect when `pk` is unset. |
+| `pk` | `str` or list of `str` | `None` | The table's primary key. Recorded for downstream consumers and the data viewer, and used by `on_conflict`. Without one, `on_conflict` treats the whole row as the key. |
+| `on_conflict` | `str` | `"skip_check"` | What happens to a row whose key is already in the table. `"skip_check"` reads nothing and appends every row; a declared `pk` is your promise that it's unique. `"keep_prior"` drops the row. `"fail"` raises before writing if its values differ. |
+| `log_drops` | `bool` | `True` | Under `"keep_prior"`, record dropped rows whose values differ from the table's in a published `{name}__droplog` table (your columns plus `_duckstring_d` and `_duckstring_f`). |
 | `retain_t` | `timedelta` | `None` | Drop history rows stamped earlier than `f - retain_t`. |
 | `retain_n` | `int` | `None` | Keep only the rows from the newest `retain_n` runs. |
 
 **Returns** `True` if any rows were appended. An empty relation, or a replay of rows already written at this `f`, returns `False`.
 
-**Raises** `DeltaError` on a primary key conflict, or if a `pk` column is missing from `relation`.
+Under `"keep_prior"` and `"fail"`, a row identical to one already in the table is skipped, identical rows within `relation` are written once, and two rows in `relation` with the same key and different values raise. Both read the table's history on every run.
+
+**Raises** `DeltaError` on a conflict under `"fail"`, on a key with different values within `relation` under `"keep_prior"` or `"fail"`, or if a `pk` column is missing from `relation`.
 
 Retention bounds how far back a consumer can read changes. A consumer that falls behind the retained history reads the whole table instead, so retention never affects correctness.
 
@@ -47,7 +51,7 @@ Retention bounds how far back a consumer can read changes. A consumer that falls
 @ripple
 def ingest(pond):
     batch = pond.con.sql("SELECT ... AS order_id, ... FROM ...")
-    pond.append_table("order_line", batch, pk="order_id", fail_on_conflict=False)
+    pond.append_table("order_line", batch, pk="order_id")
 ```
 
 ### `merge_table`
@@ -114,11 +118,11 @@ Only use this when you have computed the change correctly yourself. A wrong weig
 pond.read_delta(ref) -> Delta
 ```
 
-Returns the changes to a Source table over this run's window, `(pond.previous_f, pond.f]`.
+Returns the changes to a table since the previous run: a Source's, or one of this Pond's own that a parent Ripple writes. For a Source, that is what it published after what the previous run read of it, up to what it had published when this run started. For one of this Pond's own tables, it is the window `(pond.previous_f, pond.f]`.
 
 | Parameter | Type | Description |
 |---|---|---|
-| `ref` | `str` | `"source.table"`. |
+| `ref` | `str` | `"source.table"`, or `"table"` for one of this Pond's own tables. An own table's changes are read from the Pond's working database, including those the writing Ripple made this run. |
 
 What the delta contains depends on the Source table:
 
@@ -126,10 +130,32 @@ What the delta contains depends on the Source table:
 |---|---|
 | Append Trickle | The rows appended in the window, all weighted `+1`. |
 | Merge Trickle | The change-log rows in the window, consolidated: weights of identical rows are summed and zero-weight rows dropped, so several changes to one row collapse to the net change. A window that only inserted new keys has nothing to consolidate and is read as it is (`insert_only=True`). |
-| Plain table (`write_table`) | If the version this run reads was published after `previous_f`, the whole table weighted `+1` with `is_full=True`. Otherwise an empty delta. A Source run that found the table unchanged with `if_changed=True` publishes no new version, so the delta stays empty (see [Change detection](pond.md#change-detection)). |
-| Any table, on this Pond's first run or when `previous_f` is older than the Source's retained history | The whole table weighted `+1`, with `is_full=True`. |
+| Plain table (`write_table`) | If the version this run reads is newer than the one the previous run read, the whole table weighted `+1` with `is_full=True`. Otherwise an empty delta. A Source run that found the table unchanged with `if_changed=True` publishes no new version, so the delta stays empty (see [Change detection](pond.md#change-detection)). |
+| Any table, on this Pond's first run or when the previous run's read is older than the Source's retained history | The whole table weighted `+1`, with `is_full=True`. |
 
-**Raises** `ValueError` if `ref` has no Source prefix, and `MissingSourceAsset` if the table isn't published.
+**Raises** `MissingSourceAsset` if a Source table isn't published, and `RippleOrderError` for an own table whose writer isn't among this Ripple's parents (as for [`read_table`](pond.md#read_table)) or that hasn't been written yet. An own plain table reads as the whole table, with `is_full=True`.
+
+### `is_new`
+
+```python
+pond.is_new(name) -> bool
+```
+
+Returns whether one of this Pond's own tables holds nothing written before this run: it doesn't exist, or this run is a retry of the run that first wrote it.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `name` | `str` | One of this Pond's own tables. |
+
+| Table | New when |
+|---|---|
+| Merge Trickle | It doesn't exist, or holds only its first write, made at this run's freshness. |
+| Append Trickle | It doesn't exist, or holds no rows stamped before this run's freshness. |
+| Plain table | It doesn't exist. |
+
+A window of changes holds only the latest ones. When an output is new (a Ripple added to a Pond that has already run, or a table deleted to refill it), code that applies changes by hand should fill it from its Sources' full state, as it does for a full read. The builder makes this check for its own output.
+
+**Raises** `ValueError` for a Source's table.
 
 ## `Delta`
 
@@ -154,8 +180,8 @@ The result of `read_delta`.
 @ripple
 def restock(pond):
     delta = pond.read_delta("orders.order_line")
-    if delta.is_full:
-        ...                             # rebuild everything from delta.zset
+    if delta.is_full or pond.is_new("restock"):
+        ...                             # rebuild everything from pond.read_table("orders.order_line")
     elif not delta.is_empty():
         ...                             # apply delta.upserts and delta.deletes
 ```

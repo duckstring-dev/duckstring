@@ -140,7 +140,7 @@ gs://bucket/prefix
 abfss://exports@acmedata.dfs.core.windows.net/duckstring?client_id=${secret:SP_ID}&tenant_id=${secret:SP_TENANT}&client_secret=${secret:SP_SECRET}
 ```
 
-`s3://`, `gs://`, `az://` and `abfss://` write `{prefix}/{table}.parquet`, or with `--mode append`, the table's per-run files. They take the parameters of a [data root](#data-root-uris) in the same store, and credentials can also be `${secret:NAME}` references, since Spouts deliver from the Catchment. A `gs://` Spout that writes whole tables can use HMAC keys alone; one with `--mode append` also needs Google credentials. `s3://` also takes:
+`s3://`, `gs://`, `az://` and `abfss://` write `{prefix}/{table}.parquet`, or with `--mode append`, the table's per-run files, older ones combined into larger files as they accumulate (each row keeps its `_duckstring_f`). They take the parameters of a [data root](#data-root-uris) in the same store, and credentials can also be `${secret:NAME}` references, since Spouts deliver from the Catchment. A `gs://` Spout that writes whole tables can use HMAC keys alone; one with `--mode append` also needs Google credentials. `s3://` also takes:
 
 | Parameter | Description |
 |---|---|
@@ -176,6 +176,14 @@ postgres://loader:${secret:PG_PASSWORD}@db.internal:5432/analytics?schema=duckst
 ```
 
 A standard libpq connection URI (`postgresql://` also works). Tables are created in the `schema` query parameter (default `public`), and delivery progress is recorded in a `_duckstring_egress` table there. Any table can be delivered: a merge Trickle by its primary key, an append Trickle's new rows, and a plain table replaced whole.
+
+### `records:`
+
+```text
+records:
+```
+
+The Catchment's own [Records](../guides/records_and_media.md). Tables are created in a schema named after the Pond's line, `{name}_v{major}`, readable by every App. Delivery is as for `postgres://`. The Pond's name must be lower-case letters, digits and underscores, starting with a letter or underscore, and `mode=changes` isn't available.
 
 ### `ducklake:`
 

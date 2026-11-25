@@ -147,6 +147,8 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                 sources_changed=core.sources_changed_for(start_f),  # backs pond.sources_changed()
                 skip_sink=(lambda f=start_f: core.mark_skipped(f)),  # backs pond.skip() for this Run
                 change_sink=core.change_sink(start_f, name),  # backs pond.changed() and held tables
+                # where the previous Run read each Source up to: this Run reads its changes from there
+                previous_positions=core.previous_positions_for(start_f, name),
             )
 
     poller = threading.Thread(target=_poll_loop, daemon=True)
@@ -165,6 +167,9 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                 if kind == "job":
                     if data.get("kind") == "shutdown":
                         shutdown_requested = True
+                        if data.get("replaced"):
+                            core.replaced = True  # a failing Ripple gives up its Run rather than retry old code
+                            core.release_unstarted(_now())  # the Runs it hasn't started go to the new version
                         # Going idle: trim the overwrite versions no Sink still reads, so a large table
                         # isn't left on disk twice. Only when no Run is in flight (its publish prunes).
                         if "retain_from" in data and core.idle():
@@ -183,14 +188,21 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                         if "orphan_minutes" in data:  # the Catchment's setting (see _orphan_after_s)
                             orphan_after = _orphan_s(data["orphan_minutes"])
                         prev = data.get("previous_f")
-                        # What the Catchment says each Source has published when this Run started: it pins
-                        # the Run's overwrite Source reads to those versions, and rejects a stale local
-                        # publish (registry.resolve_data_dir). Plus the retention bound for this line's own
-                        # overwrite versions, applied at its publish.
+                        # Each Source's read position (what it had published when this Run started): every
+                        # read of it is at that point, and a stale local publish is rejected
+                        # (registry.resolve_data_dir). Plus the retention bound for this line's own overwrite
+                        # versions, applied at its publish.
                         executor.begin_run_inputs(
-                            datetime.fromisoformat(data["f"]), data.get("source_f"),
+                            datetime.fromisoformat(data["f"]), data.get("read_positions"),
                             _retain_from(data), force=data.get("force", False), flock=data.get("flock"),
+                            puddles=data.get("puddles"),
                         )
+                        executor.exact_ints = bool(data.get("exact_ints"))  # the line's: see RunInputs
+                        if data.get("app_data"):  # where Apps' Records and Media are (app_data.py)
+                            from ..app_data import set_locations
+
+                            set_locations(data["app_data"].get("records"), data["app_data"].get("media"),
+                                          client.app_data_transport(), records_ca=data["app_data"].get("records_ca"))
                         if data.get("rebuild"):
                             executor.wipe()  # cold reset: the run rebuilds from scratch
                         _launch(core.begin_run(
@@ -201,6 +213,8 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                             contract=data.get("contract"),
                             sources_changed=data.get("sources_changed", True),
                             rebuild=bool(data.get("rebuild")),
+                            read_positions=data.get("read_positions"),
+                            previous_positions=data.get("previous_positions"),
                         ))
                 elif kind == "done":
                     inflight -= 1
@@ -210,7 +224,9 @@ def serve(core: DuckCore, executor: RippleExecutor, client: CatchmentClient,
                     _launch(core.ripple_completed(
                         name, _now(), started_at=started, finished_at=finished,
                         # the publish keeps the published copy of what the Run held unchanged
-                        export=lambda f, contract: executor.export(f, contract, held=core.held_for(f)),
+                        export=lambda f, contract: executor.export(
+                            f, contract, held=core.held_for(f), previous_f=core.previous_f_for(f),
+                            previous_positions=core.previous_positions_for(f)),
                         lineage=lineage,
                     ))
                     # A run just completed (locally published) → kick off/queue the async persist for it.
@@ -367,7 +383,7 @@ def main() -> None:
     major_dir = pond_major_dir(root, args.pond, args.major)
     major_dir.mkdir(parents=True, exist_ok=True)
     con = ledger.connect(major_dir / "pond.db")
-    core = DuckCore(f"{args.pond}@{args.major}", con, parents)  # name@major label for log lines
+    core = DuckCore(f"{args.pond}@{args.major}", con, parents, version=args.version)  # name@major for log lines
 
     # A dbt-mode Pond runs its models via dbt, not @ripple functions — a different executor entirely.
     from ..core import read_pond_toml
@@ -379,6 +395,8 @@ def main() -> None:
     else:
         executor = RippleExecutor(args.pond, args.major, args.version, args.source_path, root,
                                   data_root=data_root, persist_root=persist_root)
+    # Puddle Sources are read through this Catchment, which forwards to the one they live on (catchment/puddles.py).
+    executor.puddle_transport = client.puddle_transport()
     serve(core, executor, client)
 
 

@@ -71,5 +71,93 @@ class CatchmentClient:
         except Exception:
             return False
 
+    def puddle_transport(self) -> "PuddleTransport":
+        return PuddleTransport(self)
+
+    def app_data_transport(self) -> "AppDataTransport":
+        return AppDataTransport(self)
+
     def close(self) -> None:
         self._client.close()
+
+
+class PuddleTransport:
+    """A :class:`~duckstring.remote_source.RemoteSource` transport for a Puddle Source: its queries and table list go
+    to this Duck's Catchment, which forwards them to the Catchment the Puddles read (catchment/puddles.py). NOT
+    best-effort: a Ripple's read fails with the reason."""
+
+    def __init__(self, client: CatchmentClient):
+        self.client = client
+
+    def _url(self, what: str) -> str:
+        c = self.client
+        return f"{c.base}/api/duck/{c.pond}/{c.major}/puddle/{what}"
+
+    def _check(self, resp):
+        from ..remote_source import RemoteQueryError
+
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:  # noqa: BLE001
+                detail = resp.text[:300]
+            raise RemoteQueryError(resp.status_code, str(detail))
+        return resp
+
+    def query(self, payload: dict) -> tuple[bytes, str | None]:
+        resp = self._check(self.client._client.post(self._url("query"), json=payload,
+                                                    timeout=httpx.Timeout(300.0, connect=10.0)))
+        return resp.content, resp.headers.get("x-duckstring-warning")
+
+    def get(self, path: str, params: dict | None = None):
+        return self._check(self.client._client.post(self._url("get"), json={"path": path, "params": params or {}},
+                                                    timeout=httpx.Timeout(60.0, connect=10.0))).json()
+
+
+class AppDataTransport:
+    """Apps' Records and Media through this Duck's Catchment, for a Duck on another machine
+    (plans/records-and-media.md): the Catchment's PostgreSQL listens on its own machine and Media may be on its disk.
+    NOT best-effort: a Ripple's read fails with the reason."""
+
+    def __init__(self, client: CatchmentClient):
+        self.client = client
+
+    def _base(self) -> str:
+        c = self.client
+        return f"{c.base}/api/duck/{c.pond}/{c.major}"
+
+    @staticmethod
+    def _check(resp):
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:  # noqa: BLE001
+                detail = resp.text[:300]
+            raise RuntimeError(f"the Catchment refused the read ({resp.status_code}): {detail}")
+        return resp
+
+    def records_parquet(self, schema: str, table: str, out) -> None:
+        """Write one Records table, as Parquet, to the path ``out``."""
+        with self.client._client.stream("POST", f"{self._base()}/records/read", json={"schema": schema, "table": table},
+                                        timeout=httpx.Timeout(600.0, connect=10.0)) as resp:
+            if resp.status_code >= 400:
+                resp.read()
+                self._check(resp)
+            with open(out, "wb") as f:
+                for chunk in resp.iter_bytes():
+                    f.write(chunk)
+
+    def media_list(self, app: str, major: int, prefix: str = "") -> list[dict]:
+        return self._check(self.client._client.get(f"{self._base()}/media/{app}/{major}", params={"prefix": prefix},
+                                                   timeout=httpx.Timeout(60.0, connect=10.0))).json()["files"]
+
+    def media_file(self, app: str, major: int, path: str, out) -> None:
+        """Write one Media file to the path ``out``."""
+        with self.client._client.stream("GET", f"{self._base()}/media/{app}/{major}/file", params={"path": path},
+                                        timeout=httpx.Timeout(600.0, connect=10.0)) as resp:
+            if resp.status_code >= 400:
+                resp.read()
+                self._check(resp)
+            with open(out, "wb") as f:
+                for chunk in resp.iter_bytes():
+                    f.write(chunk)

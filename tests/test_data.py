@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from trickle.io import first_row
 
 from duckstring.cli import app
@@ -423,45 +424,49 @@ def _rows_by_id(page):
     return idx, {r[idx["id"]]: r for r in page["rows"]}
 
 
-def test_merge_consolidation_full_state(catchment_client, tmp_path, monkeypatch):
-    _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
-    page = catchment_client.post(
-        "/api/query/page", json={"pond": "p", "table": "priced", "trickle": "merge", "pk": ["id"], "limit": 100}
-    ).json()
-    idx, by = _rows_by_id(page)
-    assert {"_duckstring_active", "_duckstring_updates", "_duckstring_f"} <= set(page["columns"])
-    # id1 updated (active), id3 inserted (active), id4 untouched since bootstrap (active), id2 deleted.
-    assert [by[i][idx["_duckstring_active"]] for i in (1, 3, 4)] == [1, 1, 1]
-    assert by[2][idx["_duckstring_active"]] == -1
-    assert by[2][idx["name"]] == "b"  # the deleted row's last image survives for display
-    # The bootstrap create counts as a +1 write event: id1 was created (f1) then updated (f2) → 2; id4 was
-    # only created → 1.
-    assert by[1][idx["_duckstring_updates"]] == 2 and by[4][idx["_duckstring_updates"]] == 1
-    # id4 carries its own last-write freshness (the bootstrap, f1) — every row has a freshness from the main.
-    assert by[4][idx["_duckstring_f"]] is not None and by[4][idx["_duckstring_f"]].startswith("2026-01-01")
-
-
-def test_merge_default_is_scan_order_all_rows(catchment_client, tmp_path, monkeypatch):
-    # The default page is the cheap scan order (no ORDER BY) so the LIMIT pushes down to the Parquet scan —
-    # a big merge main is never force-sorted per page. Every current + deleted row is still present.
-    _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
-    page = catchment_client.post(
-        "/api/query/page", json={"pond": "p", "table": "priced", "trickle": "merge", "pk": ["id"], "limit": 100}
-    ).json()
+def _view(page):
     idx = {c: i for i, c in enumerate(page["columns"])}
-    assert {r[idx["id"]] for r in page["rows"]} == {1, 2, 3, 4}  # all rows (incl. the deleted id2), any order
+    return [(r[idx["id"]], r[idx["price"]], r[idx["_duckstring_active"]]) for r in page["rows"]], idx
+
+
+def test_merge_default_view_is_its_log_newest_first(catchment_client, tmp_path, monkeypatch):
+    # The images written since the base come first (newest first), then the base, each marked current (1),
+    # replaced by a later write (0) or deleted (-1). Nothing consolidates the change log.
+    _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
+    page = catchment_client.post(
+        "/api/query/page", json={"pond": "p", "table": "priced", "trickle": "merge", "pk": ["id"], "limit": 100}
+    ).json()
+    rows, idx = _view(page)
+    assert "_duckstring_updates" not in idx and "_duckstring_f" in idx
+    assert sorted(rows[:2]) == [(1, 15.0, 1), (3, 30.0, 1)]  # the f2 images
+    assert sorted(rows[2:]) == [(1, 10.0, 0), (2, 20.0, -1), (4, 40.0, 1)]  # the f1 bootstrap, in the base
+    by_id = {r[idx["id"]]: r for r in page["rows"][2:]}
+    assert by_id[4][idx["_duckstring_f"]].startswith("2026-01-01")  # a base row keeps its own write time
+    assert page["rows"][0][idx["_duckstring_f"]].startswith("2026-01-02")
+
+
+def test_merge_log_pages_across_its_regions(catchment_client, tmp_path, monkeypatch):
+    _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
+    body = {"pond": "p", "table": "priced", "trickle": "merge", "pk": ["id"]}
+    whole, _ = _view(catchment_client.post("/api/query/page", json={**body, "limit": 100}).json())
+    pages = []
+    for offset in range(0, 6, 2):
+        got = catchment_client.post("/api/query/page", json={**body, "limit": 2, "offset": offset}).json()
+        pages += _view(got)[0]
+        assert got["has_more"] == (offset + 2 < 5)
+    assert pages == whole
 
 
 def test_merge_order_by_pk_is_opt_in(catchment_client, tmp_path, monkeypatch):
-    # PK order is available on demand (clicking the header) — only then is the full-scan sort paid.
+    # A sort orders the whole log (only then is the full-scan sort paid); each row keeps its status.
     _seed_merge_trickle(tmp_path, "p", "priced", ("id",), _MERGE_RUNS)
     page = catchment_client.post(
         "/api/query/page",
         json={"pond": "p", "table": "priced", "trickle": "merge", "pk": ["id"], "order_by": "id", "limit": 100},
     ).json()
-    idx = {c: i for i, c in enumerate(page["columns"])}
-    ids = [r[idx["id"]] for r in page["rows"]]
-    assert ids == [1, 2, 3, 4]  # ascending PK (incl. the deleted id2)
+    rows, _ = _view(page)
+    assert [r[0] for r in rows] == [1, 1, 2, 3, 4]
+    assert sorted(rows) == [(1, 10.0, 0), (1, 15.0, 1), (2, 20.0, -1), (3, 30.0, 1), (4, 40.0, 1)]
 
 
 def test_merge_order_by_freshness(catchment_client, tmp_path, monkeypatch):
@@ -494,7 +499,7 @@ def test_merge_count_matches(catchment_client, tmp_path, monkeypatch):
     n = catchment_client.post(
         "/api/query/count", json={"pond": "p", "table": "priced", "trickle": "merge", "pk": ["id"]}
     ).json()["count"]
-    assert n == 4  # 3 active + 1 deleted
+    assert n == 5  # the two images since the base, and the base's three rows
 
 
 def test_merge_count_fast_path_matches_checkpointed(catchment_client, tmp_path, monkeypatch):
@@ -554,9 +559,25 @@ def _seed_append_trickle(root, pond, table, runs):
     for f_iso, rows in runs:
         con.execute("CREATE OR REPLACE TEMP TABLE _e(id BIGINT, amt DOUBLE)")
         con.executemany("INSERT INTO _e VALUES (?, ?)", rows)
-        trickle_io.append_table(con, table, con.sql("SELECT * FROM _e"), datetime.fromisoformat(f_iso), ("id",))
-    ParquetDataPlane().export(con, data_dir)
+        f = datetime.fromisoformat(f_iso)
+        trickle_io.append_table(con, table, con.sql("SELECT * FROM _e"), f, ("id",))
+        ParquetDataPlane().export(con, data_dir, f=f)  # one part per Run, as a Duck publishes
     con.close()
+
+
+def test_append_default_view_is_newest_run_first(catchment_client, tmp_path, monkeypatch):
+    _seed_append_trickle(tmp_path, "p", "events", [
+        ("2026-01-01T00:00:00+00:00", [(1, 1.0), (2, 2.0)]),
+        ("2026-01-02T00:00:00+00:00", [(3, 3.0)]),
+        ("2026-01-03T00:00:00+00:00", [(4, 4.0), (5, 5.0)]),
+    ])
+    body = {"pond": "p", "table": "events", "trickle": "append", "pk": ["id"]}
+    page = catchment_client.post("/api/query/page", json={**body, "limit": 100}).json()
+    idx = {c: i for i, c in enumerate(page["columns"])}
+    assert [r[idx["id"]] for r in page["rows"]] == [4, 5, 3, 1, 2]
+    assert catchment_client.post("/api/query/count", json=body).json()["count"] == 5
+    second = catchment_client.post("/api/query/page", json={**body, "limit": 2, "offset": 2}).json()
+    assert [r[idx["id"]] for r in second["rows"]] == [3, 1]
 
 
 def test_append_window_filters_by_freshness(catchment_client, tmp_path, monkeypatch):
@@ -609,3 +630,156 @@ def test_merge_history_create_and_delete_events(catchment_client, tmp_path, monk
     i2 = idx_of(h2)
     assert [r[i2["_duckstring_event"]] for r in h2["rows"]] == ["delete", "create"]
     assert h2["rows"][0][i2["name"]] == "b"
+
+
+@pytest.mark.timeout(60)
+def test_merge_log_view_agrees_with_the_current_state_through_folds_and_compactions(catchment_client, tmp_path,
+                                                                                     monkeypatch):
+    """Random updates, deletes and re-adds, with a tiny chunk threshold so the main folds bands and compacts its
+    base: the log view's current rows are exactly the reconstructed state, each change image appears once, and the
+    count is the rows it pages through."""
+    import random
+    from datetime import datetime, timedelta, timezone
+
+    import duckdb
+
+    from duckstring import trickle_io
+    from duckstring.dataplane import ParquetDataPlane
+
+    monkeypatch.setenv("DUCKSTRING_COMPACT_THRESHOLD", "1024")  # with a 2,000-row base: bands, then a hot tail
+    data_dir = tmp_path / "ponds" / "p" / "m1" / "data"
+    data_dir.mkdir(parents=True)
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    dp, rng = ParquetDataPlane(), random.Random(7)
+    state = {i: rng.randint(0, 9) for i in range(2000)}
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for run in range(40):
+        for k in rng.sample(range(2020), 12):
+            if k in state and rng.random() < 0.3:
+                del state[k]
+            else:
+                state[k] = rng.randint(0, 9)
+        con.execute("CREATE OR REPLACE TEMP TABLE _s(id BIGINT, v BIGINT)")
+        con.executemany("INSERT INTO _s VALUES (?, ?)", sorted(state.items()))
+        f = t0 + timedelta(hours=run)
+        trickle_io.merge_table(con, "t", con.sql("SELECT * FROM _s"), f, ("id",))
+        dp.export(con, data_dir, f=f)
+    con.close()
+
+    body = {"pond": "p", "table": "t", "trickle": "merge", "pk": ["id"]}
+    count = catchment_client.post("/api/query/count", json=body).json()["count"]
+    rows = []
+    for offset in range(0, count + 500, 500):
+        page = catchment_client.post("/api/query/page", json={**body, "limit": 500, "offset": offset}).json()
+        idx = {c: i for i, c in enumerate(page["columns"])}
+        rows += [(r[idx["id"]], r[idx["v"]], r[idx["_duckstring_f"]], r[idx["_duckstring_active"]]) for r in page["rows"]]
+    assert len(rows) == count
+    assert len(set(rows)) == len(rows)  # no image shown twice (a hot union overlapping a band, say)
+    assert sorted((k, v) for k, v, _, a in rows if a == 1) == sorted(state.items())
+    gone = {k for k, _, _, a in rows if a == -1}
+    assert gone and not gone & set(state)
+    assert (data_dir / "t__band").is_dir() and any((data_dir / "t__changelog").iterdir())  # every region
+    assert rows[0][2] == max(r[2] for r in rows)  # newest first
+
+
+def test_pages_are_placed_by_file_and_read_only_the_files_they_fall_in(catchment_client, tmp_path, monkeypatch):
+    """A page is placed from each file's row count, so a page deep in a large table reads only its own file or two.
+    Paged in odd steps across many files, with and without a freshness window, it gives the rows the whole read
+    gives, in the same order."""
+    runs = [(f"2026-01-01T{h:02d}:00:00+00:00", [(h * 100 + i, float(i)) for i in range(h % 4 + 1)]) for h in range(12)]
+    _seed_append_trickle(tmp_path, "p", "events", runs)
+    for window in ({}, {"f_lo": "2026-01-01T03:00:00+00:00", "f_hi": "2026-01-01T08:00:00+00:00"}):
+        body = {"pond": "p", "table": "events", "trickle": "append", "pk": ["id"], **window}
+        whole = catchment_client.post("/api/query/page", json={**body, "limit": 1000}).json()
+        idx = whole["columns"].index("id")
+        ids = [r[idx] for r in whole["rows"]]
+        hours = [i // 100 for i in ids]
+        assert hours == sorted(hours, reverse=True)
+        expected = [h for h in range(12) if not window or 3 <= h <= 8]
+        assert sorted(set(hours), reverse=True) == sorted(expected, reverse=True)
+        assert catchment_client.post("/api/query/count", json=body).json()["count"] == len(ids)
+        paged = []
+        for offset in range(0, len(ids) + 3, 3):
+            page = catchment_client.post("/api/query/page", json={**body, "limit": 3, "offset": offset}).json()
+            paged += [r[idx] for r in page["rows"]]
+        assert paged == ids
+
+
+def _seed_reports(root, pond, rows_by_run):
+    """Publish a Pond's Run reports as the export does: per Run ``f``, rows ``(pond_key, run_f, {reports})``."""
+    import json
+    from datetime import datetime
+
+    import duckdb
+
+    from duckstring import trickle_io
+    from duckstring.dataplane import ParquetDataPlane
+    from duckstring.reports import PK, REPORTS_TABLE
+
+    data_dir = root / "ponds" / pond / "m1" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    for f_iso, rows in rows_by_run:
+        f = datetime.fromisoformat(f_iso)
+        con.execute("CREATE OR REPLACE TEMP TABLE _r(pond VARCHAR, run_f TIMESTAMPTZ, reports VARCHAR)")
+        con.executemany("INSERT INTO _r VALUES (?, ?, ?)", [(k, datetime.fromisoformat(rf), json.dumps(r))
+                                                            for k, rf, r in rows])
+        trickle_io.append_table(con, REPORTS_TABLE, con.sql("SELECT * FROM _r"), f, PK, on_conflict="keep_prior")
+        ParquetDataPlane().export(con, data_dir, f=f)
+    con.close()
+
+
+def test_a_ponds_run_reports_are_served(catchment_client, tmp_path, monkeypatch):
+    """pond.report() facts were readable only by querying a hidden table by name. The reports route lists a Pond's
+    own reports, newest first, and gives one Run's own report with the upstream ones it read."""
+    t1, t2 = "2026-01-01T01:00:00+00:00", "2026-01-01T02:00:00+00:00"
+    _seed_reports(tmp_path, "p", [
+        (t1, [("p@1", t1, {"rows": 10}), ("src@1", "2026-01-01T00:30:00+00:00", {"newest_hour": "00:00"})]),
+        (t2, [("p@1", t2, {"rows": 12}), ("src@1", "2026-01-01T01:30:00+00:00", {"newest_hour": "01:00"}),
+              ("src@1", "2026-01-01T01:45:00+00:00", {"newest_hour": "01:00"})]),
+    ])
+    out = catchment_client.get("/api/ponds/p/reports").json()
+    assert [(r["f"][:19], r["reports"]) for r in out["reports"]] == [
+        ("2026-01-01T02:00:00", {"rows": 12}), ("2026-01-01T01:00:00", {"rows": 10})]
+    run = catchment_client.get("/api/ponds/p/reports", params={"f": t2}).json()
+    assert run["reports"] == {"rows": 12}
+    assert [(u["pond"], u["f"][:19], u["reports"]) for u in run["upstream"]] == [
+        ("src@1", "2026-01-01T01:30:00", {"newest_hour": "01:00"}),
+        ("src@1", "2026-01-01T01:45:00", {"newest_hour": "01:00"})]
+    assert catchment_client.get("/api/ponds/p/reports", params={"limit": 1}).json()["reports"][0]["reports"] == {"rows": 12}
+    # A Pond that never reported: nothing, not an error.
+    _seed_append_trickle(tmp_path, "q", "events", [("2026-01-01T00:00:00+00:00", [(1, 1.0)])])
+    assert catchment_client.get("/api/ponds/q/reports").json() == {"reports": []}
+    assert catchment_client.get("/api/ponds/q/reports", params={"f": t1}).json() == {
+        "f": t1, "reports": None, "upstream": []}
+
+
+@pytest.mark.timeout(30)
+def test_a_running_query_can_be_cancelled(catchment_client, tmp_path, monkeypatch):
+    """A long query in the data viewer can be stopped: its requests carry an id, and cancelling the id interrupts
+    the DuckDB query, which answers at once with an error saying so. A cancel that arrives first stops it too."""
+    import threading
+    import time
+
+    slow = "SELECT sum(range * 2) FROM range(10000000000000)"
+    for qid, path, body in (("q1", "/api/query/page", {"limit": 10}), ("q2", "/api/query/count", {})):
+        out = {}
+
+        def run(path=path, body=body, out=out, qid=qid):
+            out["r"] = catchment_client.post(path, json={"pond": "p", "sql": slow, "query_id": qid, **body})
+
+        t = threading.Thread(target=run)
+        started = time.time()
+        t.start()
+        time.sleep(0.5)
+        assert t.is_alive(), out.get("r") and out["r"].text  # still running
+        assert catchment_client.post("/api/query/cancel", json={"query_id": qid}).json() == {"cancelled": True}
+        t.join(10)
+        assert not t.is_alive() and time.time() - started < 8
+        assert out["r"].status_code == 400 and "cancelled" in out["r"].json()["detail"].lower()
+    # Cancelled before it started (the count and the page race the cancel): refused on arrival.
+    assert catchment_client.post("/api/query/cancel", json={"query_id": "q3"}).json() == {"cancelled": False}
+    r = catchment_client.post("/api/query/page", json={"pond": "p", "sql": slow, "query_id": "q3", "limit": 10})
+    assert r.status_code == 400 and "cancelled" in r.json()["detail"].lower()

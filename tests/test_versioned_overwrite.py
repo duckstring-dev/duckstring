@@ -47,7 +47,7 @@ def _sink(root, pin, f=None, previous_f=None):
     from duckstring.core import Pond
 
     return Pond(name="snk", version="1.0.0", con=duckdb.connect(), root=root, source_majors={"src": 1},
-                source_f={"src": pin.isoformat()} if pin else {}, f=f or pin, previous_f=previous_f)
+                read_positions={"src": pin.isoformat()} if pin else {}, f=f or pin, previous_f=previous_f)
 
 
 def _versions(root, table="a"):
@@ -281,10 +281,10 @@ def test_the_executor_keeps_inputs_per_run(tmp_path):
         ex.begin_run_inputs(F1, {"up": F1.isoformat()}, F1)
         ex.begin_run_inputs(F2, {"up": F2.isoformat()}, None)
         ex.begin_run_inputs(F1, {"up": F3.isoformat()}, F3)  # a re-dispatch: the first pins stand
-        assert ex.source_f_for(F1) == {"up": F1.isoformat()}
-        assert ex.source_f_for(F2) == {"up": F2.isoformat()}
+        assert ex.read_positions_for(F1) == {"up": F1.isoformat()}
+        assert ex.read_positions_for(F2) == {"up": F2.isoformat()}
         ex.begin_run_inputs(F1, {"up": F3.isoformat()}, F3, force=True)
-        assert ex.source_f_for(F1) == {"up": F3.isoformat()}
+        assert ex.read_positions_for(F1) == {"up": F3.isoformat()}
         assert ex.take_retain_from(F2) is None
         assert ex.take_retain_from(F2) is KEEP_ALL  # consumed
         ex.begin_run_inputs(F3, {}, KEEP_ALL)
@@ -339,8 +339,8 @@ def test_a_sink_runs_pins_are_recorded_and_bound_its_sources_retention(tmp_path)
         ss.start_f = ss.end_f = ss.changed_f = ss.persisted_f = F1
     driver.refresh_now("rpt@1", at=F1)  # ask for the Source's freshness: it has it
     job = next(j for j in driver.jobs["rpt@1"] if j["kind"] == "begin_run")
-    assert job["source_f"] == {"sales": F1.isoformat()}
-    row = first_row(driver.db.execute("SELECT f, source_pins FROM pond_run WHERE status = 'running'"))
+    assert job["read_positions"] == {"sales": F1.isoformat()}
+    row = first_row(driver.db.execute("SELECT f, read_positions FROM pond_run WHERE status = 'running'"))
     assert json.loads(row[1]) == {"sales": F1.isoformat()}
 
     # The Source publishes F2 while the Sink runs: its versions must reach back to the Sink's pin.
@@ -354,7 +354,7 @@ def test_a_sink_runs_pins_are_recorded_and_bound_its_sources_retention(tmp_path)
     with driver.lock:
         driver._dispatch_begin_run("rpt@1", datetime.fromisoformat(row[0]), F3)
     job = next(j for j in driver.jobs["rpt@1"] if j["kind"] == "begin_run")
-    assert job["source_f"] == {"sales": F1.isoformat()}
+    assert job["read_positions"] == {"sales": F1.isoformat()}
     # The Source's own begin_run job carries the bound.
     assert "retain_from" in job
 

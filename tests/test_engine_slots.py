@@ -372,6 +372,20 @@ def _app(d, pid: str) -> None:
 
 
 @pytest.mark.timeout(10)
+def test_an_app_with_no_source_runs_only_when_asked():
+    # Its standing Wake follows its Sources; with none it used to ask for `now` on every tick, recording a
+    # no-change Run each second.
+    d = Driver(*graph([("W", 1, [])]))
+    _app(d, "W")
+    d.state.pond_states["W"].standing_wake = True
+    d.run(5)
+    assert d.state.pond_states["W"].runs_completed == 0
+    d.refresh("W")
+    d.run(1)
+    assert d.state.pond_states["W"].runs_completed == 1
+
+
+@pytest.mark.timeout(10)
 def test_an_app_takes_no_slot():
     d = Checked(graph([("A", 3, []), ("W", 1, ["A"])]), 1)
     _app(d, "W")

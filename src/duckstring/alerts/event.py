@@ -18,7 +18,7 @@ KNOWN_EVENTS = ("failure", "contract", "spout", "recovery", "freshness")
 # an ops Slack channel subscribed to `all` must never receive raw catalog events. `openlineage` carries
 # a standard OpenLineage RunEvent per completed Pond Run (plans/lineage.md Phase 4); the webhook
 # notifier posts it verbatim (no Slack `text` wrapper).
-EXPLICIT_EVENTS = ("openlineage",)
+EXPLICIT_EVENTS = ("openlineage", "app_scale")
 
 # Default severity per kind (a channel filters by kind, not severity — this is only for the payload/label).
 SEVERITY = {

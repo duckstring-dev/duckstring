@@ -115,7 +115,7 @@ def test_a_join_on_changed_keys_reaches_a_sources_base_scan(tmp_path):
     p.publish(F2)
     con = duckdb.connect()
     sink = Pond("snk", "1.0.0", con, tmp_path, source_majors={"src": 1}, f=F2, previous_f=F1,
-                source_f={"src": F2.isoformat()})
+                read_positions={"src": F2.isoformat()})
     sink.read_table("src.m").create_view("src_m")
     con.execute("CREATE TABLE keys AS SELECT * FROM (VALUES (3), (500)) t(g)")
     out = tmp_path / "profile.json"

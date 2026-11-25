@@ -9,6 +9,7 @@ export const STATUS_COLOR: Record<string, string> = {
   running: THEME_RUNNING,
   failed: THEME_DANGER,
   killed: THEME_DANGER,
+  superseded: '#71717a', // a later Run did its work: neither a failure nor a success of its own
 };
 
 // Fixed column widths (px) so the duration lands at the same x on Pond and (indented) Ripple rows.

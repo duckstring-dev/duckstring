@@ -24,7 +24,7 @@ from fastapi import APIRouter, Form, Request, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
-from ..app import base_path
+from ..app import base_path, static_file
 from ..keys import pond_key
 from . import auth
 from .app_supervisor import AppUnavailable
@@ -32,6 +32,7 @@ from .app_supervisor import AppUnavailable
 router = APIRouter()
 
 COOKIE = "duckstring_key"
+LOAD_HEADER = "x-duckstring-load"  # an App reporting its own load (plans/app-scaling.md), stripped here
 # Hop-by-hop headers (RFC 9110 §7.6.1), never forwarded either way.
 _HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te",
         "trailer", "transfer-encoding", "upgrade"}
@@ -48,16 +49,55 @@ def _bearer(conn) -> str:
 
 def _allowed(conn) -> tuple[bool, bool]:
     """(may this request reach an App, did it authenticate with a bearer token to strip)."""
+    level, strip = _level(conn)
+    return level is not None, strip
+
+
+def _level(conn):
+    """(the access level the request signed in with, None when it didn't; whether to strip its bearer token). An
+    open Catchment grants full."""
     state = conn.app.state
     con = getattr(state, "db", None)
     api_key = getattr(state, "api_key", None)
     if not auth.auth_configured(con, api_key):
-        return True, False
+        return auth.Level.FULL, False
     bearer = _bearer(conn)
-    if bearer and auth.level_for_key(con, api_key, bearer) is not None:
-        return True, True
+    if bearer:
+        level = auth.level_for_key(con, api_key, bearer)
+        if level is not None:
+            return level, True
     cookie = conn.cookies.get(COOKIE, "")
-    return bool(cookie) and auth.level_for_key(con, api_key, cookie) is not None, False
+    return (auth.level_for_key(con, api_key, cookie) if cookie else None), False
+
+
+def _line_gate(conn, name: str, major: int, below: str) -> Response | None:
+    """An App with Records or Media (app_lifecycle.py): while it is being promoted it answers 503; a retired line
+    redirects to the live one; a trial is for Manage access only. None: carry on."""
+    driver = conn.app.state.driver
+    lifecycle = getattr(driver, "lifecycle", None)
+    if lifecycle is None:
+        return None
+    if lifecycle.cutting_over(name):
+        return Response("the App is being upgraded; try again in a moment\n", status_code=503,
+                        media_type="text/plain", headers={"Retry-After": str(5)})
+    moves = getattr(driver, "moves", None)
+    view = driver.app_view(pond_key(name, major))
+    if moves is not None and view is not None and moves.blocks(view["app"]):
+        return Response("the App's data is being moved; try again in a moment\n", status_code=503,
+                        media_type="text/plain", headers={"Retry-After": str(15)})
+    state = lifecycle.state(name, major)
+    if state == "retired":
+        live = driver.app_major(name)
+        if live is None or live == major:
+            return Response("this major of the App is retired\n", status_code=410, media_type="text/plain")
+        query = f"?{conn.url.query}" if getattr(conn, "url", None) is not None and conn.url.query else ""
+        return RedirectResponse(f"/apps/{quote(name)}/v{live}/{below}{query}", status_code=307)
+    if state == "trial":
+        level, _ = _level(conn)
+        if level is None or level < auth.Level.FULL:
+            return Response("this major of the App is a trial: Manage access only\n", status_code=403,
+                            media_type="text/plain")
+    return None
 
 
 _SIGN_IN = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -130,6 +170,9 @@ async def forward(request: Request, name: str, rest: str):
         return RedirectResponse(f"/apps/{quote(name)}/v{served}/{rest}{query}", status_code=307)
     if below is None:  # /apps/{name}/v1 → /apps/{name}/v1/
         return RedirectResponse(f"/apps/{quote(name)}/v{major}/", status_code=307)
+    gated = _line_gate(request, name, major, below)
+    if gated is not None:
+        return gated
     key = pond_key(name, major)
     view = driver.app_view(key)
     if view is None:
@@ -137,11 +180,13 @@ async def forward(request: Request, name: str, rest: str):
 
     static = _static_file(request.app.state.root, view, below)
     if static is not None and request.method in ("GET", "HEAD"):
-        return FileResponse(static)
+        # Revalidate every time (by ETag or Last-Modified): a redeploy changes the files under the same paths, and
+        # without a header a cache in front of the Catchment applied its own lifetime.
+        return FileResponse(static, headers={"Cache-Control": "no-cache"})
 
     supervisor = request.app.state.app_supervisor
     try:
-        inst = await supervisor.acquire(key)
+        inst = await supervisor.acquire(key, prefer=_sticky(request, view))
     except AppUnavailable as exc:
         return _unavailable(exc)
     await _run_taps(driver, key)
@@ -159,13 +204,7 @@ def _static_file(root: Path, view: dict, below: str) -> Path | None:
     static = view["app"].get("static")
     if not static:
         return None
-    base = (Path(root) / view["source_path"] / static).resolve()
-    target = (base / below).resolve()
-    if target != base and base not in target.parents:
-        return None
-    if target.is_dir():
-        target = target / "index.html"
-    return target if target.is_file() else None
+    return static_file(Path(root) / view["source_path"] / static, below)
 
 
 def _upstream_path(conn, view: dict) -> str:
@@ -229,9 +268,33 @@ async def _forward_http(request: Request, supervisor, inst, strip_bearer: bool, 
         finally:
             await finish()
 
+    load = resp.headers.get(LOAD_HEADER)
+    if load is not None:  # the App's own measure of how busy it is (plans/app-scaling.md)
+        try:
+            supervisor.report_load(inst, float(load))
+        except ValueError:
+            pass
     out = StreamingResponse(body(), status_code=resp.status_code, background=BackgroundTask(finish))
-    out.raw_headers = [(k.lower(), v) for k, v in resp.headers.raw if k.decode("latin-1").lower() not in _HOP]
+    out.raw_headers = [(k.lower(), v) for k, v in resp.headers.raw
+                       if k.decode("latin-1").lower() not in _HOP and k.decode("latin-1").lower() != LOAD_HEADER]
+    if view["scaling"]["instances"] > 1 and _sticky(request, view) != inst.id:
+        # Several instances: keep this browser on the one it reached, for an App that keeps sessions in memory.
+        path = base_path(view["name"], view["major"]) + "/"
+        out.raw_headers.append((b"set-cookie", f"{_sticky_name(view)}={inst.id}; Path={path}; HttpOnly; SameSite=Lax"
+                                .encode("latin-1")))
     return out
+
+
+def _sticky_name(view: dict) -> str:
+    return f"duckstring_instance_{view['name']}_v{view['major']}"
+
+
+def _sticky(conn, view: dict) -> int | None:
+    """The instance this browser was kept on (its cookie), when the App runs several."""
+    try:
+        return int(conn.cookies.get(_sticky_name(view), ""))
+    except ValueError:
+        return None
 
 
 # ─── WebSockets ────────────────────────────────────────────────────────────────
@@ -250,6 +313,9 @@ async def forward_websocket(websocket: WebSocket, name: str, rest: str):
     if major is None or below is None:  # a WebSocket can't follow a redirect
         await websocket.close(code=1008)
         return
+    if _line_gate(websocket, name, major, below) is not None:  # upgrading, retired or a trial: no socket
+        await websocket.close(code=1013)
+        return
     key = pond_key(name, major)
     view = driver.app_view(key)
     if view is None:
@@ -257,7 +323,7 @@ async def forward_websocket(websocket: WebSocket, name: str, rest: str):
         return
     supervisor = websocket.app.state.app_supervisor
     try:
-        inst = await supervisor.acquire(key)
+        inst = await supervisor.acquire(key, prefer=_sticky(websocket, view))
     except AppUnavailable:
         await websocket.close(code=1013)
         return
@@ -267,7 +333,7 @@ async def forward_websocket(websocket: WebSocket, name: str, rest: str):
     headers = [(k, v) for k, v in _request_headers(websocket, strip_bearer, base_path(name, major))
                if k.lower() != "host" and not k.lower().startswith("sec-websocket-")]
     subprotocols = websocket.scope.get("subprotocols") or None
-    ticket = supervisor.begin(inst)
+    ticket = supervisor.begin(inst, socket=True)
     last_tap = time.monotonic()
 
     async def on_message():
@@ -287,12 +353,12 @@ async def forward_websocket(websocket: WebSocket, name: str, rest: str):
             return
         async with upstream:
             await websocket.accept(subprotocol=upstream.subprotocol)
-            await _pump(websocket, upstream, on_message)
+            await _pump(websocket, upstream, on_message, lambda: supervisor.touch(inst, ticket))
     finally:
         supervisor.end(inst, ticket)
 
 
-async def _pump(websocket: WebSocket, upstream, on_message) -> None:
+async def _pump(websocket: WebSocket, upstream, on_message, on_app_message=None) -> None:
     from websockets.exceptions import ConnectionClosed
 
     async def client_to_app():
@@ -310,6 +376,8 @@ async def _pump(websocket: WebSocket, upstream, on_message) -> None:
     async def app_to_client():
         try:
             async for message in upstream:
+                if on_app_message is not None:
+                    on_app_message()
                 if isinstance(message, str):
                     await websocket.send_text(message)
                 else:

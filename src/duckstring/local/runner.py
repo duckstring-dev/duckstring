@@ -3,12 +3,19 @@ from __future__ import annotations
 import shutil
 import time
 import traceback as tb
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..changes import ChangeLedger
 from ..core import Pond, load_ripples, retry_on_lock
+from ..puddle_positions import TARGETS, choose_target, reach
+from ..reports import clear as clear_reports
+from ..reports import collect as collect_reports
 from .project import Project
+from .state import Hydrated, Position, SourceState, _iso, load_hydrated, load_position, position_path, save_position
+
+__all__ = ["TARGETS", "run_pond", "reset_runs", "RunResult", "RippleResult"]
 
 
 @dataclass
@@ -24,6 +31,10 @@ class RippleResult:
 class RunResult:
     seeded: bool
     ripples: list[RippleResult]
+    f: datetime | None = None
+    previous_f: datetime | None = None
+    stepped: list[str] = field(default_factory=list)  # Sources a step wrote this run
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -66,6 +77,19 @@ def _staging_dir(project: Project) -> Path:
     return project.out_dir / STAGING_DIR
 
 
+def _work_dir(project: Project, source: str) -> Path:
+    """A copied Puddle's working copy, once a step or a live definition has written to it: the hydrated copy
+    under ``puddles/ponds/`` stays as hydrated, so a baseline run goes back to it."""
+    return project.puddles_dir / "work" / source / "data"
+
+
+def reset_runs(project: Project) -> None:
+    """Forget where local runs got to: the position, step output and working copies (a new baseline)."""
+    shutil.rmtree(project.puddles_dir / "work", ignore_errors=True)
+    position_path(project).unlink(missing_ok=True)
+    _run_f_marker(project).unlink(missing_ok=True)
+
+
 def _export(project: Project, f=None, held=frozenset()) -> None:
     registry = project.out_dir / "registry.duckdb"
     if not registry.exists():
@@ -79,7 +103,8 @@ def _export(project: Project, f=None, held=frozenset()) -> None:
         con = duckdb.connect(str(registry))
         try:
             # Nothing else reads a local run's output while it publishes, so keep only the newest version.
-            get_data_plane().export(con, project.out_dir, mode="overwrite", f=f, retain_from=None, held=held)
+            get_data_plane().export(con, project.out_dir, mode="overwrite", f=f, retain_from=None, held=held,
+                                    exact_ints=True)  # as a line first deployed from 0.9 on publishes
         finally:
             con.close()
 
@@ -89,34 +114,235 @@ def _export(project: Project, f=None, held=frozenset()) -> None:
     commit_objects(_staging_dir(project), project.out_dir, f, held)
 
 
-def run_pond(project: Project, ripple: str | None = None, fresh: bool = False) -> RunResult:
-    """One local Pond Run against the hydrated puddles. A full run resets ``puddles/out/`` (seeding
-    it from a self-puddle unless ``fresh``) and executes every Ripple in topo order; ``ripple`` runs
-    a single Ripple against the existing registry. Stops at the first failure; exports whatever the
-    registry holds either way."""
+def _legacy_hydrated(project: Project) -> bool:
+    """Puddles hydrated before ``hydrated.json`` existed: Source snapshots on disk with no record."""
+    ponds = project.puddles_dir / "ponds"
+    return ponds.is_dir() and any((ponds / s / "data").is_dir() for s in project.sources)
+
+
+_LIVE = ("live", "derived")  # "derived": a live Source with a definition, as hydrated before 0.9
+
+
+class _Plan:
+    """Where a run reads each Source from and at what freshness."""
+
+    def __init__(self, project: Project, hydrated: Hydrated | None):
+        self.project = project
+        self.hydrated = hydrated
+        self.warnings: list[str] = []
+        self._locator = None
+
+    @property
+    def locator(self):
+        if self._locator is None:
+            from .sources import Locator
+
+            self._locator = Locator(self.project, self.hydrated.catchment if self.hydrated else None)
+        return self._locator
+
+    def store(self, source: str, state: SourceState):
+        """Where the run reads a copied ``source``: its working copy, else ``None`` for the hydrated copy (the flat
+        puddles layout). A live Source is read through :meth:`remote` instead."""
+        if state.mode in _LIVE:
+            return None
+        work = _work_dir(self.project, source)
+        if (work / "_trickle.json").exists():
+            from ..storage import LocalStorage
+
+            return LocalStorage(work)
+        return None
+
+    def remote(self, source: str, state: SourceState, at: datetime):
+        """A live Source on its Catchment, read through its definitions' queries (compiled now, so an edited
+        definition is used at once) or whole."""
+        from .hydrate import _Hydration, collect_definitions, select_definitions
+
+        defs = select_definitions(collect_definitions(self.project), source, state.set)
+        return _Hydration(self.project, self.hydrated.catchment, live=True, as_at=None).compile(source, defs, at)
+
+    def history_store(self, source: str):
+        """A copied Source's history: its hydrated copy."""
+        from ..storage import LocalStorage
+
+        return LocalStorage(self.project.snapshot_dir(source))
+
+    def recorded(self, source: str, state: SourceState) -> list[datetime]:
+        """The freshnesses the Source reached after its hydration point (its runs, passes included), oldest first."""
+        from .sources import change_points
+
+        f0 = datetime.fromisoformat(state.f) if state.f else None
+        if state.mode in _LIVE:
+            return self.locator.runs(source, after=f0)
+        if not state.history:
+            return []
+        if state.runs is not None:
+            return [datetime.fromisoformat(r) for r in state.runs]
+        return change_points(self.history_store(source), after=f0)
+
+    def changes(self, source: str, state: SourceState, after: datetime) -> list[datetime]:
+        from .sources import change_points
+
+        if state.mode in _LIVE:
+            return self.locator.changes(source, after=after)
+        if not state.history:
+            return []
+        return change_points(self.history_store(source), after=after)
+
+
+def _target(plan: _Plan, position: Position, target: str, to: datetime | None) -> datetime:
+    """The freshness an incremental run asks for: the next change, the Pond's next production run, the Sources'
+    most recent, or ``to`` (:func:`duckstring.puddle_positions.choose_target`)."""
+    prev = position.freshness
+    hydrated = plan.hydrated
+
+    def next_change(s: str) -> datetime | None:
+        c = plan.changes(s, hydrated.sources[s], prev)
+        return c[0] if c else None
+
+    def own_runs() -> list[datetime] | None:
+        runs = hydrated.own_runs
+        if hydrated.live:
+            try:
+                fresh = plan.locator.own_runs(after=prev)
+                runs = [_iso(f) for f in fresh] if fresh is not None else runs
+            except ValueError:  # the Catchment couldn't be asked
+                pass
+        return [datetime.fromisoformat(r) for r in runs] if runs is not None else None
+
+    def latest(s: str) -> datetime:
+        current = datetime.fromisoformat(position.sources[s]) if s in position.sources else prev
+        return max([current, *plan.recorded(s, hydrated.sources[s])])
+
+    return choose_target(
+        target, prev, datetime.now(timezone.utc), sources=hydrated.sources, next_change=next_change,
+        own_runs=own_runs, latest=latest, to=to,
+        no_runs="--next-run needs this Pond's production runs, and none were recorded: hydrate with --as-at or "
+                "--live while the Catchment it's deployed on is reachable")
+
+
+def _advance(project: Project, plan: _Plan, position: Position, target: datetime) -> tuple[dict, list[str]]:
+    """Bring every Source to ``target``, as a Refresh would: each is read as it stood at the moment the last of
+    them reached it. A copied Source whose history doesn't reach it steps (stamped at the target). Returns
+    ``({source: freshness}, stepped)``."""
+    from .hydrate import _Hydration, collect_definitions, select_definitions
+
+    hydrated = plan.hydrated
+    definitions = collect_definitions(project)
+    positions = {s: datetime.fromisoformat(position.sources.get(s) or st.f or position.f)
+                 for s, st in hydrated.sources.items()}
+    freshness, stepping = reach(
+        target, positions, {s: plan.recorded(s, st) for s, st in hydrated.sources.items()},
+        live={s for s, st in hydrated.sources.items() if st.mode in _LIVE},
+        steppable={s for s, st in hydrated.sources.items() if st.mode == "copied" and st.steps})
+
+    step = position.step + 1
+    runner = _Hydration(project, hydrated.catchment, live=False, as_at=None)
+    for source, state in hydrated.sources.items():
+        previous = datetime.fromisoformat(position.sources.get(source) or state.f or position.f)
+        new = freshness[source]
+        if source not in stepping:
+            continue  # a copied Source's history is in its copy; a live one is read at its position by the run
+        defs = select_definitions(definitions, source, state.set, step=True)
+        work = _work_dir(project, source)
+        if not (work / "_trickle.json").exists():
+            from .sources import link_tree
+
+            shutil.rmtree(work, ignore_errors=True)
+            if project.snapshot_dir(source).is_dir():
+                link_tree(project.snapshot_dir(source), work)
+        f0 = datetime.fromisoformat(state.f) if state.f else None
+        session = runner.evaluate(source, defs, work, new, previous_f=previous, read_at=new,
+                                  step=step if source in stepping else 0, retain_from=f0, record=False)
+        if session is None:
+            failed = next(r for r in reversed(runner.results) if r.status == "failed")
+            raise ValueError(f"'{source}': {failed.name} failed — {failed.error}\n{failed.traceback or ''}")
+    return freshness, stepping
+
+
+def run_pond(project: Project, ripple: str | None = None, fresh: bool = False, *, incremental: bool = False,
+             target: str = "next-change", to: datetime | None = None) -> RunResult:
+    """One local Pond Run against the hydrated Puddles.
+
+    A baseline run (the default) resets ``puddles/out/`` and the Puddles' step output, seeds the registry from a
+    self-puddle unless ``fresh``, and runs every Ripple as of the hydrated baseline with ``previous_f`` unset. An
+    ``incremental`` run keeps the registry and advances to ``target`` (``next-change``, ``next-run``,
+    ``most-recent``) or ``to``, as a Refresh would: every Source must reach it, by its history or a step.
+    ``ripple`` reruns one Ripple against the existing registry in the last run's window. Stops at the first
+    failure; exports whatever the registry holds either way."""
     pond_ripples = _load_ripples(project)
     by_name = pond_ripples.by_name
     order = pond_ripples.order()
     table_writers = pond_ripples.sql_writers()  # plus each Python Ripple's tables as it runs (lineage)
+    if ripple is not None and ripple not in by_name:
+        raise ValueError(f"no ripple '{ripple}' — this Pond has: {', '.join(order)}")
+
+    hydrated = load_hydrated(project)
+    legacy = hydrated is None and _legacy_hydrated(project)
+    if hydrated is None and not legacy and project.sources:
+        raise ValueError("nothing is hydrated: run duckstring pond hydrate first")
+    plan = _Plan(project, hydrated)
+    position = load_position(project)
+    now = datetime.now(timezone.utc)
+    stepped: list[str] = []
+    seeded = False
 
     if ripple is not None:
-        if ripple not in by_name:
-            raise ValueError(f"no ripple '{ripple}' — this Pond has: {', '.join(order)}")
         project.out_dir.mkdir(parents=True, exist_ok=True)
         targets = [ripple]
-        seeded = False
+        run_f = position.freshness if position is not None else now
+        previous_f = None
+        source_f = dict(position.sources) if position is not None else {}
+        previous_positions = None
+    elif incremental:
+        if position is None or not (project.out_dir / "registry.duckdb").exists():
+            raise ValueError("an incremental run goes on from a baseline: run duckstring pond run first")
+        if legacy:
+            raise ValueError("these Puddles were hydrated by an older Duckstring: hydrate again to run incrementally")
+        targets = order
+        previous_f = position.freshness
+        # Each Source's changes are read from where the last run read it up to (plans/source-read-positions.md).
+        previous_positions = dict(position.sources) if position.sources else None
+        if hydrated is None or not hydrated.sources:
+            run_f, source_f = max(now, previous_f), {}
+        else:
+            goal = _target(plan, position, target, to)
+            reached, stepped = _advance(project, plan, position, goal)
+            source_f = {s: _iso(f) for s, f in reached.items()}
+            run_f = min(reached.values())
     else:
+        legacy_f = _read_previous_f(project)
         shutil.rmtree(project.out_dir, ignore_errors=True)
         project.out_dir.mkdir(parents=True)
+        reset_runs(project)
         seeded = False if fresh else _seed(project)
         targets = order
+        if hydrated is not None and hydrated.sources:
+            source_f = {s: st.f or hydrated.at for s, st in hydrated.sources.items()}
+            run_f = min(datetime.fromisoformat(f) for f in source_f.values())
+        else:
+            source_f, run_f = {}, now
+        previous_f = None
+        previous_positions = None
+        if seeded:
+            own = hydrated.own_f if hydrated is not None else None
+            candidates = [datetime.fromisoformat(own)] if own else []
+            if position is not None:
+                candidates.append(position.freshness)
+            elif legacy_f is not None:
+                candidates.append(legacy_f)
+            previous_f = next((c for c in candidates if c < run_f), None)
 
-    from datetime import datetime, timezone
+    source_dirs, remote_sources = {}, {}
+    if hydrated is not None:
+        for source, state in hydrated.sources.items():
+            if state.mode in _LIVE:
+                at = source_f.get(source) or state.f or hydrated.at
+                remote_sources[source] = plan.remote(source, state, datetime.fromisoformat(at))
+                continue
+            store = plan.store(source, state)
+            if store is not None:
+                source_dirs[source] = store
 
-    run_f = datetime.now(timezone.utc)  # one freshness for the whole local run, like a deployed Pond Run
-    # The prior run's freshness, mirroring the deployed pond.previous_f: when this run is seeded from a
-    # self-puddle (an incremental rerun), the previous local run's f; NEVER on a fresh/first run.
-    previous_f = _read_previous_f(project) if seeded else None
     changes = ChangeLedger()  # what each Ripple wrote, checked or held: pond.changed() and held tables
     results: list[RippleResult] = []
     for name in targets:
@@ -126,10 +352,14 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False) -
             try:
                 handle = Pond(project.name, project.version, con, root=project.puddles_dir,
                               f=run_f, previous_f=previous_f, sources=list(project.sources),
+                              read_positions=source_f if not legacy else None,
+                              previous_positions=previous_positions, source_dirs=source_dirs,
+                              remote_sources=remote_sources,
                               staging_dir=_staging_dir(project), own_data_dir=project.out_dir,
                               static_tables=pond_ripples.statics, ripple=name,
                               ancestors=pond_ripples.ancestors(name), table_writers=dict(table_writers),
                               change_sink=changes.begin(run_f, name))
+                clear_reports(con, run_f, name)  # a Ripple run again reports afresh
                 by_name[name]["func"](handle)
                 for table in handle.take_lineage()["writes"]:
                     table_writers.setdefault(table, name)
@@ -145,13 +375,30 @@ def run_pond(project: Project, ripple: str | None = None, fresh: bool = False) -
             )
             break
 
+    if ripple is None and all(r.status == "ok" for r in results):
+        con = _registry_connect(project)
+        try:  # the Run's reports and its Sources' in its window, as a Duck's export carries them
+            collect_reports(Pond(project.name, project.version, con, root=project.puddles_dir, f=run_f,
+                                 previous_f=previous_f, sources=list(project.sources),
+                                 read_positions=source_f if not legacy else None,
+                                 previous_positions=previous_positions, source_dirs=source_dirs,
+                                 remote_sources=remote_sources, own_data_dir=project.out_dir))
+        finally:
+            con.close()
     _export(project, run_f, changes.held(run_f))
-    _write_previous_f(project, run_f)  # record this run's freshness for the next run's previous_f
-    return RunResult(seeded=seeded, ripples=results)
+    result = RunResult(seeded=seeded, ripples=results, f=run_f, previous_f=previous_f, stepped=stepped,
+                       warnings=plan.warnings)
+    if ripple is None:
+        if result.ok:
+            step = (position.step if incremental and position is not None else 0) + (1 if stepped else 0)
+            save_position(project, Position(f=_iso(run_f), step=step, sources=source_f))
+        elif not incremental:
+            position_path(project).unlink(missing_ok=True)  # a failed baseline has nothing to go on from
+    return result
 
 
 def _run_f_marker(project: Project) -> Path:
-    # Lives in puddles/ (parent of out/), so a full run's out_dir wipe doesn't clear the prior f.
+    # The previous local run's freshness, before position.json recorded it.
     return project.puddles_dir / ".run_f"
 
 
@@ -159,14 +406,7 @@ def _read_previous_f(project: Project):
     marker = _run_f_marker(project)
     if not marker.exists():
         return None
-    from datetime import datetime
     try:
         return datetime.fromisoformat(marker.read_text(encoding="utf-8").strip())
     except ValueError:
         return None
-
-
-def _write_previous_f(project: Project, run_f) -> None:
-    marker = _run_f_marker(project)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(run_f.isoformat(), encoding="utf-8")

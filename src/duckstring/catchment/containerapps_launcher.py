@@ -23,7 +23,7 @@ import logging
 import os
 from datetime import timedelta
 
-from ..keys import split_pond_key
+from ..keys import split_pond_key, worker_module
 from .vm_boot import REMOTE_ROOT
 
 log = logging.getLogger("duckstring.containerapps")
@@ -68,6 +68,7 @@ def _memory(pool: dict, dc: dict) -> str:
 
 
 class ContainerAppsLauncher:
+    max_lifetime_s = float(_REPLICA_TIMEOUT_S)  # replicaTimeout: App instances are replaced first
     manages_processes = True
     name = "containerapps"
 
@@ -263,7 +264,7 @@ class ContainerAppsLauncher:
         pool = (duck or {}).get("pool") or {}
         dc = (duck or {}).get("deploy_config") or pool.get("deploy_config") or {}
         args = [
-            "duckstring.duck", "--pond", name, "--major", str(major), "--version", version,
+            worker_module(duck), "--pond", name, "--major", str(major), "--version", version,
             "--catchment", self.remote_base_url, f"--token={self.token}",
             "--root", REMOTE_ROOT, "--source-path", source_path, f"--data-root={self.data_root or ''}",
         ]

@@ -1,16 +1,11 @@
-"""Puddles — Trickle-shaped local snapshots of priced's Sources.
+"""Puddles: local stand-ins for priced's Sources.
 
-A plain Ripple puddle is one overwrite table; a **Trickle** source carries history + a ``_trickle.json``
-mode/PK sidecar so ``read_delta`` can resolve it. These build that layout directly through the data
-plane (an append source for ``orders``, a merge source for ``catalog``), so ``duckstring pond run``
-exercises the incremental builder locally. Re-run with edited values to watch a delta propagate.
+``orders`` is an append Trickle and ``catalog`` a merge Trickle, so these write through the handle's matching
+methods: the Puddles carry the history incremental reads need, and ``duckstring pond run`` exercises the
+builder locally. The steps give ``pond run --incremental`` a next window: new orders, and a price change.
 """
 
-from datetime import datetime, timezone
-
 from duckstring import puddle
-
-_F = datetime(2026, 1, 1, tzinfo=timezone.utc)  # one snapshot freshness for the seed
 
 _ORDERS = [(0, 1, 2), (1, 2, 1), (2, 1, 3), (3, 3, 1)]  # order_id, product_id, quantity
 _PRODUCTS = [  # product_id, name, category, unit_price
@@ -20,40 +15,33 @@ _PRODUCTS = [  # product_id, name, category, unit_price
 ]
 
 
-def _publish(p, build) -> None:
-    """Run ``build(con)`` (which calls the Trickle write API) then publish that registry to the puddle's
-    Source directory, sidecar and all — the catchment-root layout ``read_delta`` reads unchanged."""
-    import duckdb
-
-    from duckstring.dataplane import ParquetDataPlane
-
-    con = duckdb.connect()
-    try:
-        build(con)
-        ParquetDataPlane().export(con, p.path)
-    finally:
-        con.close()
+def _orders(p, rows):
+    vals = ", ".join(f"({o}, {pid}, {q})" for o, pid, q in rows)
+    return p.con.sql(f"SELECT * FROM (VALUES {vals}) v(order_id, product_id, quantity)")
 
 
-@puddle("orders")
+def _products(p, rows):
+    vals = ", ".join(f"({pid}, '{n}', '{c}', {pr})" for pid, n, c, pr in rows)
+    return p.con.sql(f"SELECT * FROM (VALUES {vals}) v(product_id, name, category, unit_price)")
+
+
+@puddle("orders.order_line")
 def orders(p):
-    import trickle
-
-    def build(con):
-        vals = ", ".join(f"({o}, {pid}, {q})" for o, pid, q in _ORDERS)
-        rel = con.sql(f"SELECT * FROM (VALUES {vals}) v(order_id, product_id, quantity)")
-        trickle.append_table(con, "order_line", rel, _F, ("order_id",))
-
-    _publish(p, build)
+    p.append_table(_orders(p, _ORDERS), pk="order_id")
 
 
-@puddle("catalog")
+@puddle("catalog.product")
 def catalog(p):
-    import trickle
+    p.merge_table(_products(p, _PRODUCTS), pk="product_id")
 
-    def build(con):
-        vals = ", ".join(f"({pid}, '{n}', '{c}', {pr})" for pid, n, c, pr in _PRODUCTS)
-        rel = con.sql(f"SELECT * FROM (VALUES {vals}) v(product_id, name, category, unit_price)")
-        trickle.merge_table(con, "product", rel, _F, ("product_id",))
 
-    _publish(p, build)
+@puddle.step("orders.order_line")
+def more_orders(p):
+    first = len(_ORDERS) + (p.step - 1) * 2  # two new orders a step, numbered on from the last
+    p.append_table(_orders(p, [(first, 2, 1), (first + 1, 3, 2)]), pk="order_id")
+
+
+@puddle.step("catalog.product")
+def reprice(p):
+    laptop = round(1299.00 - 50 * p.step, 2)  # the laptop gets cheaper each step
+    p.merge_table(_products(p, [(1, "Laptop Pro", "Electronics", laptop), *_PRODUCTS[1:]]), pk="product_id")

@@ -77,12 +77,20 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | POST | `/api/catchment/reset` | full | Reset every Pond. |
 | GET | `/api/catchment/usage` | full | Size of the state directory. |
 | GET | `/api/catchment/archive` | full | Download the state directory as a tar stream. |
+| GET | `/api/catchment/records` | read | Where Apps' Records live, and the managed PostgreSQL's state. |
+| PUT | `/api/catchment/records` | full | Change it. Body: any of `target`, `memory`, `listen`, `host`, `tls_cert`, `tls_key`. |
+| GET | `/api/catchment/records/reader` | full | A read-only connection URL for a client on another machine. |
+| GET | `/api/catchment/media` | read | Where Apps' Media lives. |
+| PUT | `/api/catchment/media` | full | Change it. Body: `target`. |
+| POST | `/api/catchment/records/move` | full | Move Records. Body: `target`, `postgres_version`, `confirm` (the Catchment's name). Runs in the background. |
+| POST | `/api/catchment/media/move` | full | Move Media. Body: `target`, `confirm`. |
+| GET | `/api/catchment/move` | read | A move's progress: `state` (ending `done` or `failed`), `detail`, `error`. |
 
 ### Deploying and removing
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| POST | `/api/deploy` | full | Deploy a Pond (a packaged upload or a git reference). Redeploying the version a line runs is a 409 unless `force` is set or the Pond is an App. |
+| POST | `/api/deploy` | full | Deploy a Pond (a packaged upload or a git reference). Redeploying the version a line runs is a 409 unless `force` is set or the Pond is an App. A Puddle of the line is a 409 unless `replace_puddle` is set. |
 | GET | `/api/ponds/{name}/versions/{version}` | read | Whether a version is deployed. |
 | DELETE | `/api/ponds/{name}` | full | Remove a major line. |
 
@@ -96,15 +104,21 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | GET | `/api/lineage` | read | Observed table lineage. Parameters: `pond`, `major`, `table`, `columns`. |
 | GET | `/api/ponds/{name}/trace` | read | The run that produced some rows. Parameters: `table`, `where`. |
 | GET | `/api/ponds/{name}/freshness` | read, Tap | How fresh the Pond's data is: `freshness` (the point in time it reflects), `changed` (when its output last changed), `refreshing`, and when each table and Object last changed. Read-level keys see exposed tables only; a Tap's key, its own Pond's, without Objects. |
+| GET | `/api/ponds/{name}/reports` | read | The Pond's Run reports from `pond.report()`: its own, newest Run first (`limit`, default 50); with `f`, that Run's own report and the upstream reports it read. |
 
 ### Refreshes and windows
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| POST | `/api/ponds/{name}/refresh` | demand | Refresh now. Parameters (at most one): `at`, an ISO freshness to ask for instead of now; `fresh_within_ms`, to ask for data no older than this. (Before Refresh, this route marked a Pond for a rebuild; that is now `/rebuild`.) |
+| POST | `/api/ponds/{name}/refresh` | demand | Refresh now. Parameters (at most one): `at`, an ISO freshness to ask for instead of now; `fresh_within_ms`, to ask for data no older than this. Refused (422) when it reaches a Puddle. (Before Refresh, this route marked a Pond for a rebuild; that is now `/rebuild`.) |
 | GET | `/api/ponds/{name}/refreshes` | read | List the recurring Refreshes, with when each next asks. |
 | POST | `/api/ponds/{name}/refreshes` | demand | Add a recurring Refresh. Body: `every_seconds` (0 is continuous), `continuous`, `start`, `days`, `until`, `name`. |
 | POST | `/api/ponds/{name}/refreshes/{refresh_name}/remove` | demand | Remove a recurring Refresh. |
+| GET | `/api/puddles` | read | The Puddles on this Catchment. |
+| POST | `/api/puddles` | full | Deploy Puddles. Multipart: `bundle` (a Pond project, zipped) and `spec` (JSON: `sources`, `set`, `live`, `as_at`, `origin` with `name`, `url` and `headers`, and `force`). A Puddle already there is a 409 listing them in `detail.replace`, unless `force`. |
+| POST | `/api/ponds/{name}/puddles/hydrate` | full | Build the Puddles the Pond reaches again and run from the new baseline. Body: `as_at`, and `origin` to read another Catchment. |
+| POST | `/api/ponds/{name}/puddles/rewind` | full | Go back to the Puddle baseline and run from it. |
+| POST | `/api/ponds/{name}/puddles/refresh` | demand | Move the Puddles to a target and refresh at it. Body: `target` (`next-change`, `next-run` or `most-recent`) or `to`. |
 | GET | `/api/ponds/{name}/windows` | read | List windows. |
 | POST | `/api/ponds/{name}/windows` | full | Add a window. |
 | POST | `/api/ponds/{name}/windows/{window_name}/remove` | full | Remove a window. |
@@ -133,8 +147,10 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 
 | Method | Path | Level | Description |
 |---|---|---|---|
-| POST | `/api/query` | read, Tap | Run SQL against one Pond's tables. Body: `pond`, `sql`, optional `major`, `version`, `format` (`json`, `csv` or `parquet`). With a Tap's key, `pond` can be left out. |
-| POST | `/api/query/page`, `/api/query/count`, `/api/query/history` | read | Paged reads used by the web UI's data viewer. |
+| POST | `/api/query` | read, Tap | Run SQL against one Pond's tables. Body: `pond`, `sql`, optional `major`, `version`, `format` (`json`, `csv` or `parquet`), `at` and `since` (ISO 8601 times, as [`duckstring query --at`](cli/data.md#query); not with a Tap's key). With a Tap's key, `pond` can be left out. A warning about the read comes back in an `X-Duckstring-Warning` header. |
+| GET | `/api/ponds/{name}/changes` | read | The times a Pond line's published tables changed, oldest first, as far back as it keeps. Query: optional `major`, `version`, `after`, `upto` (ISO 8601). |
+| POST | `/api/query/page`, `/api/query/count`, `/api/query/history` | read | Paged reads used by the web UI's data viewer. A page or count may carry a `query_id`. |
+| POST | `/api/query/cancel` | read | Stop the data viewer's query `query_id`: interrupt it where it runs, and refuse it if it hasn't started yet. |
 | GET | `/api/ponds/{name}/tables/{table}/runs` | read | The run freshnesses of a Trickle table, used by the data viewer's window selector. |
 | GET | `/api/ponds/{name}/tables` | read | List published tables. |
 | GET | `/api/ponds/{name}/ripples/{table}` | read | Download a table's published files as a zip. |
@@ -177,7 +193,17 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 |---|---|---|---|
 | GET | `/api/ponds/{name}/app/instances` | read | An App's recent instances, newest first. `limit` (default 20). |
 | GET | `/api/ponds/{name}/app/logs` | full | An instance's output as text. `instance` (default the newest), `tail` (bytes from the end, default 65536) or `offset` (bytes from there on). The `x-log-offset` header is where the next read starts. |
-| POST | `/api/ponds/{name}/app/restart` | full | Stop an App's instance and start a fresh one, clearing a failure or a Kill first. Returns once the restart has begun. |
+| POST | `/api/ponds/{name}/app/restart` | full | Stop an App's instances and start a fresh one, clearing a failure or a Kill first. Returns once the restart has begun. |
+| GET | `/api/ponds/{name}/app/scale` | read | Scaling settings and where each comes from, running instances, and recent decisions. |
+| POST | `/api/ponds/{name}/app/scale` | full | Override settings or set the count, as [`app scale`](cli/app.md#scale). Body: any of `min_instances`, `max_instances`, `concurrency`, `connections`, `requests`, `cpu`, `memory`, `load`, `to`, `hold_s`, `release`, `clear`. |
+| POST | `/api/ponds/{name}/app/instances/{instance}/drain` | full | Send no new sessions to an instance; it stops once its work is done. |
+| POST | `/api/ponds/{name}/app/migrate` | full | Migrate a trial major again from the live one. `major` names the trial. |
+| GET | `/api/app-data` | read | Every App line holding Records or Media: its state, Records tables, and Media file count and size. |
+| GET | `/api/app-data/{name}/{major}/media` | read | A line's Media files. `prefix` narrows to a folder. |
+| GET | `/api/app-data/{name}/{major}/media/file` | read | Download a file. `path` names it. |
+| POST | `/api/app-data/{name}/{major}/media/file` | full | Upload a file to `path`, as the request body or a multipart `file`, replacing one there. Refused on a retired line. |
+| DELETE | `/api/app-data/{name}/{major}/media/file` | full | Delete the file at `path`. Refused on a retired line. |
+| POST | `/api/app-data/{name}/{major}/purge` | full | Delete a line's Records and Media for good. Body: `confirm` (the Catchment's name). |
 
 Requests to an App itself go to `/apps/{name}/v{major}/...` on the Catchment's port, outside `/api`; see [`[app]`](pond_toml.md#app). A Tap added to an App has no key (`"key": null`): requests to the App run it.
 
@@ -228,6 +254,13 @@ The `/api/draw/*` routes that ducts use to transfer data, and the `/api/duck/*` 
 | `duckstring_alert_deliveries_total` | counter | Alert deliveries, by `status`. |
 | `duckstring_flock_dispatched_total` | counter | Computations sent to the Flock, per Pond. |
 | `duckstring_flock_dispatch_failures_total` | counter | Flock dispatches that failed and ran in the Duck instead. The only sign that a Flock is misconfigured. |
+| `duckstring_app_instances` | gauge | Running instances of each App, labelled `place` (`catchment` or `elsewhere`). |
+| `duckstring_app_active` | gauge | Active requests and WebSockets across an App's instances. |
+| `duckstring_app_cpu_share`, `duckstring_app_memory_share` | gauge | Mean CPU and memory of an App's instances, as shares of their cores and limit. |
+| `duckstring_app_reported_load` | gauge | Mean load an App's instances report themselves. |
+| `duckstring_app_at_maximum` | gauge | 1 while an App is held at its maximum instances under pressure. |
+| `duckstring_app_instance_starts_total` | counter | App instances started, by `place`. |
+| `duckstring_app_instance_stops_total` | counter | App instances stopped, by `reason`. |
 | `duckstring_tap_queries_total` | counter | Queries through each Tap, labelled `pond`, `major` and `tap`. |
 | `duckstring_tap_refreshes_total` | counter | Refreshes sent by each Tap's queries. |
 

@@ -142,6 +142,11 @@ class Storage:
         """The ``*.parquet`` file names directly under the addressed dir, sorted."""
         raise NotImplementedError
 
+    def parquet_sizes(self, *parts: str) -> dict[str, int]:
+        """``{name: bytes}`` for the ``*.parquet`` files directly under the addressed dir, in one listing where
+        the backend allows (a size per file is a request per file on an object store)."""
+        return {n: self.size(*parts, n) for n in self.parquet_names(*parts)}
+
     def names(self, *parts: str) -> list[str]:
         """*All* file names (not just ``*.parquet``) directly under the addressed dir, sorted."""
         raise NotImplementedError
@@ -276,7 +281,19 @@ class LocalStorage(Storage):
 
     def parquet_names(self, *parts: str) -> list[str]:
         d = self._abs(*parts)
-        return sorted(p.name for p in d.glob("*.parquet")) if d.is_dir() else []
+        try:
+            with os.scandir(d) as it:
+                return sorted(e.name for e in it if e.name.endswith(".parquet") and e.is_file())
+        except (FileNotFoundError, NotADirectoryError):
+            return []
+
+    def parquet_sizes(self, *parts: str) -> dict[str, int]:
+        d = self._abs(*parts)
+        try:
+            with os.scandir(d) as it:
+                return {e.name: e.stat().st_size for e in it if e.name.endswith(".parquet") and e.is_file()}
+        except (FileNotFoundError, NotADirectoryError):
+            return {}
 
     def names(self, *parts: str) -> list[str]:
         d = self._abs(*parts)
@@ -415,7 +432,7 @@ class ObjectStorage(Storage):
                 extra = _EXTRA_FOR_PROTOCOL.get(protocol)
                 if extra is None:
                     raise
-                raise ImportError(f"{scheme}:// storage needs the {extra} extra: pip install 'duckstring[{extra}]'"
+                raise ImportError(f"{scheme}:// storage needs the {extra} extra: duckstring install {extra}"
                                   ) from exc
         return self._fs
 
@@ -468,6 +485,13 @@ class ObjectStorage(Storage):
             for e in self._ls(self._key(*parts))
             if e.get("type") == "file" and e["name"].endswith(".parquet")
         )
+
+    def parquet_sizes(self, *parts: str) -> dict[str, int]:
+        return {
+            e["name"].rstrip("/").rsplit("/", 1)[-1]: int(e.get("size") or 0)
+            for e in self._ls(self._key(*parts))
+            if e.get("type") == "file" and e["name"].endswith(".parquet")
+        }
 
     def names(self, *parts: str) -> list[str]:
         return sorted(
@@ -650,7 +674,7 @@ class VolumeStorage(ObjectStorage):
                 from .volumes import VolumeFileSystem
             except ImportError as exc:
                 raise ImportError("a Volume reached through the Files API needs the databricks extra: "
-                                  "pip install 'duckstring[databricks]'") from exc
+                                  "duckstring install databricks") from exc
             self._fs = VolumeFileSystem()
         return self._fs
 
@@ -858,7 +882,7 @@ def _google_token(spec: str | None) -> str:
         import google.auth
         from google.auth.transport.requests import Request
     except ImportError:
-        raise ImportError("gs:// storage needs the gcp extra: pip install 'duckstring[gcp]'") from None
+        raise ImportError("gs:// storage needs the gcp extra: duckstring install gcp") from None
     key = credentials.resolve(spec) if spec else ""  # a rotated ${secret:} key gets fresh credentials
     with _google_lock:
         creds = _google_creds.get(key)

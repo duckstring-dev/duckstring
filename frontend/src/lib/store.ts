@@ -87,6 +87,7 @@ export function mapRun(r: RawPondRun): PondRun {
     status: r.status,
     error: r.error,
     traceback: r.traceback,
+    supersededBy: r.superseded_by ?? null,
     persist: r.persist
       ? { status: r.persist.status, error: r.persist.error,
           startedAt: r.persist.started_at, finishedAt: r.persist.finished_at }
@@ -152,8 +153,8 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
     if (p.is_draw && !consumed.has(p.id)) continue;
     ponds[p.id] = {
       id: p.id, name: p.name, kind: p.kind,
-      isDraw: p.is_draw ?? false, isSpout: p.is_spout ?? false, dbt: p.dbt ?? false, isApp: p.is_app ?? false,
-      sources: [],
+      isDraw: p.is_draw ?? false, isSpout: p.is_spout ?? false, isPuddle: p.is_puddle ?? false, dbt: p.dbt ?? false, isApp: p.is_app ?? false,
+      sources: [], external: p.external ?? [],
     };
     pondInfo[p.id] = {
       version: p.version,
@@ -181,9 +182,11 @@ function transformStatus(payload: StatusPayload): Omit<StatusSlice, 'cloud'> {
       spout: p.spout ?? null,
       app: p.app ? {
         path: p.app.path, deployedAt: p.app.deployed_at, idleTimeoutS: p.app.idle_timeout_s,
+        records: p.app.records ?? false, media: p.app.media ?? false, dataState: p.app.data_state ?? null,
         instance: p.app.instance ? {
           id: p.app.instance.id, startedAt: p.app.instance.started_at, readyAt: p.app.instance.ready_at,
-          active: p.app.instance.active, idleAt: p.app.instance.idle_at,
+          active: p.app.instance.active, idleAt: p.app.instance.idle_at, count: p.app.instance.count ?? 1,
+          elsewhere: p.app.instance.elsewhere ?? 0, pressed: p.app.instance.pressed ?? null,
         } : null,
       } : null,
     };

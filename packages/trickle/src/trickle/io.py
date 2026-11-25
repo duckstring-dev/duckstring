@@ -45,16 +45,19 @@ import itertools
 import json
 import math
 import re
+import threading
 from pathlib import Path
 
 _uid = itertools.count()
+SCRATCH_PREFIX = "_duckstring_ds_"  # every temporary object this package makes is named under it
 
 
 def unique_name(prefix: str) -> str:
     """A process-unique scratch identifier in the reserved namespace (so ``registry_tables`` hides it).
     Used where a *materialised* result must outlive any shared-name view it was built from (a returned
-    relation that would otherwise re-bind when the next call re-creates that view)."""
-    return f"_duckstring_ds_{prefix}_{next(_uid)}"
+    relation that would otherwise re-bind when the next call re-creates that view). Name only temporary
+    objects with it (:func:`drop_scratch_views` drops stored views under it)."""
+    return f"{SCRATCH_PREFIX}{prefix}_{next(_uid)}"
 
 
 def first_row(result) -> tuple | None:
@@ -97,8 +100,8 @@ D_COL = "_duckstring_d"  # the Z-set weight (+1 present / -1 retraction)
 
 # A merge Trickle's CDC stream lives in a ``{table}__changelog`` companion registry table.
 CHANGELOG_SUFFIX = "__changelog"
-# A builder ``.append(..., log_drops=True)`` records rows it could not append (retractions / value
-# conflicts under ``fail_on_conflict=False``) in a ``{table}__droplog`` companion — an append-only diagnostic
+# An append write with ``log_drops=True`` records rows it dropped that carried information (removals and
+# differing values for a key already present) in a ``{table}__droplog`` companion: an append-only diagnostic
 # published alongside the table (like ``__changelog``), one growing record of what each run dropped.
 DROPLOG_SUFFIX = "__droplog"
 # A merge main is log-structured: its folded **base** (the checkpointed state up to ``f_base``) is published
@@ -114,6 +117,12 @@ WARM_SUFFIX = "__band"
 # then a view over the published band files (plans/s3-resident-state.md), so the warm tier is never copied
 # into a fresh registry. Reserved prefix: never published as a table of its own.
 WARM_PENDING_PREFIX = "_duckstring_band_"
+# An append table's rows are written to ``{HOT_PREFIX}{table}`` and read through a view under the table's own name
+# (:func:`append_store`), so a host can move its older rows out to where they are published and keep reading them
+# there (the view then unions the published files with the rows still local). The reserved prefix keeps the hot
+# table out of the publish set: the history is published under the table's name.
+HOT_PREFIX = "_duckstring_hot_"
+APPEND_VIEW_COMMENT = "duckstring:append-history"
 # A plain overwrite table is published as **versions**: one immutable file per run under ``{table}__v/``,
 # named by the run's freshness (:func:`part_name`), so a Sink run pinned to a Source version keeps reading
 # it while the Source publishes the next one. Retention trims superseded versions (see the data plane).
@@ -137,7 +146,11 @@ META_TABLE = "_duckstring_trickle"
 # and tiers, the meta table and the published layout. Recorded per table in the meta table and on each
 # Trickle entry of the sidecar (``format_version``; absent means 1), so a later format change can migrate
 # what it finds instead of guessing, and code reading a newer format refuses instead of misreading it.
-FORMAT_VERSION = 1
+# Format 2 = a parts directory may hold unions (``{lo}~{hi}~{made}.parquet``, see :func:`range_name`); a table is
+# written as 1 until its host first unions its parts (:func:`mark_unioned`), so an older reader refuses only a
+# table it couldn't read.
+FORMAT_VERSION = 2
+WRITE_FORMAT = 1
 # The published sidecar carrying mode/PK/floor + the source run freshness to cross-Pond readers.
 SIDECAR = "_trickle.json"
 
@@ -246,6 +259,11 @@ def warm_pending_name(table: str) -> str:
     return f"{WARM_PENDING_PREFIX}{table}"
 
 
+def hot_name(table: str) -> str:
+    """The registry table holding append table ``table``'s rows that are still local (see :func:`append_store`)."""
+    return f"{HOT_PREFIX}{table}"
+
+
 def base_chunks(data_dir, table: str) -> list[str]:
     """The published base chunk **names** of a merge main ``table`` (in its ``{table}__base/`` directory),
     sorted; ``[]`` when the base has not been chunk-published (no checkpoint yet, or a legacy single-file
@@ -280,6 +298,53 @@ def _ts(dt) -> str:
     return f"TIMESTAMPTZ '{dt.isoformat()}'"
 
 
+def temp_view(con, rel, name: str) -> None:
+    """Name the relation ``rel`` as a temporary view ``name`` on ``con``, visible to that connection only.
+
+    ``rel.create_view()`` makes a view in the database itself, on DuckDB 1.5 and 2.0 alike: every cursor of the
+    database sees it, so writers on several threads (a host's Ripples) replaced each other's views, a fixed name
+    raised "Catalog write-write conflict on create" when two created it at once, and the database kept every
+    scratch view ever made (eight per incremental write; Run time grew with them). A temporary view goes with its
+    connection, and can also name a relation that reads a Python object (Arrow, a DataFrame), which a view stored
+    in a database file can't.
+
+    A relation with bound parameters (``con.sql(q, params=...)``) can't be named by its SQL, which has only the
+    placeholders. Its own ``create_view`` keeps the values, so it is copied through one (uniquely named, dropped at
+    once) into a temporary table the view reads: a parameterised relation is a row or a few, written once."""
+    import duckdb
+
+    try:
+        con.execute(f"CREATE OR REPLACE TEMP VIEW {_q(name)} AS {rel.sql_query()}")
+        return
+    except duckdb.InvalidInputException as exc:
+        if "Values were not provided" not in str(exc):
+            raise
+    except duckdb.ParserException:
+        # DuckDB 1.5 gives such a relation's SQL as a dump of its rows ("ColumnDataCollection - [...]"), and an
+        # Arrow one's as arrow_scan(0x...) pointers: neither parses, and the copy below keeps the rows.
+        pass
+    held = unique_name("_trickle_bound")
+    rel.create_view(held, replace=True)
+    try:
+        con.execute(f"CREATE TEMP TABLE {_q(held + '_rows')} AS SELECT * FROM {_q(held)}")
+    finally:
+        con.execute(f"DROP VIEW IF EXISTS {_q(held)}")
+    con.execute(f"CREATE OR REPLACE TEMP VIEW {_q(name)} AS SELECT * FROM {_q(held + '_rows')}")
+
+
+def drop_scratch_views(con) -> int:
+    """Drop the scratch views earlier versions left in the database (see :func:`temp_view`): every view in the
+    database (not a temporary one) named in the scratch namespace. Nothing of this package's is stored under
+    such a name, so this never touches a table's state. Returns how many were dropped."""
+    names = [r[0] for r in con.execute(
+        "SELECT view_name FROM duckdb_views() WHERE NOT temporary AND NOT internal "
+        "AND database_name = current_database() AND starts_with(view_name, ?)", [SCRATCH_PREFIX]
+    ).fetchall()]
+    for name in names:
+        con.execute(f"DROP VIEW IF EXISTS {_q(name)}")
+    return len(names)
+
+
 def _table_exists(con, name: str) -> bool:
     """Whether a **relation** named ``name`` exists in the registry — a base table *or a view*. A merge main's
     base may be a VIEW over the published S3 chunks (the host materialises it lazily, not on every spawn — see
@@ -290,6 +355,33 @@ def _table_exists(con, name: str) -> bool:
         "SELECT 1 FROM duckdb_tables() WHERE table_name = ? "
         "UNION ALL SELECT 1 FROM duckdb_views() WHERE view_name = ? LIMIT 1", [name, name]
     )) is not None
+
+
+def _is_base_table(con, name: str) -> bool:
+    return first_row(con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ? AND schema_name = 'main' "
+                                 "AND database_name = current_database()", [name])) is not None
+
+
+def append_store(con, name: str, columns_sql: str | None = None) -> str:
+    """The table append table ``name``'s rows are written to: :func:`hot_name`, with ``name`` a view that reads it
+    (and whatever the host has moved out to published files; see the data plane's ``fold_append``). Converts an
+    append table written as a plain table, at its own write, so nothing else is writing it. With ``columns_sql``
+    (a ``SELECT`` giving the columns, no rows), creates a new table's store and view. Returns the store's name."""
+    hot = hot_name(name)
+    if _table_exists(con, hot):
+        return hot
+    with _DDL_LOCK:
+        if _table_exists(con, hot):
+            return hot
+        if _is_base_table(con, name):
+            con.execute(f"ALTER TABLE {_q(name)} RENAME TO {_q(hot)}")
+        elif columns_sql is not None:
+            con.execute(f"CREATE TABLE {_q(hot)} AS {columns_sql}")
+        else:
+            return name
+        con.execute(f"CREATE VIEW {_q(name)} AS SELECT * FROM {_q(hot)}")
+        con.execute(f"COMMENT ON VIEW {_q(name)} IS '{APPEND_VIEW_COMMENT}'")
+    return hot
 
 
 def _drop_relation(con, name: str) -> None:
@@ -308,7 +400,7 @@ CURRENT_VIEW_COMMENT = "duckstring:merge-current-state"
 
 
 def _is_current_view(con, name: str) -> bool:
-    row = first_row(con.execute("SELECT comment FROM duckdb_views() WHERE view_name = ?", [name]))
+    row = first_row(con.execute("SELECT comment FROM duckdb_views() WHERE view_name = ? AND NOT temporary", [name]))
     return row is not None and row[0] == CURRENT_VIEW_COMMENT
 
 
@@ -318,9 +410,10 @@ def _migrate_base(con, name: str) -> None:
     cold = cold_base_name(name)
     if _table_exists(con, cold) or _is_current_view(con, name):
         return
-    if first_row(con.execute("SELECT 1 FROM duckdb_views() WHERE view_name = ?", [name])):
+    # Stored relations only: a temporary view of that name is a host's (a Source registered under its name).
+    if first_row(con.execute("SELECT 1 FROM duckdb_views() WHERE view_name = ? AND NOT temporary", [name])):
         con.execute(f"ALTER VIEW {_q(name)} RENAME TO {_q(cold)}")
-    elif first_row(con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ?", [name])):
+    elif first_row(con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = ? AND NOT temporary", [name])):
         con.execute(f"ALTER TABLE {_q(name)} RENAME TO {_q(cold)}")
 
 
@@ -381,7 +474,7 @@ def _retain_merge(con, name: str, f, retain_t, retain_n) -> None:
         fold_warm(con, name, target)
 
 
-def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
+def _apply_retention(con, table: str, f, retain_t, retain_n, store: str | None = None) -> None:
     """Bound a history/changelog table's retained window at write time — a **lag SLA**, not a
     correctness control (a consumer behind the retained window falls back to a full read of the clean
     state; see :func:`read_delta`). Both are opt-in (``None`` keeps everything):
@@ -390,18 +483,22 @@ def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
     - ``retain_n`` (a count): keep only the newest ``retain_n`` distinct ``_duckstring_f`` runs.
 
     Returns the **cutoff** it applied (the oldest freshness still retained) so the caller can raise the
-    published ``floor`` to it — a consumer behind the cutoff then coverage-misses and full-reads."""
+    published ``floor`` to it — a consumer behind the cutoff then coverage-misses and full-reads.
+
+    ``store`` is the table rows are deleted from when ``table`` is read through a view (an append table's,
+    :func:`append_store`): rows its host moved out to published files leave the view as the floor passes them."""
+    store = store or table
     cutoff = None
     if retain_t is not None:
         cutoff = f - retain_t
-        con.execute(f'DELETE FROM {_q(table)} WHERE {_q(F_COL)} < {_ts(cutoff)}')
+        con.execute(f'DELETE FROM {_q(store)} WHERE {_q(F_COL)} < {_ts(cutoff)}')
     if retain_n is not None and retain_n >= 1:
         kept_min = first_row(con.execute(
             f'SELECT min(g) FROM (SELECT DISTINCT {_q(F_COL)} AS g FROM {_q(table)} '
             f'ORDER BY g DESC LIMIT {int(retain_n)})'
         ))[0]
         if kept_min is not None:
-            con.execute(f'DELETE FROM {_q(table)} WHERE {_q(F_COL)} < {_ts(kept_min)}')
+            con.execute(f'DELETE FROM {_q(store)} WHERE {_q(F_COL)} < {_ts(kept_min)}')
             cutoff = kept_min if cutoff is None else max(cutoff, kept_min)
     return cutoff
 
@@ -409,7 +506,19 @@ def _apply_retention(con, table: str, f, retain_t, retain_n) -> None:
 # ─── meta (mode + PK + floor) ──────────────────────────────────────────────────
 
 
+# Serialises the catalog changes that more than one thread may make to the same database: a host can run
+# several writers as threads with a cursor each on one database (Duckstring's Ripples do), and two of them
+# creating the meta table at once fail with "Catalog write-write conflict on create" at commit. Both run in
+# autocommit, so the second waits here and then finds the table.
+_DDL_LOCK = threading.Lock()
+
+
 def _ensure_meta(con) -> None:
+    with _DDL_LOCK:
+        _ensure_meta_locked(con)
+
+
+def _ensure_meta_locked(con) -> None:
     con.execute(
         f'CREATE TABLE IF NOT EXISTS {_q(META_TABLE)} '
         f"(table_name VARCHAR PRIMARY KEY, mode VARCHAR, pk VARCHAR, floor VARCHAR, f_base VARCHAR, "
@@ -437,13 +546,22 @@ def _record_meta(con, table: str, mode: str, pk: tuple[str, ...]) -> None:
     row = first_row(con.execute(f'SELECT format_version FROM {_q(META_TABLE)} WHERE table_name = ?', [table]))
     if row is not None:
         check_format_version(row[0], table)  # never overwrite a newer format's table as if it were ours
-    # Preserve any existing floor / f_base (a normal incremental run must not reset them).
+    # Preserve any existing floor / f_base (a normal incremental run must not reset them), and a format a host
+    # raised (a table whose parts were unioned stays format 2).
     con.execute(
         f'INSERT INTO {_q(META_TABLE)} (table_name, mode, pk, format_version) VALUES (?, ?, ?, ?) '
         f'ON CONFLICT (table_name) DO UPDATE SET mode=excluded.mode, pk=excluded.pk, '
-        f'format_version=excluded.format_version',
-        [table, mode, ",".join(pk), FORMAT_VERSION],
+        f'format_version=greatest(coalesce({_q(META_TABLE)}.format_version, 1), excluded.format_version)',
+        [table, mode, ",".join(pk), WRITE_FORMAT],
     )
+
+
+def mark_unioned(con, table: str) -> None:
+    """Record that ``table``'s published parts include unions (format 2), so the sidecar says so from the next
+    publish and an older reader refuses the table instead of failing on a union's file name."""
+    if _table_exists(con, META_TABLE):
+        con.execute(f'UPDATE {_q(META_TABLE)} SET format_version = 2 WHERE table_name = ? '
+                    f'AND coalesce(format_version, 1) < 2', [table])
 
 
 def drop_meta(con, table: str) -> None:
@@ -474,7 +592,7 @@ def drop_table(con, name: str) -> None:
     Trickle that is the base/main + ``__changelog`` + warm ``__band`` + ``__droplog`` + the aggregate/scan
     state companions + the meta row/floor; for a plain overwrite table just the one table. Idempotent."""
     for t in (
-        name, cold_base_name(name), changelog_name(name), warm_name(name), warm_pending_name(name),
+        name, hot_name(name), cold_base_name(name), changelog_name(name), warm_name(name), warm_pending_name(name),
         f"{name}{DROPLOG_SUFFIX}",
         f"{AGG_STATE_PREFIX}{name}", f"{AGG_DROP_PREFIX}{name}", f"{ACC_STATE_PREFIX}{name}",
     ):
@@ -552,6 +670,26 @@ def _bootstrapping(con, name: str, f) -> bool:
         return True
     boot = _f_boot(con, name)
     return boot is not None and boot == f
+
+
+def is_new(con, name: str, f) -> bool:
+    """Whether table ``name`` holds nothing written before the run at ``f``: it doesn't exist, or (a replay of
+    the run that first wrote it) all it holds was written at ``f``. The check hand-written incremental code
+    makes beside ``Delta.is_full``: a new or deleted output must be filled from its sources' full state, since a
+    window holds only the latest changes.
+
+    - Merge Trickle: missing, or holding only its first write, at ``f``.
+    - Append Trickle: no rows stamped before ``f``.
+    - Any other table: missing (a plain table records no freshness, and is rewritten whole anyway).
+    """
+    mode = (read_meta(con).get(name) or {}).get("mode")
+    if mode == "merge":
+        return _bootstrapping(con, name, f)
+    if mode == "append":
+        if not _table_exists(con, name):
+            return True
+        return first_row(con.execute(f'SELECT 1 FROM {_q(name)} WHERE "{F_COL}" < ? LIMIT 1', [f])) is None
+    return not _table_exists(con, name)
 
 
 def _advance_floor(con, table: str, *, bootstrap_f=None, cutoff=None) -> None:
@@ -712,22 +850,97 @@ def part_name(f) -> str:
     return f.astimezone(timezone.utc).isoformat().replace(":", "_") + ".parquet"
 
 
-def part_f(name: str):
-    """Recover the freshness ``f`` a part file was stamped with from its :func:`part_name`, or from a chunk of
-    a part written as several files (``{part}__{i}.parquet``, an append history's large run)."""
+RANGE_SEP = "~"
+
+
+def range_name(lo, hi, made) -> str:
+    """The filename for a **union** of consecutive part files (plans/showcase-fixes.md item 4): the rows stamped
+    ``lo`` to ``hi``, written by the publish at ``made``. A union only ever takes whole files, so its interval
+    contains theirs and no other file's: see :func:`live_parts`."""
+    stems = [part_name(t)[: -len(".parquet")] for t in (lo, hi, made)]
+    return RANGE_SEP.join(stems) + ".parquet"
+
+
+def _stems(name: str) -> list[str]:
+    stem = name[: -len(".parquet")] if name.endswith(".parquet") else name
+    if RANGE_SEP in stem:
+        return stem.split(RANGE_SEP)
+    return [re.sub(r"__\d+$", "", stem)]
+
+
+def _parse_stem(stem: str):
     from datetime import datetime
 
-    stem = name[: -len(".parquet")] if name.endswith(".parquet") else name
-    stem = re.sub(r"__\d+$", "", stem)
     return datetime.fromisoformat(stem.replace("_", ":"))
 
 
+def part_f(name: str):
+    """Recover the freshness ``f`` a part file was stamped with from its :func:`part_name`, or from a chunk of
+    a part written as several files (``{part}__{i}.parquet``, an append history's large run). For a union
+    (:func:`range_name`), its newest freshness ``hi``."""
+    stems = _stems(name)
+    return _parse_stem(stems[1] if len(stems) == 3 else stems[0])
+
+
+def part_lo(name: str):
+    """The oldest freshness a part file holds: a union's ``lo``, else its :func:`part_f`."""
+    return _parse_stem(_stems(name)[0])
+
+
+def part_made(name: str):
+    """The freshness of the publish that wrote a union, ``None`` for a part a Run wrote."""
+    stems = _stems(name)
+    return _parse_stem(stems[2]) if len(stems) == 3 else None
+
+
+def is_union(name: str) -> bool:
+    return RANGE_SEP in name
+
+
+def is_chunk(name: str) -> bool:
+    """One of several files a single Run's part was written as (``{part}__{i}.parquet``)."""
+    return re.search(r"__\d+\.parquet$", name) is not None and not is_union(name)
+
+
+def _part_key(name: str):
+    try:
+        return (0, part_f(name), part_lo(name), name)
+    except ValueError:
+        return (1, None, None, name)  # unparseable: last, in name order
+
+
+def live_parts(names) -> list[str]:
+    """The files a read uses out of a parts directory's ``names``: every file not contained in a union's interval
+    (that union holds its rows), sorted by :func:`part_f`. Every set of files is laminar (a union takes whole
+    files), so this picks each row once. A union and the files it was made from coexist until the host collects
+    them, so a read planned before the union can still read them."""
+    names = list(names)
+    unions = []
+    for n in names:
+        if is_union(n):
+            try:
+                unions.append((part_lo(n), part_f(n), n))
+            except ValueError:
+                continue
+    if not unions:
+        return sorted(names, key=_part_key)
+
+    def contained(n) -> bool:
+        try:
+            lo, hi = part_lo(n), part_f(n)
+        except ValueError:
+            return False
+        return any(u != n and ulo <= lo and hi <= uhi for ulo, uhi, u in unions)
+
+    return sorted((n for n in names if not contained(n)), key=_part_key)
+
+
 def table_parts(data_dir, table: str) -> list[str]:
-    """The per-run part **names** of an append-only ``table`` (its directory), sorted oldest-first (the
-    part names are canonical-UTC ISO, so a lexical sort is freshness order; a run written as several chunks
-    has several names, each with its :func:`part_f`); ``[]`` if it is not a parts directory (e.g. a wholesale
-    single-file table, or absent)."""
-    return _store(data_dir).parquet_names(table)
+    """The part **names** of an append-only ``table`` (its directory), sorted by :func:`part_f` (a run written
+    as several chunks has several names, each with its :func:`part_f`; a union sorts at its ``hi``, after a file
+    it contains that ends earlier). Every file is listed, unions' constituents included: a read takes
+    :func:`live_parts`. ``[]`` if it is not a parts directory (e.g. a wholesale single-file table, or absent)."""
+    return sorted(_store(data_dir).parquet_names(table), key=_part_key)
 
 
 def part_tables(data_dir) -> list[str]:
@@ -772,206 +985,254 @@ def landed_after(data_dir) -> str | None:
 # ─── write: append ──────────────────────────────────────────────────────────────
 
 
+# What an append write does with a row whose key is already in the table (plans/showcase-fixes.md item 19):
+# ``skip_check`` reads nothing and appends every row (a declared pk is the writer's promise; an append is chosen
+# for speed), ``keep_prior`` drops it, ``fail`` raises when its values differ. Without a pk the whole row is the key.
+ON_CONFLICT = ("skip_check", "keep_prior", "fail")
+
+
+def check_on_conflict(on_conflict, where: str) -> str:
+    if on_conflict not in ON_CONFLICT:
+        raise ValueError(f"{where}: on_conflict must be one of {', '.join(map(repr, ON_CONFLICT))}, "
+                         f"not {on_conflict!r}")
+    return on_conflict
+
+
+def reject_removed(removed: dict, where: str, replacement: dict) -> None:
+    """Raise ``TypeError`` for keyword arguments a write no longer takes. ``fail_on_conflict`` became
+    ``on_conflict``; ``replacement`` maps its old values to the new ones, which differ between ``append_table``
+    and the builder's ``.append()`` (the reason it was removed rather than mapped)."""
+    if not removed:
+        return
+    if "fail_on_conflict" in removed:
+        old = removed["fail_on_conflict"]
+        new = replacement.get(bool(old))
+        raise TypeError(f"{where}: fail_on_conflict was removed; fail_on_conflict={old!r} is now "
+                        f"on_conflict={new!r} (see the on_conflict values: {', '.join(map(repr, ON_CONFLICT))})")
+    raise TypeError(f"{where}: unexpected keyword argument(s) {', '.join(map(repr, removed))}")
+
+
 def append_table(
-    con, name: str, relation, f, pk: tuple[str, ...], *, fail_on_conflict=True, retain_t=None, retain_n=None
+    con, name: str, relation, f, pk: tuple[str, ...], *, on_conflict="skip_check", log_drops=True,
+    retain_t=None, retain_n=None,
 ) -> bool:
     """Append ``relation``'s rows to the history table ``name``, each stamped ``_duckstring_f = f``.
     Insert-only: no diff, no deletes (its Z-set is all ``+1``). Idempotent at a given ``f`` (rows already
-    stamped ``f`` are dropped before re-appending). ``pk`` is recorded as the declared key; when it is set,
-    ``fail_on_conflict=True`` (the default) asserts it is unique across the appended rows and the existing
-    history, raising :class:`DeltaError` before any write (the live table is untouched on a violation). Pass
-    ``fail_on_conflict=False`` for the trust-the-writer fast path (no check). With ``pk`` unset the check is a
-    no-op regardless.
+    stamped ``f`` are replaced). ``pk`` is recorded as the declared key.
+
+    ``on_conflict`` decides what happens to a row whose key (with no ``pk``, the whole row) is already in the
+    table: ``skip_check`` (the default) reads nothing and appends every row as given; ``keep_prior`` drops it
+    (logged to ``{name}__droplog`` when its values differ and ``log_drops``); ``fail`` raises :class:`DeltaError`
+    before writing when its values differ. Under ``keep_prior`` and ``fail`` a row identical to one already
+    there is skipped, identical rows within ``relation`` collapse to one, and one key with different values
+    within ``relation`` raises.
 
     Returns whether rows were actually appended (an empty relation, or a pure same-``f`` replay, is no
     change) — the ``pond.skip()`` signal (see plans/no-change-skip.md)."""
+    check_on_conflict(on_conflict, f"append_table('{name}')")
     relation = concrete(relation)  # DuckDB 2.0: never store the NULL type
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
-    src = "_duckstring_ds_append_src"
-    relation.create_view(src, replace=True)
     cols = relation.columns
-    sel_cols = ", ".join(_q(c) for c in cols)
+    missing = [c for c in pk if c not in cols]
+    if missing:
+        raise DeltaError(f"append_table('{name}'): primary key column(s) {missing} not in the relation")
     first = not _table_exists(con, name)  # the floor anchors at the first append's freshness
     # A pure replay (rows already stamped this f) re-writes identical rows → no net change. Detect it
-    # before the idempotent DELETE below so the returned "changed" flag reflects new content, not a re-run.
+    # before the idempotent DELETE so the returned "changed" flag reflects new content, not a re-run.
     replay = (not first) and first_row(con.execute(
         f'SELECT 1 FROM {_q(name)} WHERE {_q(F_COL)} = {_ts(f)} LIMIT 1'
     )) is not None
+    if on_conflict != "skip_check":
+        changed = append_zset(con, name, _as_zset(relation, 1), f, pk, on_conflict=on_conflict,
+                              log_drops=log_drops, retain_t=retain_t, retain_n=retain_n)
+        return changed and not replay
+    src = unique_name("append_src")
+    temp_view(con, relation, src)
+    sel_cols = ", ".join(_q(c) for c in cols)
     n_src = first_row(con.execute(f'SELECT count(*) FROM {_q(src)}'))[0]
-    if fail_on_conflict and pk:
-        missing = [c for c in pk if c not in cols]
-        if missing:
-            raise DeltaError(f"append_table('{name}'): primary key column(s) {missing} not in the relation")
-        pk_list = ", ".join(_q(c) for c in pk)
-        dup = first_row(con.execute(
-            f'SELECT 1 FROM {_q(src)} GROUP BY {pk_list} HAVING count(*) > 1 LIMIT 1'
-        ))
-        if dup:
-            raise DeltaError(f"append_table('{name}'): duplicate primary key {pk} among the appended rows")
-        if not first:
-            # Collide only against rows from *other* runs — a replay re-appends this f's identical rows.
-            coll = first_row(con.execute(
-                f'SELECT 1 FROM {_q(src)} s JOIN {_q(name)} t ON {_key_match("s", "t", pk)} '
-                f'WHERE t.{_q(F_COL)} IS DISTINCT FROM {_ts(f)} LIMIT 1'
-            ))
-            if coll:
-                raise DeltaError(f"append_table('{name}'): primary key {pk} already present in history")
-    if first:
-        con.execute(
-            f'CREATE TABLE {_q(name)} AS '
-            f'SELECT {sel_cols}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(src)} LIMIT 0'
-        )
-    con.execute(f'DELETE FROM {_q(name)} WHERE {_q(F_COL)} = {_ts(f)}')  # idempotent replay
+    store = append_store(con, name, f'SELECT {sel_cols}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(src)} LIMIT 0')
+    con.execute(f'DELETE FROM {_q(store)} WHERE {_q(F_COL)} = {_ts(f)}')  # idempotent replay
     con.execute(
-        f'INSERT INTO {_q(name)} ({sel_cols}, {_q(F_COL)}) '
+        f'INSERT INTO {_q(store)} ({sel_cols}, {_q(F_COL)}) '
         f'SELECT {sel_cols}, {_ts(f)} FROM {_q(src)}'
     )
     _record_meta(con, name, "append", pk)
-    cutoff = _apply_retention(con, name, f, retain_t, retain_n)
+    cutoff = _apply_retention(con, name, f, retain_t, retain_n, store=store)
     _advance_floor(con, name, bootstrap_f=(f if first else None), cutoff=cutoff)
     return n_src > 0 and not replay
 
 
 def append_zset(
-    con, name: str, zset, f, pk: tuple[str, ...], *, fail_on_conflict=True, log_drops=True,
+    con, name: str, zset, f, pk: tuple[str, ...], *, on_conflict="skip_check", full=False, log_drops=True,
     retain_t=None, retain_n=None,
 ) -> bool:
-    """Append the **present** rows of a Z-set ΔO (the builder's incremental output, or a full recompute
-    tagged ``+1``) to the insert-only history ``name`` — the ``.append()`` terminal of the builder. An
-    insert-only table can't reflect a *change to the past*, so two things are conflicts:
+    """Append a Z-set to the insert-only history ``name``: the builder's ``.append()`` terminal, and
+    :func:`append_table` under ``keep_prior`` or ``fail``. ``zset`` is either this Run's **change** (an
+    incremental output: ``+1`` added rows, ``-1`` removed ones) or, with ``full``, the **whole output**
+    recomputed (all ``+1``). A removal can't be applied to an insert-only table, and neither can a key already
+    present with different values.
 
-    - a **retraction** (a ``-1`` row) — a previously-emitted output row changed or disappeared;
-    - a present (``+1``) row whose ``pk`` is already in history with a **different** image.
+    ``on_conflict`` (see :data:`ON_CONFLICT`):
 
-    A present row whose ``pk`` is already in history with an **identical** image is a benign skip (an
-    idempotent replay or a comprehensive re-derivation re-producing it) — never a conflict, never logged.
-    A ``pk`` duplicated **within this run** with distinct images is unresolvable (one freshness, no
-    recency to choose by) and always raises.
+    - ``skip_check``: the change is appended without reading the history, every copy of every added row. A
+      removal is a broken promise visible in the change itself: with a ``pk``, that key's added row is dropped
+      too (the outcome ``keep_prior`` gives on a recompute); without one, the added row is appended. With
+      ``full`` the history has to be read anyway, so the recompute is reduced to what isn't there yet: by
+      ``pk`` as ``keep_prior`` does, or copy for copy without one (identical rows that are separate events
+      survive). Never raises on a conflict.
+    - ``keep_prior``: a row whose key (with no ``pk``, the whole row) is already in the history is dropped,
+      as is a removal.
+    - ``fail``: a removal, or a key already in the history with different values, raises :class:`DeltaError`
+      before writing.
 
-    ``fail_on_conflict=True`` (default — correctness over speed) raises :class:`DeltaError` on any conflict
-    before writing. ``False`` drops conflicting rows (history wins) and appends the rest; with
-    ``log_drops`` the dropped rows land in a ``{name}__droplog`` companion (user columns + ``_duckstring_d``
-    sign + ``_duckstring_f``), published alongside the table like ``__changelog``. ``pk`` unset skips the pk
-    checks entirely (only retractions are conflicts) — fast, sound only when duplicates and past-changes are
-    impossible by construction.
+    Under ``keep_prior`` and ``fail`` a row identical to one in the history is skipped, identical rows in the
+    batch collapse to one, and one key with different values in the batch always raises (a batch has no order
+    to pick by). Dropped rows that lose information (removals and differing values) go to a
+    ``{name}__droplog`` companion with ``log_drops`` (user columns + ``_duckstring_d`` + ``_duckstring_f``),
+    published alongside the table like ``__changelog``. A write repeated at ``f`` replaces that ``f``'s rows.
 
-    Returns whether any genuinely new rows were appended (benign idempotent skips and dropped conflicts
-    don't count) — the ``pond.skip()`` signal (see plans/no-change-skip.md)."""
+    Returns whether any rows were appended — the ``pond.skip()`` signal (see plans/no-change-skip.md)."""
+    check_on_conflict(on_conflict, f"append('{name}')")
     zset = concrete(zset)  # DuckDB 2.0: never store the NULL type
     if f is None:
         raise DeltaError("a Trickle needs the run freshness pond.f — none was set (is this a Trickle run?)")
     src = unique_name("appz")
-    zset.create_view(src, replace=True)
+    temp_view(con, zset, src)
     user = [c for c in zset.columns if c != D_COL]
     if D_COL not in zset.columns:
         raise DeltaError(f"append_zset('{name}', ...): the relation has no {D_COL} weight column")
+    missing = [c for c in pk if c not in user]
+    if missing:
+        raise DeltaError(f"append('{name}'): primary key column(s) {missing} not in the relation")
     sel = ", ".join(_q(c) for c in user)
+    csel = ", ".join(f"_c.{_q(c)}" for c in user)
+    d = _q(D_COL)
     first = not _table_exists(con, name)
 
     # Consolidate by full row: net weight per distinct image (an update's -old/+new survive as two rows).
     consol = unique_name("appc")
     con.execute(
         f'CREATE OR REPLACE TEMP TABLE {_q(consol)} AS '
-        f'SELECT {sel}, CAST(SUM({_q(D_COL)}) AS BIGINT) AS {_q(D_COL)} FROM {_q(src)} '
-        f'GROUP BY {sel} HAVING SUM({_q(D_COL)}) <> 0'
+        f'SELECT {sel}, CAST(SUM({d}) AS BIGINT) AS {d} FROM {_q(src)} '
+        f'GROUP BY {sel} HAVING SUM({d}) <> 0'
     )
-
-    # Idempotent replay: drop this run's prior attempt (rows stamped f) so the history checks below see the
-    # pre-f state and a retry re-derives the same result. Done before the conflict probes.
+    # Idempotent replay: drop this Run's prior attempt (rows stamped f), so the history read below is the
+    # pre-f state and a retry derives the same result.
     if not first:
-        con.execute(f'DELETE FROM {_q(name)} WHERE {_q(F_COL)} = {_ts(f)}')
+        con.execute(f'DELETE FROM {_q(append_store(con, name))} WHERE {_q(F_COL)} = {_ts(f)}')
 
-    retractions = first_row(con.execute(f'SELECT count(*) FROM {_q(consol)} WHERE {_q(D_COL)} < 0'))[0]
-    pk_dup = 0
-    hist_conflict = 0
-    if pk:
-        missing = [c for c in pk if c not in user]
-        if missing:
-            raise DeltaError(f"append_zset('{name}', ...): primary key column(s) {missing} not in the relation")
-        pk_list = ", ".join(_q(c) for c in pk)
-        pk_dup = first_row(con.execute(
-            f'SELECT count(*) FROM (SELECT 1 FROM {_q(consol)} WHERE {_q(D_COL)} > 0 '
-            f'GROUP BY {pk_list} HAVING count(*) > 1)'
-        ))[0]
-        if pk_dup:
-            # Two distinct images for one key in one run — no recency to disambiguate; always fatal.
-            raise DeltaError(
-                f"append_zset('{name}', ...): primary key {pk} produced {pk_dup} duplicate key(s) with "
-                f"differing values in one run — the output is not unique by {pk}"
-            )
-        if not first:
-            eq = " AND ".join(f'p.{_q(c)} IS NOT DISTINCT FROM h.{_q(c)}' for c in user)
-            hist_conflict = first_row(con.execute(
-                f'SELECT count(*) FROM {_q(consol)} p JOIN {_q(name)} h ON {_key_match("p", "h", pk)} '
-                f'WHERE p.{_q(D_COL)} > 0 AND NOT ({eq})'
+    key = list(pk) or user  # with no pk, the whole row is the key
+
+    def in_history(alias: str, negate: bool) -> str:
+        """``alias``'s rows whose key is (or, with ``negate``, isn't) in the history, as a join clause."""
+        if first:
+            return "" if negate else " AND 1=0"
+        kind = "ANTI" if negate else "SEMI"
+        return f' {kind} JOIN {_q(name)} AS _h ON {_key_match(alias, "_h", key)}'
+
+    def differs(alias: str) -> str:
+        """``alias``'s present rows whose key is in the history with different values (only with a pk)."""
+        if first or not pk:
+            return f'SELECT {sel}, {d} FROM {_q(consol)} WHERE 1=0'
+        eq = " AND ".join(f'{alias}.{_q(c)} IS NOT DISTINCT FROM _h.{_q(c)}' for c in user)
+        return (f'SELECT {", ".join(f"{alias}.{_q(c)}" for c in user)}, {alias}.{d} FROM {_q(consol)} {alias} '
+                f'JOIN {_q(name)} _h ON {_key_match(alias, "_h", pk)} WHERE {alias}.{d} > 0 AND NOT ({eq})')
+
+    removed = f'SELECT {sel}, {d} FROM {_q(consol)} WHERE {d} < 0'
+
+    if on_conflict == "skip_check" and not full:
+        if pk:
+            # A key with a removal in this change: its promise is broken, so its added row is dropped too.
+            broken = unique_name("appb")
+            con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(broken)} AS '
+                        f'SELECT DISTINCT {", ".join(_q(c) for c in pk)} FROM {_q(consol)} WHERE {d} < 0')
+            new_rows = (f'SELECT {csel}, _c.{d} FROM {_q(consol)} AS _c ANTI JOIN {_q(broken)} AS _b '
+                        f'ON {_key_match("_c", "_b", pk)} WHERE _c.{d} > 0')
+            dropped = (f'SELECT {csel}, _c.{d} FROM {_q(consol)} AS _c SEMI JOIN {_q(broken)} AS _b '
+                       f'ON {_key_match("_c", "_b", pk)}')
+        else:
+            new_rows = f'SELECT {sel}, {d} FROM {_q(consol)} WHERE {d} > 0'
+            dropped = removed
+        copies = True
+    elif on_conflict == "skip_check":  # a recompute: append what the history doesn't hold yet
+        if pk:
+            new_rows = f'SELECT {csel}, _c.{d} FROM {_q(consol)} AS _c{in_history("_c", True)} WHERE _c.{d} > 0'
+            dropped = f'{removed} UNION ALL BY NAME ({differs("_c")})'
+        elif first:
+            new_rows = f'SELECT {sel}, {d} FROM {_q(consol)} WHERE {d} > 0'
+            dropped = removed
+        else:  # copy for copy: each distinct row, as many times as the output has it beyond the history
+            held = unique_name("apph")
+            con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(held)} AS '
+                        f'SELECT {sel}, count(*) AS _n FROM {_q(name)} GROUP BY ALL')
+            new_rows = (f'SELECT {csel}, _c.{d} - COALESCE(_k._n, 0) AS {d} '
+                        f'FROM {_q(consol)} AS _c LEFT JOIN {_q(held)} AS _k ON {_key_match("_c", "_k", user)} '
+                        f'WHERE _c.{d} - COALESCE(_k._n, 0) > 0')
+            dropped = removed
+        copies = True
+    else:  # keep_prior / fail
+        if pk:
+            dup = first_row(con.execute(
+                f'SELECT count(*) FROM (SELECT 1 FROM {_q(consol)} WHERE {d} > 0 '
+                f'GROUP BY {", ".join(_q(c) for c in pk)} HAVING count(*) > 1)'
             ))[0]
+            if dup:
+                # Two images for one key in one batch: no order to pick by, and a pick could differ on replay.
+                raise DeltaError(
+                    f"append('{name}'): primary key {pk} has {dup} key(s) with different values in one batch; "
+                    f"the rows are not unique by {pk}"
+                )
+        new_rows = f'SELECT {csel}, 1 AS {d} FROM {_q(consol)} AS _c{in_history("_c", True)} WHERE _c.{d} > 0'
+        dropped = f'{removed} UNION ALL BY NAME ({differs("_c")})'
+        copies = False
+        if on_conflict == "fail":
+            n_removed = first_row(con.execute(f'SELECT count(*) FROM ({removed})'))[0]
+            n_differ = first_row(con.execute(f'SELECT count(*) FROM ({differs("_c")})'))[0]
+            if n_removed or n_differ:
+                raise DeltaError(
+                    f"append('{name}'): not append-safe: {n_removed} removed row(s) and {n_differ} row(s) whose "
+                    f"key is already in the table with different values. Use on_conflict='keep_prior' to drop "
+                    f"them, or .merge() to track changes."
+                )
 
-    if fail_on_conflict and (retractions or hist_conflict):
-        raise DeltaError(
-            f"append_zset('{name}', ...): not append-safe — {retractions} retraction(s) and {hist_conflict} "
-            f"changed-past row(s). Pass fail_on_conflict=False to drop them, or use .merge() to track changes."
-        )
-
-    # The rows to actually append: present (+1) rows that are genuinely new (pk absent from history, or no
-    # pk → all present rows). Benign skips (pk present with identical image) and dropped conflicts fall out.
-    if pk and not first:
-        pk_list = ", ".join(_q(c) for c in pk)
-        new_rows = con.sql(
-            f'SELECT {sel} FROM {_q(consol)} AS _c ANTI JOIN {_q(name)} AS _h ON {_key_match("_c", "_h", pk)} '
-            f'WHERE {_q(D_COL)} > 0'
-        )
-    else:
-        new_rows = con.sql(f'SELECT {sel} FROM {_q(consol)} WHERE {_q(D_COL)} > 0')
-
-    if first:
-        con.execute(
-            f'CREATE TABLE {_q(name)} AS '
-            f'SELECT {sel}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(consol)} LIMIT 0'
-        )
+    store = append_store(con, name, f'SELECT {sel}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(consol)} LIMIT 0')
     new_view = unique_name("appn")
-    new_rows.create_view(new_view, replace=True)
-    n_new = first_row(con.execute(f'SELECT count(*) FROM {_q(new_view)}'))[0]
-    con.execute(f'INSERT INTO {_q(name)} ({sel}, {_q(F_COL)}) SELECT {sel}, {_ts(f)} FROM {_q(new_view)}')
+    con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(new_view)} AS {new_rows}')
+    n_new = first_row(con.execute(f'SELECT coalesce(sum({d}), 0) FROM {_q(new_view)}'))[0]
+    # Every copy of a row the batch holds more than once (skip_check), else one.
+    rows = (f'SELECT {sel} FROM (SELECT {sel}, unnest(range({d})) FROM {_q(new_view)})' if copies
+            else f'SELECT {sel} FROM {_q(new_view)}')
+    con.execute(f'INSERT INTO {_q(store)} ({sel}, {_q(F_COL)}) SELECT {sel}, {_ts(f)} FROM ({rows})')
 
-    if log_drops and not fail_on_conflict and (retractions or hist_conflict):
-        _log_drops(con, name, consol, user, pk, f, first)
+    if log_drops:
+        _log_drops(con, name, dropped, user, f)
 
     _record_meta(con, name, "append", pk)
-    cutoff = _apply_retention(con, name, f, retain_t, retain_n)
+    cutoff = _apply_retention(con, name, f, retain_t, retain_n, store=store)
     _advance_floor(con, name, bootstrap_f=(f if first else None), cutoff=cutoff)
     return n_new > 0
 
 
-def _log_drops(con, name, consol, user, pk, f, first_output) -> None:
-    """Record the rows ``.append(fail_on_conflict=False)`` could not append — retractions (``_duckstring_d``
-    < 0) and present rows whose ``pk`` collided with a different image — in a ``{name}__droplog`` companion
-    (append-only, published alongside the table like ``__changelog``). Replay-idempotent (this run's prior
-    drops are cleared first)."""
+def _log_drops(con, name, dropped_sql, user, f) -> None:
+    """Record the rows an append write dropped and that carried information (removals, and rows whose key is
+    already in the table with different values; see :func:`append_zset`) in a ``{name}__droplog`` companion
+    (append-only, published alongside the table like ``__changelog``). Replay-idempotent: this Run's earlier
+    drops are cleared first, even when it drops nothing this time."""
     drops = f"{name}{DROPLOG_SUFFIX}"
     sel = ", ".join(_q(c) for c in user)
-    if pk:
-        eq = " AND ".join(f'c.{_q(col)} IS NOT DISTINCT FROM h.{_q(col)}' for col in user)
-        # Present rows that collided with a *different* image in history (benign identical-image skips excluded).
-        conflicts = (
-            f'SELECT {", ".join(f"c.{_q(col)}" for col in user)}, c.{_q(D_COL)} FROM {_q(consol)} c '
-            f'JOIN {_q(name)} h ON {_key_match("c", "h", pk)} WHERE c.{_q(D_COL)} > 0 AND NOT ({eq})'
-        )
-    else:
-        conflicts = f'SELECT {sel}, {_q(D_COL)} FROM {_q(consol)} WHERE 1=0'
-    dropped = con.sql(
-        f'SELECT {sel}, {_q(D_COL)} FROM {_q(consol)} WHERE {_q(D_COL)} < 0 '
-        f'UNION ALL BY NAME ({conflicts})'
-    )
-    if not _table_exists(con, drops):
+    exists = _table_exists(con, drops)
+    if exists:
+        con.execute(f'DELETE FROM {_q(drops)} WHERE {_q(F_COL)} = {_ts(f)}')
+    dview = unique_name("appd")
+    con.execute(f'CREATE OR REPLACE TEMP TABLE {_q(dview)} AS {dropped_sql}')
+    if first_row(con.execute(f'SELECT count(*) FROM {_q(dview)}'))[0] == 0:
+        return
+    if not exists:
         con.execute(
             f'CREATE TABLE {_q(drops)} AS '
-            f'SELECT {sel}, {_q(D_COL)}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(consol)} LIMIT 0'
+            f'SELECT {sel}, {_q(D_COL)}, CAST(NULL AS TIMESTAMPTZ) AS {_q(F_COL)} FROM {_q(dview)} LIMIT 0'
         )
-    else:
-        con.execute(f'DELETE FROM {_q(drops)} WHERE {_q(F_COL)} = {_ts(f)}')  # replay-idempotent
-    dview = unique_name("appd")
-    dropped.create_view(dview, replace=True)
     con.execute(
         f'INSERT INTO {_q(drops)} ({sel}, {_q(D_COL)}, {_q(F_COL)}) '
         f'SELECT {sel}, {_q(D_COL)}, {_ts(f)} FROM {_q(dview)}'
@@ -1157,7 +1418,7 @@ def apply_zset(con, name: str, zset, f, pk: tuple[str, ...], *, retain_t=None, r
         raise DeltaError(f"apply_zset('{name}', ...) needs a primary key — pass pk=...")
     cluster = cluster_spec(cluster_by, interleave, cluster_bits)  # validated before anything is written
     src = unique_name("zset")
-    zset.create_view(src, replace=True)
+    temp_view(con, zset, src)
     cols = list(zset.columns)
     if D_COL not in cols:
         raise DeltaError(f"apply_zset('{name}', ...): the relation has no {D_COL} weight column")
@@ -1257,7 +1518,7 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
         raise DeltaError(f"merge_table('{name}', ...): primary key column(s) {missing} not in the relation")
     sel = ", ".join(_q(c) for c in cols)
     state = unique_name("state")
-    relation.create_view(state, replace=True)
+    temp_view(con, relation, state)
     if f is not None and _bootstrapping(con, name, f):
         # The state is the whole of the bootstrap: it goes straight to the base, without the consolidation a
         # Z-set needs (every row is a +1, and the primary key is unique by this function's contract). For a
@@ -1281,7 +1542,7 @@ def merge_table(con, name: str, relation, f, pk: tuple[str, ...], *, retain_t=No
     prior = reconstruct_current(con, name, before=f)
     if prior is not None:
         pv = unique_name("prior")
-        _strip_system(prior).create_view(pv, replace=True)  # user columns only (drop _duckstring_f)
+        temp_view(con, _strip_system(prior), pv)  # user columns only (drop _duckstring_f)
         zset = con.sql(
             f'SELECT {sel}, 1 AS {_q(D_COL)} FROM {_q(state)} '
             f'UNION ALL BY NAME SELECT {sel}, -1 AS {_q(D_COL)} FROM {_q(pv)}'
@@ -1404,7 +1665,7 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     if kind in ("comprehensive", "state"):
         if kind == "state":
             src = unique_name("aggstate")
-            rel.create_view(src, replace=True)
+            temp_view(con, rel, src)
             con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
             con.execute(f"CREATE TABLE {_q(state)} AS SELECT * FROM {_q(src)}")
         else:
@@ -1419,7 +1680,7 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
     # _agg_part_* / _m2_merge_expr helpers). For extremes: the min/max of the *inserted* (+1) rows, plus a
     # per-group flag for whether the group has any retraction (which forces a rescan, below).
     delta = unique_name("aggd")
-    rel.create_view(delta, replace=True)
+    temp_view(con, rel, delta)
     # First pass: per-group distributive sums (group count, per-column Σx & non-NULL counts, the insert/delete
     # partition Σx & counts) and the extreme inserts. The partition means it carries seed the second pass.
     pexprs = [f"CAST(SUM({_q(D_COL)}) AS BIGINT) AS _a_cnt"]
@@ -1502,7 +1763,7 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
                         f"{', '.join(_q(n) for n in names)}, TRUE AS _a_rs FROM {_q(state)} WHERE false")
         else:
             cur = unique_name("aggcur")
-            (current() if callable(current) else current).create_view(cur, replace=True)
+            temp_view(con, (current() if callable(current) else current), cur)
             # The NULL-safe match is a hash join DuckDB can't push into the current state's scan, so a key
             # column with no NULL among the lost groups is matched with `=` first, which it can (the rescan read
             # the whole Source otherwise: 269M rows at TPC-DS SF100, for a few thousand groups).
@@ -1583,7 +1844,7 @@ def apply_aggregate(con, name, by, metrics, kind, rel, current, f, *, retain_t=N
 
 
 def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
-                     fail_on_conflict=True, log_drops=True, retain_t=None, retain_n=None) -> None:
+                     on_conflict="skip_check", log_drops=True, retain_t=None, retain_n=None) -> None:
     """Maintain a per-row **scan** output ``name`` (an append Trickle): enrich each row with its running value
     in ``along`` order within its ``by`` group, continuing each group's **carried fold-state** from the tail.
 
@@ -1603,7 +1864,7 @@ def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
     state = f"{ACC_STATE_PREFIX}{name}"
 
     src = unique_name("accsrc")
-    rel.create_view(src, replace=True)
+    temp_view(con, rel, src)
     type_of = {c: str(t) for c, t in zip(rel.columns, rel.types, strict=True)}
     usercols = [c for c in rel.columns if c != D_COL]
     if along not in usercols:
@@ -1625,7 +1886,7 @@ def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
     # no Python row-loop. Recursive / buffer / custom folds (ema/tema/product/lag/conv/scan) use the fold.
     if by and all(m.kind in _ACC_WINDOWABLE for _, m in metric_list):
         _accumulate_windowed(con, name, by, along, metric_list, src, where, usercols, kind, f, pk,
-                             fail_on_conflict=fail_on_conflict, log_drops=log_drops,
+                             on_conflict=on_conflict, log_drops=log_drops,
                              retain_t=retain_t, retain_n=retain_n)
         return
 
@@ -1664,7 +1925,8 @@ def apply_accumulate(con, name, by, along, metrics, kind, rel, f, pk, *,
     if out_rows:
         tmp = _acc_out_table(con, out_rows, usercols, metric_list, type_of)
         append_zset(con, name, _as_zset(con.sql(f"SELECT * FROM {_q(tmp)}"), 1), f, normalize_pk(pk),
-                    fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n)
+                    on_conflict=on_conflict, full=kind == "comprehensive", log_drops=log_drops,
+                    retain_t=retain_t, retain_n=retain_n)
 
     _save_acc_state(con, state, by, along, metric_list, group, f, type_of)
 
@@ -1761,7 +2023,7 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
     metric_list = list(metrics.items())
     state = f"{ACC_STATE_PREFIX}{name}"
     cur = unique_name("amcur")
-    current.create_view(cur, replace=True)
+    temp_view(con, current, cur)
     type_of = {c: str(t) for c, t in zip(current.columns, current.types, strict=True)}
     usercols = list(current.columns)
     if along not in usercols:
@@ -1781,7 +2043,7 @@ def apply_accumulate_merge(con, name, by, along, metrics, kind, rel, current, f,
         return
 
     delta = unique_name("amd")
-    rel.create_view(delta, replace=True)
+    temp_view(con, rel, delta)
     carried, done = _load_acc_state(con, state, by, metric_list, f)
     tail_keys, past_keys = _classify_affected(con, by, along, delta, carried, done)
     if not tail_keys and not past_keys:
@@ -1836,7 +2098,7 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
     metric_list = list(metrics.items())
     state = f"{ACC_STATE_PREFIX}{name}"
     cur = unique_name("orcur")
-    current.create_view(cur, replace=True)
+    temp_view(con, current, cur)
     type_of = {c: str(t) for c, t in zip(current.columns, current.types, strict=True)}
     usercols = list(current.columns)
     if along not in usercols:
@@ -1867,7 +2129,7 @@ def apply_ordered_reduce(con, name, by, along, metrics, kind, rel, current, f, *
         return
 
     delta = unique_name("ord")
-    rel.create_view(delta, replace=True)
+    temp_view(con, rel, delta)
     carried, done = _load_acc_state(con, state, by, metric_list, f)
     tail_keys, past_keys = _classify_affected(con, by, along, delta, carried, done)
     if not tail_keys and not past_keys:
@@ -1913,7 +2175,7 @@ _ACC_WINDOWABLE = frozenset({"sum", "count", "min", "max", "first"})
 
 
 def _accumulate_windowed(con, name, by, along, metric_list, src, where, usercols, kind, f, pk, *,
-                         fail_on_conflict, log_drops, retain_t, retain_n) -> None:
+                         on_conflict, log_drops, retain_t, retain_n) -> None:
     """The SQL-window fast path for an all-scalar-seed scan: a window over this run's batch plus the carried
     per-group seed (``carried + sum() over w``, ``least(carried, min() over w)``, …). Fully incremental — the
     seed is the running value at the end of the previous run; the new per-group seed is the old value combined
@@ -1970,7 +2232,8 @@ def _accumulate_windowed(con, name, by, along, metric_list, src, where, usercols
     if first_row(con.execute(f"SELECT count(*) FROM {_q(outt)}"))[0] == 0:
         return
     append_zset(con, name, _as_zset(con.sql(f"SELECT * FROM {_q(outt)}"), 1), f, normalize_pk(pk),
-                fail_on_conflict=fail_on_conflict, log_drops=log_drops, retain_t=retain_t, retain_n=retain_n)
+                on_conflict=on_conflict, full=kind == "comprehensive", log_drops=log_drops,
+                retain_t=retain_t, retain_n=retain_n)
 
     hw = f"greatest(any_value(ss._k_along), max({alq}))" if seeded else f"max({alq})"
     seedt = unique_name("accseed")
@@ -2619,7 +2882,7 @@ def _agg_rebuild(con, state, rel, by, metrics, f) -> None:
     """(Re)build the accumulator state wholesale from a clean full output ``rel``: the comprehensive path
     (bootstrap / coverage-miss). Idempotent: same input → same state."""
     src = unique_name("aggfull")
-    rel.create_view(src, replace=True)
+    temp_view(con, rel, src)
     con.execute(f"DROP TABLE IF EXISTS {_q(state)}")
     con.execute(f"CREATE TABLE {_q(state)} AS {agg_rebuild_select(src, by, metrics, f)}")
 
@@ -2813,18 +3076,33 @@ def window_changed(con, data_dir, table: str, previous_f, f) -> bool:
     else:
         log = table
         dirs = [table]
-    log_parts = table_parts(data_dir, log)
+    log_parts = live_parts(table_parts(data_dir, log))
     if not log_parts and meta.get("mode") == "merge":
         return True  # no changelog published: read_delta reads the table in full
-    oldest = part_f(log_parts[0]) if log_parts else None
+    oldest = min(part_lo(n) for n in log_parts) if log_parts else None
     if not _covered(previous_f, NEVER, floor, oldest):
         return True
-    window = [store.uri(d, n) for d in dirs for n in table_parts(data_dir, d) if previous_f < part_f(n) <= f]
-    if not window:
+    whole, cut = [], []  # files inside the window, and unions reaching past either end of it
+    for d in dirs:
+        for n in live_parts(table_parts(data_dir, d)):
+            hi, lo = part_f(n), part_lo(n)
+            if hi <= previous_f or lo > f:
+                continue
+            (whole if previous_f < lo and hi <= f else cut).append(store.uri(d, n))
+    if not whole and not cut:
         return False
-    files = ", ".join(f"'{u}'" for u in window)
-    (rows,) = first_row(con.execute(f"SELECT coalesce(sum(num_rows), 0) FROM parquet_file_metadata([{files}])"))
-    return rows > 0
+    if whole:
+        files = ", ".join(f"'{u}'" for u in whole)
+        (rows,) = first_row(con.execute(f"SELECT coalesce(sum(num_rows), 0) FROM parquet_file_metadata([{files}])"))
+        if rows > 0:
+            return True
+    if cut:  # a union holds rows outside the window too: count the window's own
+        files = ", ".join(f"'{u}'" for u in cut)
+        (rows,) = first_row(con.execute(
+            f"SELECT count(*) FROM read_parquet([{files}], union_by_name=true) "
+            f"WHERE {_q(F_COL)} > {_ts(previous_f)} AND {_q(F_COL)} <= {_ts(f)}"))
+        return rows > 0
+    return False
 
 
 def overwrite_version_f(data_dir, table: str, at):
@@ -2851,7 +3129,24 @@ def _covered(previous_f, NEVER, floor, oldest) -> bool:
     return bound is None or previous_f >= bound
 
 
+def _window_sql(dp, data_dir, table, previous_f, f, floor, NEVER) -> str | None:
+    """The rows of the parts directory ``table`` in ``(previous_f, f]``, reading only the parts in that window
+    (the host data plane's optional ``read_window``), when the floor shows the window is covered. ``None`` when
+    the host has no such read or coverage needs the history itself."""
+    reader = getattr(dp, "read_window", None)
+    if reader is None or floor is None or not _covered(previous_f, NEVER, floor, None):
+        return None
+    try:
+        return reader(data_dir, table, after=previous_f, as_of=f)
+    except FileNotFoundError:
+        return None
+
+
 def _read_append_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor, materialise=False) -> Delta:
+    window = _window_sql(dp, data_dir, table, previous_f, f, floor, NEVER)
+    if window is not None:
+        zset = _as_zset(_strip_system(con.sql(window)), 1)
+        return Delta(con, pk, _materialise(con, zset) if materialise else zset, is_full=False, insert_only=True)
     # As-of pin to `f`: read the one Source snapshot at this run's freshness (the data plane pins it; the
     # coverage probe shares the same SELECT so a mid-run republish can't make them see different snapshots).
     return _append_delta_from_sql(con, dp.read_select(data_dir, table, as_of=f), previous_f, f, pk, NEVER, floor,
@@ -2862,7 +3157,7 @@ def _append_delta_from_sql(con, hist_sql, previous_f, f, pk, NEVER, floor, mater
     """The append-delta core over a single history SELECT — shared by the published read and the in-run
     registry read. Append rows are all present (``+1``); never retracted."""
     rel = con.sql(hist_sql)  # includes _duckstring_f
-    oldest = first_row(con.sql(f"SELECT min({_q(F_COL)}) FROM ({hist_sql})"))[0]
+    oldest = None if floor is not None else first_row(con.sql(f"SELECT min({_q(F_COL)}) FROM ({hist_sql})"))[0]
     full = not _covered(previous_f, NEVER, floor, oldest)
     upper = f"{_q(F_COL)} <= {_ts(f)}"
     cond = upper if full else f"{_q(F_COL)} > {_ts(previous_f)} AND {upper}"
@@ -2873,6 +3168,9 @@ def _append_delta_from_sql(con, hist_sql, previous_f, f, pk, NEVER, floor, mater
 
 def _read_merge_delta(con, data_dir, table, previous_f, f, pk, dp, NEVER, floor, materialise=False) -> Delta:
     clog = changelog_name(table)
+    window = _window_sql(dp, data_dir, clog, previous_f, f, floor, NEVER)
+    if window is not None:
+        return _merge_window_delta(con, window, pk, materialise)
     try:
         clog_sql = dp.read_select(data_dir, clog, as_of=f)  # as-of pin to this run's freshness
     except FileNotFoundError:
@@ -2887,7 +3185,7 @@ def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, flo
     the in-run registry read (:func:`read_registry_delta`). ``previous_f`` covered by the floor → a windowed
     Z-set; otherwise a full read at ``+1``."""
     oldest = None
-    if clog_sql is not None:
+    if clog_sql is not None and floor is None:
         oldest = first_row(con.sql(f"SELECT min({_q(F_COL)}) FROM ({clog_sql})"))[0]
     full = clog_sql is None or not _covered(previous_f, NEVER, floor, oldest)
     if full:
@@ -2896,10 +3194,15 @@ def _merge_delta_from_sql(con, main_sql, clog_sql, previous_f, f, pk, NEVER, flo
     # Window the changelog and consolidate by full row (the net Z-set over the window — multiple updates
     # and delete-then-re-add collapse). Inlined as a self-contained subquery (over immutable read_parquet),
     # NOT a named view: several read_delta calls in one run would share a view name and re-bind.
-    user = [c for c in con.sql(clog_sql).columns if c not in (F_COL, D_COL)]
-    sel = ", ".join(_q(c) for c in user)
     window = (f"SELECT * FROM ({clog_sql}) "
               f"WHERE {_q(F_COL)} > {_ts(previous_f)} AND {_q(F_COL)} <= {_ts(f)}")
+    return _merge_window_delta(con, window, pk, materialise)
+
+
+def _merge_window_delta(con, window: str, pk, materialise=False) -> Delta:
+    """A merge changelog's rows in a delta window (``window``, a SELECT), consolidated by full row."""
+    user = [c for c in con.sql(window).columns if c not in (F_COL, D_COL)]
+    sel = ", ".join(_q(c) for c in user)
     # A window with no retraction inserted new keys only: a consolidated merge log pairs every update's +1
     # with a -1, so no key appears twice and nothing can cancel. Read it as it is (an insert-only change).
     lowest = first_row(con.sql(f"SELECT min({_q(D_COL)}) FROM ({window})"))[0]
@@ -2921,7 +3224,7 @@ def _materialise(con, rel):
     reading inside a transaction that writes another attached database (the DuckLake Spout) can't create
     one."""
     name = unique_name("delta")
-    rel.create_view(name + "_q", replace=True)
+    temp_view(con, rel, name + "_q")
     con.execute(f"CREATE OR REPLACE TEMP TABLE {_q(name)} AS SELECT * FROM {_q(name + '_q')}")
     con.execute(f"DROP VIEW {_q(name + '_q')}")
     return con.table(name)

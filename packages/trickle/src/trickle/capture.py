@@ -20,7 +20,7 @@ builder-derived ``catalog`` + ``statements`` body.
 from __future__ import annotations
 
 from .builder import BuildError, TrickleBuilder, _Join, _Source
-from .io import normalize_pk
+from .io import check_on_conflict, normalize_pk, reject_removed
 
 
 class NonCapturable(Exception):
@@ -130,18 +130,19 @@ def _merge_options(ivm, key_filter, retain_t, retain_n) -> dict:
     return opts
 
 
-def _append_options(ivm, key_filter, fail_on_conflict, log_drops, retain_t, retain_n) -> dict:
-    """Sparse ``options`` for an append terminal. ``fail_on_conflict``/``log_drops`` are emitted only when
-    conflicts are **waived** (``fail_on_conflict=False``) — with conflicts raising, ``log_drops`` has no
-    effect, so it is omitted. Order: ivm, key_filter, fail_on_conflict, log_drops, retain_t_s, retain_n."""
+def _append_options(ivm, key_filter, on_conflict, log_drops, retain_t, retain_n) -> dict:
+    """Sparse ``options`` for an append terminal: only what differs from the defaults. ``log_drops`` is
+    omitted under ``on_conflict="fail"``, where nothing is dropped. Order: ivm, key_filter, on_conflict,
+    log_drops, retain_t_s, retain_n."""
     opts: dict = {}
     if not ivm:
         opts["ivm"] = False
     if not key_filter:
         opts["key_filter"] = False
-    if not fail_on_conflict:
-        opts["fail_on_conflict"] = False
-        opts["log_drops"] = bool(log_drops)
+    if on_conflict != "skip_check":
+        opts["on_conflict"] = on_conflict
+    if not log_drops and on_conflict != "fail":
+        opts["log_drops"] = False
     _retention_options(opts, retain_t, retain_n)
     return opts
 
@@ -247,11 +248,14 @@ class CaptureBuilder(TrickleBuilder):
         self._emit(name, "merge", pk, eff_pk, options)
         return self._chain(name, eff_pk)
 
-    def append(self, name: str, *, pk=None, fail_on_conflict: bool = True, log_drops: bool = True,
-               ivm: bool = True, key_filter: bool = True, retain_t=None, retain_n=None) -> "CaptureBuilder":
+    def append(self, name: str, *, pk=None, on_conflict: str = "skip_check", log_drops: bool = True,
+               ivm: bool = True, key_filter: bool = True, retain_t=None, retain_n=None,
+               **removed) -> "CaptureBuilder":
+        reject_removed(removed, f".append('{name}')", {True: "fail", False: "keep_prior"})
+        check_on_conflict(on_conflict, f".append('{name}')")
         if self._agg is not None:
             raise BuildError(".append() can't follow .aggregate() — an aggregate updates groups; use .merge()")
-        options = _append_options(ivm, key_filter, fail_on_conflict, log_drops, retain_t, retain_n)
+        options = _append_options(ivm, key_filter, on_conflict, log_drops, retain_t, retain_n)
         eff_pk = normalize_pk(pk)
         self._emit(name, "append", pk, eff_pk, options)
         return self._chain(name, eff_pk)

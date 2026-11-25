@@ -35,6 +35,20 @@ function rippleWidth(r: Ripple, floor = 0): number {
   return Math.max(MIN_RIPPLE_W, floor, Math.ceil(nameW + 20 /* padding */));
 }
 
+const EXTERNAL_H = 56;
+
+// An external source's label: an App line's data reads as "feedback v1", anything else as written.
+export function externalLabel(ext: string): string {
+  const m = /^app:([a-z_][a-z0-9_]*)@(\d+)$/.exec(ext);
+  return m ? `${m[1]} v${m[2]}` : ext;
+}
+
+// The App line an external source names (`app:name@major`), or null.
+export function externalApp(ext: string): { name: string; major: number } | null {
+  const m = /^app:([a-z_][a-z0-9_]*)@(\d+)$/.exec(ext);
+  return m ? { name: m[1], major: Number(m[2]) } : null;
+}
+
 // Minimum pond width to fit its name on the title line (the stats line is floored separately).
 function pondNameWidth(name: string): number {
   return Math.ceil(name.length * 8.2 + 24 /* padding */); // ~13px bold monospace
@@ -181,6 +195,14 @@ export function computeLayout(
     pondLayouts[pond.id] = layout;
   }
 
+  // Declared external sources ([pond] external): one node per distinct name, an edge into each Pond naming it
+  // (plans/records-and-media.md). `app:name@major` is an App line's Records and Media, never linked to the App.
+  const externals = new Map<string, PondId[]>();
+  for (const pond of pondList) {
+    for (const ext of pond.external ?? []) externals.set(ext, [...(externals.get(ext) ?? []), pond.id]);
+  }
+  const extSize = (ext: string) => ({ width: Math.max(160, pondNameWidth(externalLabel(ext)) + 40), height: EXTERNAL_H });
+
   // Step 2: compute pond-level layout
   const pg = new dagre.graphlib.Graph();
   pg.setGraph({ rankdir: direction, ranksep: vertical ? 80 : 120, nodesep: vertical ? 60 : 80, marginx: 40, marginy: 40 });
@@ -196,6 +218,10 @@ export function computeLayout(
   for (const box of remote.boxes) {
     pg.setNode(`cat:${box.id}`, { width: box.w, height: box.h });
     dagreNodes.add(`cat:${box.id}`);
+  }
+  for (const [ext, sinks] of externals) {
+    pg.setNode(`ext:${ext}`, extSize(ext));
+    for (const sink of sinks) pg.setEdge(`ext:${ext}`, sink);
   }
   for (const pond of pondList) {
     for (const sourceId of pond.sources) {
@@ -280,6 +306,30 @@ export function computeLayout(
           data: { sourcePondId: sourceId, sinkPondId: pond.id },
         });
       }
+    }
+  }
+
+  for (const [ext, sinks] of externals) {
+    const n = pg.node(`ext:${ext}`);
+    const { width, height } = extSize(ext);
+    nodes.push({
+      id: `ext:${ext}`,
+      type: 'external',
+      position: { x: n.x - width / 2, y: n.y - height / 2 },
+      data: { external: ext, vertical },
+      style: { width, height },
+      draggable: false,
+    });
+    for (const sink of sinks) {
+      edges.push({
+        id: `xe-${ext}-${sink}`,
+        source: `ext:${ext}`,
+        sourceHandle: 'out',
+        target: sink,
+        targetHandle: 'in',
+        type: 'default',
+        style: { stroke: '#52525b', strokeWidth: 1.5, strokeDasharray: '2 4' },
+      });
     }
   }
 

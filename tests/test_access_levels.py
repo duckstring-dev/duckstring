@@ -238,3 +238,19 @@ def test_cli_rotate_keys_updates_stored_full_key(runner, laddered_server):
 
     assert httpx.get(f"{url}/api/status", headers={"Authorization": f"Bearer {new_full}"}).status_code == 200
     assert httpx.get(f"{url}/api/status", headers={"Authorization": f"Bearer {keys['full']}"}).status_code == 401
+
+
+def test_rotating_revokes_the_full_key_a_started_catchment_was_given(tmp_path):
+    """`catchment start` passes the registration's full key to the server; rotation must still revoke it (it
+    used to stay valid in memory until a restart)."""
+    with TestClient(create_app(tmp_path)) as client:
+        keys = auth.generate(client.app.state.db)
+    with TestClient(create_app(tmp_path, api_key=keys["full"])) as client:
+        assert client.get("/api/secrets", headers=_bearer(keys["full"])).status_code == 200
+        r = client.post("/api/catchment/keys/rotate", headers=_bearer(keys["full"]), json={})
+        assert r.status_code == 200
+        assert client.get("/api/secrets", headers=_bearer(keys["full"])).status_code == 401
+        assert client.get("/api/secrets", headers=_bearer(r.json()["keys"]["full"])).status_code == 200
+    # A legacy single key (not one of the tiered ones) still works as before.
+    with TestClient(create_app(tmp_path / "solo", api_key="solo")) as client:
+        assert client.get("/api/secrets", headers=_bearer("solo")).status_code == 200

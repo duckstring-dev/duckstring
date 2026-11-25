@@ -54,7 +54,7 @@ class Producer:
 
 def _sink(root, f, previous_f, pin=None, source="src"):
     return Pond("snk", "1.0.0", duckdb.connect(), root, source_majors={source: 1}, f=f, previous_f=previous_f,
-                source_f={source: (pin or f).isoformat()})
+                read_positions={source: (pin or f).isoformat()})
 
 
 # ─── the ledger ──────────────────────────────────────────────────────────────────

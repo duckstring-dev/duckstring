@@ -119,6 +119,26 @@ def test_trickle_demo_runs_locally(runner, tmp_path, monkeypatch):
         hydrate(project)
         result = run_pond(project)
         assert result.ok, [r.error for r in result.ripples if r.status != "ok"]
+        for _ in range(2):  # the Puddles' steps give two incremental windows
+            result = run_pond(project, incremental=True)
+            assert result.ok, [r.error for r in result.ripples if r.status != "ok"]
+            assert result.stepped
+
+    # priced's two incremental windows (new orders, a laptop price cut) match a recompute from the same data.
+    import duckdb
+
+    from duckstring.dataplane import ParquetDataPlane
+
+    priced = tmp_path / "priced" / "puddles"
+    dp, con = ParquetDataPlane(), duckdb.connect()
+    got = sorted(con.sql(f"SELECT order_id, unit_price, revenue FROM ({dp.read_select(priced / 'out', 'priced_line')})")
+                 .fetchall())
+    orders = dp.read_select(priced / "work" / "orders" / "data", "order_line")
+    products = dp.read_select(priced / "work" / "catalog" / "data", "product")
+    want = sorted(con.sql(
+        f"SELECT o.order_id, p.unit_price, o.quantity * p.unit_price FROM ({orders}) o JOIN ({products}) p "
+        "USING (product_id)").fetchall())
+    assert len(got) == 8 and got == want  # exact: DECIMAL prices (pytest.approx refuses tuples)
 
 
 def test_sql_demo_runs_locally(runner, tmp_path, monkeypatch):

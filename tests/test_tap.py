@@ -236,7 +236,8 @@ def test_refresh_now_takes_fresh_within(tmp_path, monkeypatch):
     app.state.driver, app.state.db, app.state.root, app.state.data_root = driver, driver.db, tmp_path, None
     client = TestClient(app)
     ms = int(timedelta(days=1).total_seconds() * 1000)
-    assert client.post("/api/ponds/extra/refresh", params={"fresh_within_ms": ms}).json() == {"ok": True}
+    assert client.post("/api/ponds/extra/refresh", params={"fresh_within_ms": ms}).json() == {
+        "ok": True, "requested": (NOW - timedelta(days=1)).isoformat()}
     st = lambda key: driver.state.pond_states[key]  # noqa: E731
     assert st("inlet@1").start_f == NOW - timedelta(hours=6) and st("extra@1").start_f == NOW - timedelta(hours=6)
     assert client.post("/api/ponds/extra/refresh", params={"fresh_within_ms": -1}).status_code == 422
@@ -266,6 +267,9 @@ def test_a_tap_key_reads_its_ponds_exposed_tables_and_nothing_else(tmp_path):
         assert client.post("/api/query", json={"sql": sql}, headers=h).status_code == 400
     # Another Pond named is refused; so is every route but the query ones.
     assert client.post("/api/query", json={"pond": "other", "sql": "SELECT 1"}, headers=h).status_code == 403
+    # A Tap reads the newest data only.
+    assert client.post("/api/query", json={"sql": "SELECT 1", "at": "2026-01-01T00:00:00+00:00"},
+                       headers=h).status_code == 422
     assert client.get("/api/status", headers=h).status_code == 403
     assert client.post("/api/ponds/sales/refresh", headers=h).status_code == 403
     assert client.get("/api/ponds/sales/taps", headers=h).status_code == 403

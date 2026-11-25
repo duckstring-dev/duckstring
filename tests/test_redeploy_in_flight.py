@@ -93,7 +93,8 @@ def test_a_duck_on_a_replaced_version_hands_its_work_to_a_new_duck(tmp_path):
     _register(db, "p", "1.0.1", "inlet", "ponds/p/1.0.1", _CFG, _RIPPLES)
     d.reload()
     d.refresh_now("p@1")
-    assert d.take_jobs("p@1", version="1.0.0") == [{"kind": "shutdown"}]  # the old Duck gets no new work
+    # The old Duck gets no new work, and is told it was replaced (it gives up a failing Run without retrying).
+    assert d.take_jobs("p@1", version="1.0.0") == [{"kind": "shutdown", "replaced": True}]
     d.scheduler_tick()
     assert launcher.spawned == [("p@1", "1.0.0")]  # still finishing up: no second Duck beside it
 
@@ -143,3 +144,92 @@ def test_a_duck_on_compute_the_pond_left_hands_its_work_to_a_new_duck(tmp_path):
     d.scheduler_tick()
     assert len(launcher.spawned) == 2 and launcher.backend["p@1"] == "catchment"
     assert [j["kind"] for j in d.take_jobs("p@1", version="1.0.0")] == ["begin_run"]
+
+
+def test_a_run_the_replaced_version_gives_up_runs_again_on_the_new_one(tmp_path):
+    """A Run of the old version failing after a redeploy used to fail the Pond (the redeploy had already cleared
+    failures), so a fix deployed while the broken code was retrying left the Pond failed. Its failure is now the
+    old code's: the attempt is recorded, and the Pond runs again on the new version without failing or alerting
+    (attention FINDINGS 8)."""
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "p", "1.0.0", "inlet", "ponds/p/1.0.0", _CFG, _RIPPLES)
+    launcher = _OneDuck()
+    d = Driver(db, tmp_path, "http://x", launcher)
+    d.add_channel("ops", "https://hooks.example/x", scope=None, events="all")
+    d.refresh_now("p@1")
+    assert [j["kind"] for j in d.take_jobs("p@1", version="1.0.0")] == ["begin_run"]
+    f = d.state.pond_states["p@1"].start_f.isoformat()
+    d.on_event("p@1", {"kind": "ripple", "f": f, "ripple": "r1", "status": "success"})
+
+    _register(db, "p", "1.0.1", "inlet", "ponds/p/1.0.1", _CFG, _RIPPLES)
+    d.reload()
+    d.clear_on_redeploy("p", 1)
+    assert d.take_jobs("p@1", version="1.0.0")[0]["replaced"]
+    d.on_event("p@1", {"kind": "failed", "f": f, "ripple": "r2", "status": "failed", "error": "KeyError: 'x'"})
+
+    pond = d.status()["ponds"][0]
+    assert not pond["is_failed"] and pond["status"] != "failed"
+    row = db.execute("SELECT pv.version, pr.status, pr.error FROM pond_run pr "
+                     "JOIN pond_version pv ON pv.id = pr.pond_version_id WHERE pr.f = ?", (f,)).fetchall()
+    assert row[0][:2] == ("1.0.0", "failed") and "1.0.1" in row[0][2] and "KeyError" in row[0][2]
+    assert db.execute("SELECT count(*) FROM alert_delivery").fetchall()[0][0] == 0
+
+    del launcher.running["p@1"]  # the old Duck exits; the Pond's next Run is the new version's
+    d.scheduler_tick()
+    assert launcher.spawned[-1] == ("p@1", "1.0.1")
+    jobs = d.take_jobs("p@1", version="1.0.1")
+    assert [j["kind"] for j in jobs] == ["begin_run"]
+    _finish(d, jobs[0]["f"])
+    assert [r[:2] for r in _runs(db)] == [("1.0.0", "failed"), ("1.0.1", "success")]
+
+
+def test_a_failure_on_the_selected_version_still_fails_the_pond(tmp_path):
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "p", "1.0.0", "inlet", "ponds/p/1.0.0", _CFG, _RIPPLES)
+    d = Driver(db, tmp_path, "http://x", _OneDuck())
+    d.refresh_now("p@1")
+    f = d.state.pond_states["p@1"].start_f.isoformat()
+    d.on_event("p@1", {"kind": "ripple", "f": f, "ripple": "r1", "status": "success"})
+    d.on_event("p@1", {"kind": "failed", "f": f, "ripple": "r2", "status": "failed", "error": "boom"})
+    assert d.status()["ponds"][0]["is_failed"]
+
+
+def test_runs_a_replaced_duck_hands_back_go_to_the_new_version(tmp_path):
+    """A replaced Duck hands back the Runs it hasn't started (attention FINDINGS 5): each runs on the new version,
+    at the read positions it was dispatched with, and no record of it is left on the old version."""
+    import time
+
+    db = connect(tmp_path / "duck.db")
+    migrate(db)
+    _register(db, "p", "1.0.0", "inlet", "ponds/p/1.0.0", _CFG, _RIPPLES)
+    launcher = _OneDuck()
+    d = Driver(db, tmp_path, "http://x", launcher)
+    d.refresh_now("p@1")
+    f1 = d.take_jobs("p@1", version="1.0.0")[0]["f"]
+    d.on_event("p@1", {"kind": "ripple", "f": f1, "ripple": "r1", "status": "success"})
+    time.sleep(0.01)
+    d.refresh_now("p@1")  # a second Run pipelines behind the first, as under a continuous Refresh
+    second = d.take_jobs("p@1", version="1.0.0")
+    assert [j["kind"] for j in second] == ["begin_run"]
+    f2, positions = second[0]["f"], second[0]["read_positions"]
+    assert f2 > f1
+
+    _register(db, "p", "1.0.1", "inlet", "ponds/p/1.0.1", _CFG, _RIPPLES)
+    d.reload()
+    assert d.take_jobs("p@1", version="1.0.0")[0]["replaced"]
+    d.on_event("p@1", {"kind": "released", "f": f2})  # the Duck hands back the Run it hasn't started
+    assert [r[:2] for r in _runs(db)] == [("1.0.0", "running"), ("1.0.1", "running")]
+    assert d.take_jobs("p@1", version="1.0.0") == [{"kind": "shutdown", "replaced": True}]  # not for the old Duck
+    d.on_event("p@1", {"kind": "released", "f": f2})  # a replayed event changes nothing
+    _finish(d, f1)  # the old Duck finishes the Run in progress, on its own version
+
+    del launcher.running["p@1"]
+    d.scheduler_tick()
+    assert launcher.spawned[-1] == ("p@1", "1.0.1")
+    jobs = d.take_jobs("p@1", version="1.0.1")
+    assert [(j["kind"], j["f"]) for j in jobs] == [("begin_run", f2)] and jobs[0]["read_positions"] == positions
+    _finish(d, f2)
+    assert [r[:2] for r in _runs(db)] == [("1.0.0", "success"), ("1.0.1", "success")]
+    assert not d.status()["ponds"][0]["is_failed"]

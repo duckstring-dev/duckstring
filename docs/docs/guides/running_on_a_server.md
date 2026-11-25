@@ -20,6 +20,12 @@ python3 -m venv ~/venv
 
 A Pond that declares its own [Python dependencies](writing_ripples.md#python-dependencies) runs in an environment the Catchment builds for it on deploy, under the Catchment's directory. A Pond that doesn't runs in this environment, so install any packages its Ripples import here.
 
+If Apps on the Catchment will keep [Records](records_and_media.md), install PostgreSQL too, as root:
+
+```bash
+sudo /home/duckstring/venv/bin/duckstring install postgres
+```
+
 ## Create the Catchment
 
 Still as the `duckstring` user, create and register the Catchment without starting it:
@@ -124,6 +130,8 @@ duckstring catchment init --name prod --state-backup 's3://acme-lake/duckstring-
 ```
 
 A Catchment starting with an empty state directory restores from its state backup automatically.
+
+Both include Apps' Records, as a `pg_dump` taken at the time, and their Media; the state backup carries Media up to 256 MB. For more, keep Media in object storage with [`catchment media --use`](../reference/cli/catchment.md#media).
 
 ## Maintenance
 

@@ -26,7 +26,7 @@ The decorated function takes one argument, the [Pond handle](pond.md), and its r
 | `parents` | list of functions or names | `[]` | Ripples in the same Pond that must finish before this one starts, given as function references or as names. A name can also refer to a [SQL Ripple](../../guides/sql_ripples.md) declared in `pond.toml`. Dependencies on other Ponds are declared in `pond.toml`, never here. |
 | `name` | `str` | the function name | The Ripple's name, used in run history, the UI and `duckstring pond run --ripple`. |
 | `always_run` | `bool` | `False` | Run even when no Source has changed since the last Pond Run. Without it, such a run is skipped. Set this on a Ripple with side effects that must happen every run. If any Ripple in a Pond sets it, the whole Pond always runs. |
-| `memory` | size or `int` | `pond.toml`'s `[pond] memory`, else none | The memory the Ripple holds outside DuckDB, such as a pandas DataFrame or a model, as a size (`"6GB"`, `"512MB"`, `"2GiB"`) or bytes. The Catchment reserves it on the machine while the Pond runs, and leaves it out of DuckDB's share. Work done in DuckDB needs none: DuckDB keeps to its share and spills to disk. |
+| `memory` | size or `int` | `pond.toml`'s `[pond] memory`, else one memory slot | The memory the Pond's Runs need while this Ripple runs, DuckDB and anything held in Python (a DataFrame, a model) together, as a size (`"6GB"`, `"512MB"`, `"2GiB"`) or bytes. On the Catchment's own machine, the Pond waits for the [memory slots](../environment.md#ducks) that cover the largest of its Ripples' declarations, and DuckDB's limit is all of them. Declare it when a Run needs more than one slot holds; DuckDB spills to disk within its limit, so most Ponds don't. |
 
 Ripples with no parents in common run in parallel. A Ripple runs at most once at a time, but Ripples from consecutive Pond Runs can overlap.
 
@@ -75,14 +75,15 @@ def notify(pond):
 ## `@puddle`
 
 ```python
-puddle(target)
+puddle(target, *, set=None)
 ```
 
-Registers a function that builds a [Puddle](../../concepts/ponds.md#puddles): a local snapshot of Source data used by `duckstring pond hydrate` and `duckstring pond run`.
+Registers a function that builds a [Puddle](../../concepts/ponds.md#puddles): a local stand-in for Source data, used by `duckstring pond hydrate` and `duckstring pond run`.
 
 | Parameter | Type | Description |
 |---|---|---|
 | `target` | `str` | Either `"source.table"`, for one table of a Source, or `"source"`, for a whole Source whose tables the function names itself. |
+| `set` | `str` or tuple of `str` | The Puddle set the definition belongs to, or several. Without it, the definition is in the default set. |
 
 The decorated function takes one argument, the [Puddle handle](puddle.md). It can write its data through the handle, or return it: a returned relation is written as the target table, and a returned path is copied in with `write_path`. A Puddle may also target the Pond's own name, to provide its previous output for testing incremental runs.
 
@@ -91,11 +92,44 @@ from duckstring import puddle
 
 @puddle("transactions.transaction")
 def transactions(p):
-    p.write_table(p.con.sql("SELECT * FROM range(100) t(id)"))
+    return p.read_source().filter("store_id = 7")
 
 @puddle("products")
 def products(p):
     p.write_table("product", p.catchment().get("product"))
 ```
 
-A Source with no Puddle definition is skipped with a warning when hydrating, unless `--from-catchment` is passed.
+A definition that reads its Source with [`p.read_source`](puddle.md#read_source) can be read live and replayed through the Source's history (`pond hydrate --live`, `--as-at`), so it must give the same rows for the same data: a filter, a join or a sample by key hash, not a random sample.
+
+A Source with no Puddle definition is skipped with a warning when hydrating, unless `--live`, `--as-at` or `--from-catchment` reads it from the Catchment.
+
+### Puddle sets
+
+Sets keep several versions of a Pond's Puddles side by side, such as a small sample and a full week. `pond hydrate --set NAME`, or a Source's entry in [`puddles.toml`](../cli/pond.md#puddlestoml), picks the set. For each target, the set's definition is used where it has one and the default set's otherwise. A whole-Source definition in a set replaces all of that Source's default ones. `default` names the unlabelled definitions, so it can't be used as a label, and two definitions for one target in one set are an error.
+
+```python
+@puddle("transactions.transaction", set=("recent", "full"))
+def transactions(p):
+    ...
+```
+
+## `@puddle.step`
+
+```python
+puddle.step(target, *, set=None)
+```
+
+Registers a function that writes the next window of a Puddle, for `duckstring pond run --incremental`. A step runs when the run's target lies beyond the history a Source's Puddle holds, so a test can go on past the end of real data, or run on generated data alone. Steps apply to copied Puddles, not live ones.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `target` | `str` | As for `@puddle`. |
+| `set` | `str` or tuple of `str` | As for `@puddle`. |
+
+A step writes through the same handle as a definition, usually with `append_table` or `merge_table`, and sees `p.previous_f`, `p.f` and `p.step`. Seed generated data with `p.step`, so a rerun from the baseline writes the same rows. A step that writes nothing still counts: the Source ran and didn't change. For a test on generated data alone, give every Source a step.
+
+```python
+@puddle.step("orders.order_line")
+def more_orders(p):
+    p.append_table(p.con.sql(f"SELECT {p.step} * 100 + range AS order_id FROM range(5)"), pk="order_id")
+```

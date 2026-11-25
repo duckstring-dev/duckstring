@@ -26,6 +26,23 @@ def _out(out_dir, table):
 
     return ParquetDataPlane().table_path(out_dir, table)
 
+
+def _puddle_rows(root: Path, source: str, table: str) -> list[tuple]:
+    """A hydrated Puddle table's rows, read through the data plane as a local run reads it."""
+    from duckstring.dataplane import ParquetDataPlane
+
+    data = root / "puddles" / "ponds" / source / "data"
+    con = duckdb.connect()
+    select = ParquetDataPlane().read_select(data, table)
+    cols = [c for c in con.sql(select).columns if not c.startswith("_duckstring_")]
+    return sorted(con.sql(f"SELECT {', '.join(cols)} FROM ({select})").fetchall())
+
+
+def _puddle_tables(root: Path, source: str) -> set[str]:
+    from duckstring.dataplane import ParquetDataPlane
+
+    return set(ParquetDataPlane().list_tables(root / "puddles" / "ponds" / source / "data"))
+
 def _make_pond(
     path: Path,
     name: str = "salesish",
@@ -74,10 +91,7 @@ def test_hydrate_synthetic_materialises_snapshot(tmp_path):
     results, warnings = hydrate(project)
     assert [r.status for r in results] == ["ok"]
     assert warnings == []
-    pq = tmp_path / "puddles" / "ponds" / "tx" / "data" / "event.parquet"
-    assert pq.exists()
-    (count,) = first_row(duckdb.sql(f"SELECT count(*) FROM read_parquet('{pq}')"))
-    assert count == 5
+    assert len(_puddle_rows(tmp_path, "tx", "event")) == 5
 
 
 def test_hydrate_path_puddle_copies_file(tmp_path):
@@ -93,9 +107,7 @@ def test_hydrate_path_puddle_copies_file(tmp_path):
     project = load_project(_make_pond(tmp_path, puddles_py=puddles_py))
     results, _ = hydrate(project)
     assert results[0].status == "ok"
-    pq = tmp_path / "puddles" / "ponds" / "tx" / "data" / "event.parquet"
-    rows = duckdb.sql(f"SELECT * FROM read_parquet('{pq}')").fetchall()
-    assert rows == [(1, 100)]
+    assert _puddle_rows(tmp_path, "tx", "event") == [(1, 100)]
 
 
 def test_hydrate_whole_source_puddle_names_tables(tmp_path):
@@ -110,8 +122,7 @@ def test_hydrate_whole_source_puddle_names_tables(tmp_path):
     project = load_project(_make_pond(tmp_path, puddles_py=puddles_py))
     results, _ = hydrate(project)
     assert results[0].status == "ok"
-    data = tmp_path / "puddles" / "ponds" / "tx" / "data"
-    assert {f.name for f in data.glob("*.parquet")} == {"event.parquet", "meta.parquet"}
+    assert _puddle_tables(tmp_path, "tx") == {"event", "meta"}
 
 
 def test_hydrate_missing_definition_warns_and_skips(tmp_path):
@@ -240,6 +251,7 @@ def test_run_ripple_failure_stops_and_carries_traceback(tmp_path):
             pond.write_table("never", pond.con.sql("SELECT 1"))
     """
     project = load_project(_make_pond(tmp_path, pond_py=pond_py))
+    hydrate(project)
     result = run_pond(project)
     assert not result.ok
     assert [r.name for r in result.ripples] == ["bad"]  # stopped at the failure
@@ -332,6 +344,33 @@ def test_puddle_ls_show_query(runner, tmp_path, monkeypatch):
     assert "200" in result.output
 
 
+_TRICKLE_POND = """
+    from duckstring import ripple
+
+    @ripple
+    def load(pond):
+        pond.append_table("obs", pond.con.sql("SELECT range AS id, range * 10 AS delay FROM range(4)"), pk="id")
+        pond.merge_table("stop", pond.con.sql("SELECT range AS stop_id, 'stop ' || range AS name FROM range(3)"),
+                         pk="stop_id")
+"""
+
+
+def test_puddle_viewer_sees_append_and_merge_tables(runner, tmp_path, monkeypatch):
+    """The viewer listed single files and plain-table versions only, so every Trickle output was missing from
+    ``ls`` and ``query`` said it didn't exist (the transit showcase: all but three of its tables)."""
+    monkeypatch.chdir(_make_pond(tmp_path, name="trains", sources={}, pond_py=_TRICKLE_POND))
+    run_pond(load_project(tmp_path))
+    result = runner.invoke(app, ["pond", "puddle", "ls"])
+    assert result.exit_code == 0, result.output
+    assert "trains.obs" in result.output and "trains.stop" in result.output
+    assert "changelog" not in result.output
+    result = runner.invoke(app, ["pond", "puddle", "query",
+                                 'SELECT count(*) AS n, sum(delay) AS d FROM "trains"."obs" '
+                                 'CROSS JOIN (SELECT count(*) AS s FROM stop)'])
+    assert result.exit_code == 0, result.output
+    assert "60" in result.output and "_duckstring" not in result.output
+
+
 def test_puddle_ls_empty(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(_make_pond(tmp_path))
     result = runner.invoke(app, ["pond", "puddle", "ls"])
@@ -418,8 +457,7 @@ def test_catchment_get_puddle(tmp_path, live_catchment, catchment_root):
     project = load_project(_make_pond(tmp_path, puddles_py=puddles_py))
     results, _ = hydrate(project)
     assert results[0].status == "ok", results[0].error
-    pq = tmp_path / "puddles" / "ponds" / "tx" / "data" / "event.parquet"
-    assert duckdb.sql(f"SELECT * FROM read_parquet('{pq}')").fetchall() == [(7, 70)]
+    assert _puddle_rows(tmp_path, "tx", "event") == [(7, 70)]
 
 
 @pytest.mark.timeout(30)
@@ -433,8 +471,7 @@ def test_from_catchment_fills_missing_sources(tmp_path, live_catchment, catchmen
     results, warnings = hydrate(project, from_catchment=True)
     assert {r.target: r.status for r in results} == {"tx.event": "ok", "other": "ok"}
     assert any("pulling from the Catchment" in w for w in warnings)
-    data = tmp_path / "puddles" / "ponds" / "other" / "data"
-    assert {f.name for f in data.glob("*.parquet")} == {"t1.parquet", "t2.parquet"}
+    assert _puddle_tables(tmp_path, "other") == {"t1", "t2"}
     # sanity: httpx reached the live server, not a mock
     assert httpx.get(f"{live_catchment}/api/health", timeout=2.0).status_code == 200
 

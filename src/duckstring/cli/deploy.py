@@ -132,6 +132,15 @@ def _deploy_one(
     else:
         console.print("[dim]Could not check for conflicts — proceed with care.[/dim]")
 
+    # A Puddle of this line there (pond puddle deploy) is replaced once confirmed.
+    puddle = _puddle_there(url, cfg, name, version)
+    if puddle is not None:
+        console.print(f"[yellow]{name}@{puddle['major']} is a Puddle on {catchment_name} (from {puddle['owner']}'s "
+                      f"definitions): this deploy replaces it.[/yellow]")
+        if not yes and not typer.confirm("Replace the Puddle?", default=False):
+            typer.echo("Not replaced.", err=True)
+            raise typer.Exit(1)
+
     if not yes:
         confirmed = typer.confirm("Do you wish to proceed?", default=True)
         if not confirmed:
@@ -149,25 +158,70 @@ def _deploy_one(
             typer.echo("Error: could not read git remote 'origin'. Is this a git repo with a remote?", err=True)
             raise typer.Exit(1) from None
 
-        _http.post(
+        resp = _http.post(
             f"{url}/api/deploy", auth=cfg,
             json={"name": name, "version": version, "type": pond_type, "git_ref": git, "repo_url": repo_url,
-                  "force": force},
+                  "force": force, "replace_puddle": puddle is not None},
             timeout=_DEPLOY_TIMEOUT_S,
         )
     else:
         count, total = _summary(pond_dir)
         console.print(f"[dim]Uploading {count} files ({_size(total)}).[/dim]")
         archive = _zip_pond(pond_dir)
-        _http.post(
+        resp = _http.post(
             f"{url}/api/deploy", auth=cfg,
             files={"pond": ("pond.zip", archive, "application/zip")},
-            data={"name": name, "version": version, "type": pond_type, **({"force": "true"} if force else {})},
+            data={"name": name, "version": version, "type": pond_type, **({"force": "true"} if force else {}),
+                  **({"replace_puddle": "true"} if puddle is not None else {})},
             timeout=_DEPLOY_TIMEOUT_S,
         )
 
     console.print(f"[green]Deployed[/green] [bold]{name}@{version}[/bold] to [bold]{catchment_name}[/bold].")
+    _print_compat(console, resp)
+    _print_puddles_read(console, url, cfg, info)
     return True
+
+
+def _print_compat(console, resp) -> None:
+    """Uses of APIs the Catchment's Duckstring removed: they fail when their Ripple runs (duckstring pond check)."""
+    try:
+        compat = resp.json().get("compat") or []
+    except Exception:  # noqa: BLE001 - an older Catchment, or no body
+        return
+    if compat:
+        console.print(f"[yellow]Uses {len(compat)} removed {'API' if len(compat) == 1 else 'APIs'}, which will fail "
+                      "when run (duckstring pond check --fix):[/yellow]")
+        for f in compat:
+            console.print(f"  {f['path']}:{f['line']}: {f['message']}")
+
+
+def _puddles(url: str, cfg: dict) -> list[dict]:
+    """The Puddles on a Catchment (empty from one that predates them)."""
+    import httpx
+
+    from .config import auth_headers
+
+    try:
+        r = httpx.get(f"{url}/api/puddles", headers=auth_headers(cfg), timeout=5.0)
+        return r.json().get("puddles", []) if r.status_code == 200 else []
+    except Exception:  # noqa: BLE001 - only a note
+        return []
+
+
+def _puddle_there(url: str, cfg: dict, name: str, version: str) -> dict | None:
+    major = int(str(version).split(".")[0])
+    return next((p for p in _puddles(url, cfg) if p["source"] == name and p["major"] == major), None)
+
+
+def _print_puddles_read(console, url: str, cfg: dict, info: dict) -> None:
+    """Name the Sources the Pond reads as Puddles there, so production data never arrives unannounced."""
+    from ..keys import spec_major
+
+    wanted = {(s, spec_major(str(v))) for s, v in (info.get("sources") or {}).items()}
+    read = [p for p in _puddles(url, cfg) if (p["source"], p["major"]) in wanted]
+    if read:
+        listed = ", ".join(f"{p['source']}@{p['major']} ({p['mode']})" for p in read)
+        console.print(f"[cyan]Reads as Puddles here:[/cyan] {listed}")
 
 
 def deploy(
@@ -179,6 +233,9 @@ def deploy(
     all_ponds: bool = typer.Option(False, "--all", help="Deploy all Ponds found in subdirectories of the current directory."),
     dry_run: bool = typer.Option(False, "--dry-run", help="List the files a deploy would upload, and upload nothing."),
     force: bool = typer.Option(False, "--force", help="Replace the version a major line is running, in place."),
+    wait: bool = typer.Option(False, "--wait", help="Wait until the new version has completed a Run (something must "
+                                                    "ask for one), then exit as for refresh now --wait."),
+    timeout: Optional[str] = typer.Option(None, "--timeout", help="With --wait: how long to wait, e.g. 10m or 2h."),
 ) -> None:
     """Deploy the Pond project in the current directory to a Catchment.
 
@@ -214,10 +271,29 @@ def deploy(
     url = cfg["url"]
     if all_ponds:
         console.print(f"Found [bold]{len(pond_dirs)}[/bold] pond(s): {', '.join(d.name for d in pond_dirs)}")
+    deployed = []
     for pond_dir in pond_dirs:
         if all_ponds:
             console.rule(pond_dir.name)
-        _deploy_one(console, pond_dir, url, cfg, catchment_name, git, yes, force)
+        waiter = _version_waiter(cfg, pond_dir) if wait else None
+        if _deploy_one(console, pond_dir, url, cfg, catchment_name, git, yes, force) and waiter is not None:
+            deployed.append(waiter)
+    if deployed:
+        from .wait import parse_timeout
+
+        seconds = parse_timeout(timeout)
+        for waiter, version in deployed:
+            waiter.wait(lambda e, w=waiter, v=version: w.ran_version(v), seconds, f"Version {version}")
+
+
+def _version_waiter(cfg: dict, pond_dir: Path):
+    """A :class:`~duckstring.cli.wait.Waiter` on the line the Pond in ``pond_dir`` deploys to, made before the
+    deploy so a Run the new version completes at once still counts."""
+    from .wait import Waiter
+
+    section = _read_pond_toml(pond_dir).get("pond", {})
+    version = section.get("version", "0.0.0")
+    return Waiter(cfg, section.get("name", "unknown"), int(version.split(".")[0])), version
 
 
 def remove(
@@ -257,13 +333,20 @@ def promote(
     major: int = typer.Option(..., "--major", "-m", help="Major version to serve under the Pond's bare name."),
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
 ) -> None:
-    """Make a major version the one the Pond's bare name refers to in catalog SQL.
+    """Make a major version the one the Pond's bare name refers to in catalog SQL, or the one an App serves.
 
-    Refused if that major doesn't publish every table currently served.
+    Refused if that major doesn't publish every table currently served. For an App with Records or Media this
+    is the cutover: the live major stops, its data is copied into this one and `[app] migrate` runs over the
+    copy, this major goes live and the old one is retired (read-only until purged). The App answers 503 while
+    the migration runs.
     """
     from . import _http
     from .config import resolve_catchment
 
     _, cfg = resolve_catchment(catchment)
-    _http.post(f"{cfg['url']}/api/ponds/{pond}/serve/promote", auth=cfg, json={"major": major})
-    typer.echo(f"Promoted {pond}: its bare name now refers to v{major}.")
+    got = _http.post(f"{cfg['url']}/api/ponds/{pond}/serve/promote", auth=cfg, json={"major": major}).json()
+    if got.get("migrated"):
+        typer.echo(f"Promoted {pond}: v{major} is live with v{got['retired']}'s data migrated; "
+                   f"v{got['retired']} is retired.")
+    else:
+        typer.echo(f"Promoted {pond}: its bare name now refers to v{major}.")

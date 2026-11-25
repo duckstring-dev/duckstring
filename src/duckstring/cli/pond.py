@@ -247,19 +247,44 @@ def demo(
     console.print(f"\nNext: [bold]duckstring pond deploy --all --yes[/bold], then {run}.")
 
 
+def _parse_time(value: str | None, flag: str):
+    if value is None:
+        return None
+    from datetime import datetime, timezone
+
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        typer.echo(f"Error: {flag} takes an ISO time, like 2026-11-18T06:00:00Z (got {value!r})", err=True)
+        raise typer.Exit(1) from None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
 @app.command()
 def hydrate(
     source: Optional[list[str]] = typer.Option(
         None, "--source", "-s", help="Hydrate only these Sources (repeatable)."
     ),
     catchment: Optional[str] = typer.Option(
-        None, "--catchment", "-c", help="Catchment used by Puddles that read from one, and by --from-catchment."
+        None, "--catchment", "-c", help="The Catchment the Sources are read from (default: the default Catchment)."
     ),
     from_catchment: bool = typer.Option(
-        False, "--from-catchment", help="Fill Sources with no Puddle definition from the Catchment."
+        False, "--from-catchment", help="Fill Sources with no Puddle definition from the Catchment, over HTTP."
+    ),
+    set_name: Optional[str] = typer.Option(
+        None, "--set", help="Use this Puddle set for every Source (default: puddles.toml's [local], else the "
+                            "default set)."
+    ),
+    live: bool = typer.Option(
+        False, "--live", help="Read the Sources through the Catchment's query API, as of now (or --as-at), instead of copying "
+                              "them."
+    ),
+    as_at: Optional[str] = typer.Option(
+        None, "--as-at", help="Hydrate as of this time (ISO). Without --live, copies each Source's state then and "
+                              "every change since, so incremental runs can replay them."
     ),
 ) -> None:
-    """Build this Pond's Puddles into puddles/ for a local run."""
+    """Set this Pond's baseline: build its Puddles into puddles/ for a local run."""
     _use_pond_env()
     from rich.console import Console
 
@@ -269,7 +294,8 @@ def hydrate(
     project = _load_project()
     try:
         results, warnings = hydrate_project(
-            project, only_sources=source, catchment=catchment, from_catchment=from_catchment
+            project, only_sources=source, catchment=catchment, from_catchment=from_catchment,
+            set_name=set_name, live=live, as_at=_parse_time(as_at, "--as-at"),
         )
     except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -284,7 +310,8 @@ def hydrate(
     failed = False
     for r in results:
         if r.status == "ok":
-            console.print(f"  [green]✓[/green] {r.target} [dim]({r.duration_s:.2f}s)[/dim]")
+            note = f" — {r.note}" if r.note else ""
+            console.print(f"  [green]✓[/green] {r.target}{note} [dim]({r.duration_s:.2f}s)[/dim]")
         else:
             failed = True
             console.print(f"  [red]✗[/red] {r.target} — {r.error}")
@@ -296,14 +323,52 @@ def hydrate(
 
 
 @app.command()
+def check(
+    fix: bool = typer.Option(False, "--fix", help="Rewrite the uses whose replacement is certain."),
+) -> None:
+    """Check the Pond's code for APIs this Duckstring removed, naming each use and its replacement.
+
+    The code is read, not run. Exits 1 while any use remains. A Catchment runs the same check on every Pond deployed
+    to it, so this is also what a Catchment upgrade will report.
+    """
+    from pathlib import Path
+
+    from ..compat import check_project, fix_project
+
+    if not Path("pond.toml").is_file():
+        typer.echo("Error: no pond.toml found in the current directory.", err=True)
+        raise typer.Exit(1)
+    if fix:
+        typer.echo(f"Fixed {fix_project(Path('.'))}.")
+    findings = check_project(Path("."))
+    for f in findings:
+        typer.echo(f"{f.path}:{f.line}:{f.col}: {f.message}")
+    if not findings:
+        typer.echo("No removed APIs in use.")
+        return
+    if not fix and any(f.fix for f in findings):
+        typer.echo("Run with --fix to rewrite the ones marked by a literal value.")
+    raise typer.Exit(1)
+
+
+@app.command()
 def run(
     ripple: Optional[str] = typer.Option(None, "--ripple", "-r", help="Run only this Ripple, against the existing local "
                                                                       "output."),
     fresh: bool = typer.Option(False, "--fresh", help="Ignore the Pond's own Puddle and start from nothing."),
+    incremental: bool = typer.Option(False, "--incremental", "-i", help="Go on from the last run instead of the "
+                                                                         "baseline, to --next-change by default."),
+    next_change: bool = typer.Option(False, "--next-change", help="With --incremental: the next time any Source "
+                                                                  "changed (the default)."),
+    next_run: bool = typer.Option(False, "--next-run", help="With --incremental: this Pond's next run in production."),
+    most_recent: bool = typer.Option(False, "--most-recent", help="With --incremental: as fresh as every Source's "
+                                                                  "latest."),
+    to: Optional[str] = typer.Option(None, "--to", help="With --incremental: this freshness (ISO)."),
     port: int = typer.Option(8000, "--port", help="For an App: the port to serve on."),
 ) -> None:
     """Run this Pond once on this machine against its Puddles, with no Catchment. Output goes to puddles/out/.
-    For an App, serve it on this machine against its Puddles until stopped."""
+    Without --incremental, a baseline run from the hydrated Puddles; with it, the next window, as a Refresh would
+    run it. For an App, serve it on this machine against its Puddles until stopped."""
     _use_pond_env()
     from rich.console import Console
 
@@ -321,12 +386,33 @@ def run(
         except ValueError as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(1) from None
+    picked = [name for name, on in (("next-change", next_change), ("next-run", next_run),
+                                     ("most-recent", most_recent), ("to", to is not None)) if on]
+    if len(picked) > 1:
+        typer.echo("Error: give one of --next-change, --next-run, --most-recent and --to", err=True)
+        raise typer.Exit(1)
+    if picked and not incremental:
+        typer.echo(f"Error: --{picked[0]} goes with --incremental", err=True)
+        raise typer.Exit(1)
+    if incremental and ripple:
+        typer.echo("Error: --incremental runs the whole Pond; --ripple reruns one Ripple in the last run's window",
+                   err=True)
+        raise typer.Exit(1)
+    target = picked[0] if picked and picked[0] != "to" else "next-change"
     try:
-        result = run_pond(project, ripple=ripple, fresh=fresh)
+        result = run_pond(project, ripple=ripple, fresh=fresh, incremental=incremental, target=target,
+                          to=_parse_time(to, "--to"))
     except (ValueError, FileNotFoundError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
 
+    for w in result.warnings:
+        console.print(f"[yellow]Warning:[/yellow] {w}")
+    if result.f is not None and ripple is None:
+        since = f" since {result.previous_f.isoformat()}" if incremental and result.previous_f else ""
+        console.print(f"[dim]Run at {result.f.isoformat()}{since}[/dim]")
+    if result.stepped:
+        console.print(f"[dim]Stepped: {', '.join(result.stepped)}[/dim]")
     if result.seeded:
         console.print(f"[dim]Seeded prior state from puddles/ponds/{project.name}/[/dim]")
     for r in result.ripples:

@@ -1615,6 +1615,54 @@ def test_skip_compares_prior_freshness_not_new_startf():
     assert any(br.pond_id == "X" for br in out.pending_begin_runs)
 
 
+def _diamond_read_ahead() -> tuple[EngineState, datetime]:
+    """X (reading A and B) has run once at 29 s, stamped by B, while it read A up to A's change at 30 s (read
+    positions: each Source as far as it had got). Then both republish unchanged."""
+    s, _ = diamond_topology()
+    t = {n: T0 + secs(n) for n in (29, 30, 31, 32)}
+    a, b = s.pond_states["A"], s.pond_states["B"]
+    a.start_f = a.end_f = a.changed_f = t[30]
+    b.start_f = b.end_f = b.changed_f = t[29]
+    s.pond_states["X"].demand = [t[29]]
+    s, started = sentinel(t[30], s)
+    assert "x" in started and s.pond_states["X"].start_f == t[29]
+    s.pending_begin_runs.clear()
+    s = complete_ripple(s, "x", t[30] + secs(1))
+    a, b = s.pond_states["A"], s.pond_states["B"]
+    a.start_f = a.end_f = t[31]  # unchanged: changed_f held at 30
+    b.start_f = b.end_f = t[32]  # unchanged: changed_f held at 29
+    s.pond_states["X"].demand = [t[31]]
+    return s, t[32]
+
+
+@pytest.mark.timeout(1)
+def test_a_sink_that_read_a_source_ahead_of_its_freshness_passes_when_nothing_changed_since():
+    """The position-aware pass: X's last Run is stamped 29 but read A's change at 30, so A's changed_f (30) being
+    past 29 is no reason to run again. Before, X ran once more and read empty changes."""
+    s, now = _diamond_read_ahead()
+    out, started = sentinel(now, s)
+    x = out.pond_states["X"]
+    assert "x" not in started and not out.pending_begin_runs  # a pass
+    assert x.end_f == T0 + secs(31) and x.changed_f == T0 + secs(29)
+
+
+@pytest.mark.timeout(1)
+def test_a_change_after_where_the_last_run_read_still_runs():
+    s, now = _diamond_read_ahead()
+    s.pond_states["A"].changed_f = s.pond_states["A"].end_f  # A really changed at 31
+    out, started = sentinel(now, s)
+    assert "x" in started and any(br.pond_id == "X" and br.sources_changed for br in out.pending_begin_runs)
+
+
+@pytest.mark.timeout(1)
+def test_a_run_with_no_recorded_positions_falls_back_to_its_freshness():
+    """A Run from before a restart that lost them (or from before read positions) is compared by its freshness."""
+    s, now = _diamond_read_ahead()
+    s.pond_states["X"].read_at = {}
+    _, started = sentinel(now, s)
+    assert "x" in started  # the old rule: A's 30 > X's 29
+
+
 @pytest.mark.timeout(1)
 def test_always_run_pond_dispatches_despite_unchanged_sources():
     s, _ = chain_topology()

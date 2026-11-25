@@ -26,10 +26,11 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import tarfile
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response, WebSocket
 from starlette.concurrency import run_in_threadpool
 
 from ...keys import pond_key
@@ -82,6 +83,106 @@ async def events(name: str, major: int, request: Request):
     return {"ok": True}
 
 
+@router.post("/duck/{name}/{major}/puddle/query", dependencies=[auth.duck])
+async def puddle_query(name: str, major: int, request: Request):
+    """A Duck's query of one of its line's Puddle Sources, forwarded to the Catchment the Puddles read
+    (catchment/puddles.py): the Duck never holds that Catchment's credentials. Its answer (Parquet, and any
+    warning header) comes back as it is; a refusal keeps its status and detail."""
+    from ...remote_source import RemoteQueryError
+    from .puddles import _origin_error
+
+    driver = request.app.state.driver
+    payload = await request.json()
+    try:
+        content, warning = await run_in_threadpool(driver.puddle_query, pond_key(name, major), payload)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RemoteQueryError as exc:
+        status = 502 if exc.status in (401, 403) else exc.status
+        raise HTTPException(status_code=status, detail=_origin_error(exc) if status == 502 else exc.detail) from exc
+    headers = {"x-duckstring-warning": warning} if warning else {}
+    return Response(content=content, media_type="application/octet-stream", headers=headers)
+
+
+@router.post("/duck/{name}/{major}/puddle/get", dependencies=[auth.duck])
+async def puddle_get(name: str, major: int, request: Request):
+    """A Duck's read of a Puddle Source's table list, forwarded as :func:`puddle_query` is."""
+    from ...remote_source import RemoteQueryError
+    from .puddles import _origin_error
+
+    driver = request.app.state.driver
+    body = await request.json()
+    try:
+        return await run_in_threadpool(driver.puddle_get, pond_key(name, major), body.get("path", ""),
+                                       body.get("params"))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RemoteQueryError as exc:
+        status = 502 if exc.status in (401, 403) else exc.status
+        raise HTTPException(status_code=status, detail=_origin_error(exc) if status == 502 else exc.detail) from exc
+
+
+# ─── Apps' Records and Media for a Duck on another machine (plans/records-and-media.md) ───────────────
+
+
+@router.post("/duck/{name}/{major}/records/read", dependencies=[auth.duck])
+async def records_read(name: str, major: int, request: Request):
+    """One Records table as Parquet, for a Duck that can't reach this Catchment's PostgreSQL (it listens on this
+    machine). Read as the reader role: Ponds read every line's Records."""
+    import tempfile
+
+    from fastapi.responses import FileResponse
+    from starlette.background import BackgroundTask
+
+    from ..records import RecordsError
+
+    body = await request.json()
+    records = request.app.state.driver.records
+    fd, path = tempfile.mkstemp(suffix=".parquet", prefix="duckstring-records-")
+    os.close(fd)
+    try:
+        await run_in_threadpool(records.read_parquet, str(body.get("schema", "")), str(body.get("table", "")),
+                                Path(path))
+    except RecordsError as exc:
+        Path(path).unlink(missing_ok=True)
+        raise HTTPException(status_code=404 if "no Records table" in str(exc) else 422, detail=str(exc)) from exc
+    return FileResponse(path, media_type="application/octet-stream",
+                        background=BackgroundTask(lambda: Path(path).unlink(missing_ok=True)))
+
+
+@router.get("/duck/{name}/{major}/media/{app}/{app_major}", dependencies=[auth.duck])
+async def media_list(name: str, major: int, app: str, app_major: int, request: Request, prefix: str = ""):
+    """An App line's Media listing, for a Duck that can't reach this machine's disk."""
+    from ..media import MediaError
+
+    try:
+        files = await run_in_threadpool(request.app.state.driver.media.list, app, app_major, prefix)
+    except MediaError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"files": files}
+
+
+@router.get("/duck/{name}/{major}/media/{app}/{app_major}/file", dependencies=[auth.duck])
+async def media_file(name: str, major: int, app: str, app_major: int, request: Request, path: str):
+    from fastapi.responses import StreamingResponse
+
+    from ..media import MediaError
+
+    media = request.app.state.driver.media
+    try:
+        size = await run_in_threadpool(media.size, app, app_major, path)
+    except MediaError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"no file {path!r}") from None
+    return StreamingResponse(media.read(app, app_major, path), media_type="application/octet-stream",
+                             headers={"Content-Length": str(size)})
+
+
 @router.get("/duck/{name}/{major}/artifact", dependencies=[auth.duck])
 def artifact(name: str, major: int, request: Request):
     """The selected version's source bundle for this major line, as an uncompressed tar (code is
@@ -101,3 +202,30 @@ def artifact(name: str, major: int, request: Request):
         content=buf.getvalue(), media_type="application/x-tar",
         headers={"X-Duckstring-Version": meta["version"], "X-Duckstring-Source-Path": meta["source_path"]},
     )
+
+
+@router.websocket("/duck/{name}/{major}/app/{instance}/tunnel")
+async def app_tunnel(websocket: WebSocket, name: str, major: int, instance: int):
+    """An App instance's agent on another machine (plans/app-scaling.md): the tunnel that carries the Catchment's
+    connections to the App and the agent's control messages. Refused (403) for an instance the Catchment isn't
+    running, which tells the agent to stop."""
+    supervisor = getattr(websocket.app.state, "app_supervisor", None)
+    allowed = auth.duck_allowed(websocket)
+    session = supervisor.tunnels.get(instance) if supervisor is not None else None
+    if allowed and session is None and supervisor is not None:  # one a previous Catchment process started
+        session = await supervisor.adopt(instance, name, major)
+    if not allowed or session is None or session.closed:
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+
+    async def receive():
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            return None
+        return message.get("bytes") or b""
+
+    try:
+        await session.serve(receive, websocket.send_bytes)
+    except Exception:  # the socket went: the agent dials again
+        pass

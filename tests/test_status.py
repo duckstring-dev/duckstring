@@ -186,12 +186,13 @@ def test_status_pond_arg_inlet_filter(runner, live_catchment):
 
 
 def test_status_default_uses_live_mode(runner, live_catchment, monkeypatch):
-    # Default invocation should call _run_live (not the --once path), staying open until Ctrl+C.
+    # On a terminal the default invocation calls _run_live (not the --once path), staying open until Ctrl+C.
     import importlib
     status_mod = importlib.import_module("duckstring.cli.status")
 
     calls = []
     monkeypatch.setattr(status_mod, "_run_live", lambda *a, **kw: calls.append(kw))
+    monkeypatch.setattr("duckstring.cli.wait.interactive", lambda: True)
 
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0

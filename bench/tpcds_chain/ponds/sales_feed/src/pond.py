@@ -84,12 +84,12 @@ def ingest(pond):
         base = _loc("landing", "base")
         sales = con.sql(f"SELECT * FROM read_parquet('{_table(base, 'store_sales')}')")
         if APPEND:
-            pond.append_table("store_sales", sales, pk=SALES_PK, fail_on_conflict=False)
+            pond.append_table("store_sales", sales, pk=SALES_PK)
         else:
             pond.merge_table("store_sales", sales, pk=SALES_PK)
         pond.append_table(
             "store_returns", con.sql(f"SELECT * FROM read_parquet('{_table(base, 'store_returns')}')"),
-            pk=RETURNS_PK, fail_on_conflict=False,
+            pk=RETURNS_PK,
         )
         applied = 0
 
@@ -100,7 +100,7 @@ def ingest(pond):
         returns = ", ".join(f"'{_table(b, 'store_returns')}'" for b in batches)
         if APPEND:  # the feed is all new rows
             pond.append_table("store_sales", con.sql(f"SELECT * EXCLUDE (_change) FROM read_parquet([{sales}])"),
-                              pk=SALES_PK, fail_on_conflict=False)
+                              pk=SALES_PK)
         else:
             pond.apply_zset(
                 "store_sales",
@@ -110,7 +110,7 @@ def ingest(pond):
                 pk=SALES_PK,
             )
         pond.append_table("store_returns", con.sql(f"SELECT * FROM read_parquet([{returns}])"),
-                          pk=RETURNS_PK, fail_on_conflict=False)
+                          pk=RETURNS_PK)
         applied = released
     elif not first:
         pond.skip()  # nothing released since the last run: downstream Ponds pass instead of rerunning

@@ -190,10 +190,10 @@ def test_change_detection_on_a_real_s3(s3_env, tmp_path):
     assert load_sidecar(store)["t"]["f"] == f1.isoformat()
 
     sink = Pond("snk", "1.0.0", duckdb.connect(), tmp_path / "snk", source_majors={"src": 1}, f=f2,
-                previous_f=f1, data_root=data_root, source_f={"src": f2.isoformat()})
+                previous_f=f1, data_root=data_root, read_positions={"src": f2.isoformat()})
     assert not sink.changed("src.t") and not sink.changed("src.e")
     first = Pond("snk", "1.0.0", duckdb.connect(), tmp_path / "snk", source_majors={"src": 1}, f=f1,
-                 previous_f=f1 - timedelta(hours=1), data_root=data_root, source_f={"src": f1.isoformat()})
+                 previous_f=f1 - timedelta(hours=1), data_root=data_root, read_positions={"src": f1.isoformat()})
     assert first.changed("src.t") and first.changed("src.e")
 
 
@@ -333,6 +333,171 @@ def test_a_chain_publishes_and_persists_to_s3(s3_env, tmp_path_factory, monkeypa
                        timeout=60.0)
         assert q.status_code == 200, q.text
         assert q.json()[0]["n"] > 0
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+def test_a_live_puddle_reads_a_source_on_s3_through_its_catchment(s3_env, tmp_path, monkeypatch):
+    """``pond hydrate --live`` with a filter over ``p.read_source``, for a Source a Catchment publishes to an S3 data
+    root: the local run reads it through the Catchment's query API (the filter runs there, as of each read
+    position), never from the bucket, and an incremental run filters the next window."""
+    import textwrap
+    from datetime import datetime, timedelta, timezone
+
+    import duckdb
+
+    from duckstring.cli.config import register_catchment, set_default_catchment
+    from duckstring.core import Pond
+    from duckstring.dataplane import ParquetDataPlane
+    from duckstring.local import hydrate, load_project, run_pond
+    from duckstring.storage import get_storage
+
+    data_root = f"s3://{_BUCKET}/live-puddles"
+    root = tmp_path / "prod"
+    root.mkdir()
+    server, thread, url = _serve(root, _free_port())
+    try:
+        r = httpx.put(f"{url}/api/catchment/settings", json={"data_root": data_root, "mode": "empty"}, timeout=15.0)
+        assert r.status_code == 200, r.text
+        store = get_storage(data_root).child("tx", "m1", "data")
+        reg = tmp_path / "prod-registry.duckdb"
+        t0 = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        for hours, ids in ((1, [1, 2, 3, 4]), (2, [5, 6, 8])):
+            f = t0 + timedelta(hours=hours)
+            con = duckdb.connect(str(reg))
+            pond = Pond("tx", "1.0.0", con, root=tmp_path, f=f, sources=[], own_data_dir=tmp_path / "prod-local")
+            rows = ", ".join(f"({i})" for i in ids)
+            pond.append_table("event", con.sql(f"SELECT * FROM (VALUES {rows}) v(id)"), pk="id")
+            ParquetDataPlane().export(con, store, f=f)
+            con.close()
+
+        register_catchment("prod", url=url, kind="remote")
+        set_default_catchment("prod")
+        project_dir = tmp_path / "counter"
+        (project_dir / "src").mkdir(parents=True)
+        (project_dir / "pond.toml").write_text(
+            '[pond]\nname = "counter"\nversion = "0.1.0"\n\n[sources]\ntx = "1.0.0"\n')
+        (project_dir / "src" / "pond.py").write_text(textwrap.dedent("""
+            from duckstring import ripple
+
+            @ripple
+            def count(pond):
+                pond.read_table("tx.event")
+                pond.write_table("seen", pond.con.sql("SELECT count(*) AS n FROM event"))
+        """))
+        (project_dir / "src" / "puddles.py").write_text(textwrap.dedent("""
+            from duckstring import puddle
+
+            @puddle("tx.event")
+            def evens(p):
+                return p.read_source().filter("id % 2 = 0")
+        """))
+        project = load_project(project_dir)
+        results, _ = hydrate(project, live=True, as_at=t0 + timedelta(hours=1, minutes=30))
+        assert [r.status for r in results] == ["ok"], results
+
+        def seen():
+            dp = ParquetDataPlane()
+            return duckdb.sql(dp.read_select(project.out_dir, "seen")).fetchall()[0][0]
+
+        assert run_pond(project).ok and seen() == 2
+        assert run_pond(project, incremental=True).ok and seen() == 4
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+def test_a_copied_puddle_on_a_catchment_with_an_s3_data_root(s3_env, tmp_path, monkeypatch):
+    """A copied Puddle on a dev Catchment whose data root is a bucket (catchment/puddles.py): its data lands there,
+    where a Draw would, the Pond reading it runs on a real Duck from the baseline, a step past it is mirrored too,
+    and a rewind drops the step's output from the bucket."""
+    import io
+    import json
+    import textwrap
+    import zipfile
+
+    endpoint, client = s3_env
+    root = tmp_path / "dev"
+    root.mkdir()
+    project = tmp_path / "counter"
+    (project / "src").mkdir(parents=True)
+    (project / "pond.toml").write_text('[pond]\nname = "counter"\nversion = "0.1.0"\n\n[sources]\ntx = "1.0.0"\n')
+    (project / "src" / "pond.py").write_text(textwrap.dedent("""
+        from duckstring import ripple
+
+        @ripple
+        def count(pond):
+            pond.read_table("tx.event")
+            pond.write_table("seen", pond.con.sql("SELECT count(*) AS n FROM event"))
+    """))
+    (project / "src" / "puddles.py").write_text(textwrap.dedent("""
+        from duckstring import puddle
+
+        @puddle("tx.event")
+        def base(p):
+            p.append_table(p.con.sql("SELECT range AS id FROM range(2)"), pk="id")
+
+        @puddle.step("tx.event")
+        def more(p):
+            p.append_table(p.con.sql(f"SELECT {p.step} * 100 + range AS id FROM range(3)"), pk="id")
+    """))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for f in project.rglob("*"):
+            if f.is_file():
+                zf.write(f, f.relative_to(project))
+    bundle = buf.getvalue()
+
+    port = _free_port()
+    monkeypatch.delenv("DUCKSTRING_DISABLE_DUCKS", raising=False)
+    monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", f"http://127.0.0.1:{port}")
+    server, thread, url = _serve(root, port)
+
+    def seen(after: str | None) -> int:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            st = next((p for p in httpx.get(f"{url}/api/status", timeout=5.0).json()["ponds"]
+                       if p["name"] == "counter"), {})
+            assert not st.get("is_failed"), st.get("error")
+            if st.get("end_f") and st["status"] == "idle" and (after is None or st["end_f"] > after):
+                q = httpx.post(f"{url}/api/query", json={"pond": "counter", "sql": "SELECT n FROM seen"},
+                               timeout=30.0)
+                assert q.status_code == 200, q.text
+                return q.json()[0]["n"]
+            time.sleep(0.2)
+        raise AssertionError("counter never settled")
+
+    try:
+        r = httpx.put(f"{url}/api/catchment/settings",
+                      json={"data_root": f"s3://{_BUCKET}/dev-plane", "mode": "empty"}, timeout=15.0)
+        assert r.status_code == 200, r.text
+        r = httpx.post(f"{url}/api/puddles", files={"bundle": ("pond.zip", bundle, "application/zip")},
+                       data={"spec": json.dumps({})}, timeout=120.0)
+        assert r.status_code == 200, r.text
+        assert [d["mode"] for d in r.json()["deployed"]] == ["copied"]
+        assert any(k.endswith("_trickle.json") for k in _keys(client, "dev-plane/tx/")), \
+            _keys(client, "dev-plane/")
+        assert not (root / "ponds" / "tx" / "m1" / "data" / "_trickle.json").exists()  # landed in the bucket only
+        r = httpx.post(f"{url}/api/deploy", files={"pond": ("pond.zip", bundle, "application/zip")},
+                       data={"name": "counter", "version": "0.1.0"}, timeout=120.0)
+        assert r.status_code == 200, r.text
+
+        assert httpx.post(f"{url}/api/ponds/counter/puddles/rewind", timeout=60.0).status_code == 200
+        assert seen(None) == 2
+        base = next(p for p in httpx.get(f"{url}/api/status", timeout=5.0).json()["ponds"]
+                    if p["name"] == "counter")["end_f"]
+        before = set(_keys(client, "dev-plane/tx/"))
+        r = httpx.post(f"{url}/api/ponds/counter/puddles/refresh", json={"target": "next-change"}, timeout=120.0)
+        assert r.status_code == 200, r.text
+        assert seen(base) == 5
+        stepped = set(_keys(client, "dev-plane/tx/")) - before
+        assert any(k.endswith(".parquet") for k in stepped), stepped
+
+        assert httpx.post(f"{url}/api/ponds/counter/puddles/rewind", timeout=60.0).status_code == 200
+        time.sleep(0.5)
+        assert seen(None) == 2
+        assert not (set(_keys(client, "dev-plane/tx/")) & {k for k in stepped if k.endswith(".parquet")})
     finally:
         server.should_exit = True
         thread.join(timeout=5)

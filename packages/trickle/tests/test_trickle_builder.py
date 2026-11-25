@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import duckdb
 import pytest
 from trickle import agg
 from trickle.builder import BuildError, TrickleBuilder, _duckdb_to_ibis
@@ -456,13 +457,13 @@ def test_builder_chain_matches_comprehensive_join(db):
 # ─── the .append() terminal ──────────────────────────────────────────────────────
 
 
-def _enriched(db, f, pf, *, fail_on_conflict=True, log_drops=True, dim_p=0.3):
+def _enriched(db, f, pf, *, on_conflict="fail", log_drops=True, dim_p=0.3):
     """Append-enrich the order-line spine with the product dim (one output row per order_id). ``dim_p=1.0``
     keeps a change to the tiny dim on the incremental path."""
     t = at(db, f, pf)
     (t.source("order_line").join(t.source("product", p=dim_p), on="product_id")
       .select("s0.order_id, s0.product_id, s0.qty, s1.price")
-      .append("enriched", pk="order_id", fail_on_conflict=fail_on_conflict, log_drops=log_drops))
+      .append("enriched", pk="order_id", on_conflict=on_conflict, log_drops=log_drops))
 
 
 def test_builder_append_monotonic_accumulates_history(db):
@@ -493,13 +494,13 @@ def test_builder_append_drops_conflicts_and_logs(db):
     pr([("p1", 5), ("p2", 9)], ts(1))
     _enriched(db, ts(1), NEVER)
     pr([("p1", 50), ("p2", 9)], ts(2))
-    _enriched(db, ts(2), ts(1), fail_on_conflict=False, dim_p=1.0)
+    _enriched(db, ts(2), ts(1), on_conflict="keep_prior", dim_p=1.0)
     assert rows(db, "enriched", "order_id, price") == [(10, 5), (11, 9)]  # order 10 keeps its original price
     # Both dropped rows are logged: the retraction (-1, old price) and the changed-image insert (+1, new).
     drops = db.sql('SELECT order_id, price, _duckstring_d FROM "enriched__droplog" ORDER BY _duckstring_d').fetchall()
     assert drops == [(10, 5, -1), (10, 50, 1)]
     ol([(10, "p1", 2), (11, "p2", 1), (12, "p2", 4)], ts(3))  # a new order still flows through
-    _enriched(db, ts(3), ts(2), fail_on_conflict=False)
+    _enriched(db, ts(3), ts(2), on_conflict="keep_prior")
     assert rows(db, "enriched", "order_id, price") == [(10, 5), (11, 9), (12, 9)]
 
 
@@ -507,9 +508,9 @@ def test_builder_append_log_drops_false_squashes_table(db):
     ol, pr = star(db)
     ol([(10, "p1", 2)], ts(1))
     pr([("p1", 5)], ts(1))
-    _enriched(db, ts(1), NEVER, fail_on_conflict=False, log_drops=False)
+    _enriched(db, ts(1), NEVER, on_conflict="keep_prior", log_drops=False)
     pr([("p1", 50)], ts(2))
-    _enriched(db, ts(2), ts(1), fail_on_conflict=False, log_drops=False)
+    _enriched(db, ts(2), ts(1), on_conflict="keep_prior", log_drops=False)
     assert not T._table_exists(db, "enriched__droplog")
 
 
@@ -539,8 +540,8 @@ def test_spine_pk_passthrough_detection():
 def test_builder_append_spine_pk_fast_path(db, monkeypatch):
     ol, pr = star(db)
 
-    def run(f, pf):  # fail_on_conflict=False, log_drops=False and an s0.order_id PK: the fast path applies
-        _enriched(db, f, pf, fail_on_conflict=False, log_drops=False)
+    def run(f, pf):  # on_conflict="keep_prior", log_drops=False and an s0.order_id PK: the fast path applies
+        _enriched(db, f, pf, on_conflict="keep_prior", log_drops=False)
 
     ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
     pr([("p1", 5), ("p2", 9)], ts(1))
@@ -569,7 +570,7 @@ def test_builder_append_spine_pk_fast_path_same_f_replay(db):
     ol, pr = star(db)
 
     def run(f, pf):
-        _enriched(db, f, pf, fail_on_conflict=False, log_drops=False)
+        _enriched(db, f, pf, on_conflict="keep_prior", log_drops=False)
 
     ol([(10, "p1", 2), (11, "p2", 1)], ts(1))
     pr([("p1", 5), ("p2", 9)], ts(1))
@@ -727,3 +728,51 @@ def test_builder_was_changed_tracks_output(db):
     assert run(ts(2), ts(1)) is False  # nothing upstream changed: an empty change
     pr([("p1", 9)], ts(3))
     assert run(ts(3), ts(2)) is True
+
+
+def test_merge_records_a_compact_threshold_for_its_output():
+    """A builder's output takes its own fold size, as merge_table does: the Catchment-wide default couldn't
+    serve small aggregates and a large base at once (the attention showcase)."""
+    con = duckdb.connect()
+    merge(con, "obs", [(1, 1, 5), (2, 2, 7)], "k, g, v", ts(1), "k")
+    at(con, ts(1)).source("obs").aggregate(by="g", n=agg.count()).merge("per_g", compact_threshold=32768)
+    assert T.read_meta(con)["per_g"]["compact_threshold"] == 32768
+    merge(con, "obs", [(1, 1, 5), (2, 2, 7), (3, 1, 1)], "k, g, v", ts(2), "k")
+    at(con, ts(2), ts(1)).source("obs").aggregate(by="g", n=agg.count()).merge("per_g")
+    assert T.read_meta(con)["per_g"]["compact_threshold"] == 32768  # kept until set again, as merge_table does
+
+
+def test_filter_and_mutate_take_a_bare_name_one_source_has():
+    """``.filter("col")`` failed with DuckDB's "Referenced column not found" until the column was written
+    ``alias.col``, even with one source, while ``on`` and ``.aggregate()`` took bare names (the transit showcase)."""
+    con = duckdb.connect()
+    ol, pr = star(con)
+    ol([(1, 10, 2), (2, 11, 5), (3, 10, 1)], ts(1))
+    pr([(10, 3), (11, 4)], ts(1))
+    at(con, ts(1)).source("order_line").filter("qty >= 2").merge("big", pk="order_id")
+    assert rows(con, "big") == [(1, 10, 2), (2, 11, 5)]
+    e = at(con, ts(1))
+    (e.source("order_line").join(e.source("product"), on="product_id")
+     .mutate(total="qty * price").filter("total >= 6 AND price < 4 AND 'qty' <> 'price'")
+     .select("s0.order_id, total").merge("priced", pk="order_id"))
+    assert rows(con, "priced") == [(1, 6)]
+    # The change still distributes: a later price change moves an order across the filter.
+    ol([(1, 10, 2), (2, 11, 5), (3, 10, 1)], ts(2))
+    pr([(10, 1), (11, 3)], ts(2))
+    e = at(con, ts(2), ts(1))
+    (e.source("order_line").join(e.source("product"), on="product_id")
+     .mutate(total="qty * price").filter("total >= 6 AND price < 4 AND 'qty' <> 'price'")
+     .select("s0.order_id, total").merge("priced", pk="order_id"))
+    assert rows(con, "priced") == [(2, 15)]
+
+
+def test_a_bare_name_two_sources_have_must_be_qualified():
+    con = duckdb.connect()
+    ol, pr = star(con)
+    ol([(1, 10, 2)], ts(1))
+    pr([(10, 3)], ts(1))
+    con.execute("CREATE TABLE stock AS SELECT 10 AS product_id, 7 AS qty")
+    e = at(con, ts(1))
+    b = e.source("order_line").join(e.source("stock"), on="product_id").filter("qty > 1")
+    with pytest.raises(BuildError, match="qty is in more than one source"):
+        b.select("s0.order_id, s1.qty AS on_hand").merge("x", pk="order_id")

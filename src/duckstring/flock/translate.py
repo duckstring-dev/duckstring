@@ -99,7 +99,7 @@ def _sqlglot():
         from sqlglot.optimizer.annotate_types import annotate_types
         from sqlglot.optimizer.qualify import qualify
     except ImportError as exc:  # pragma: no cover - the extras carry sqlglot
-        raise RuntimeError("translating a Flock job needs sqlglot (pip install 'duckstring[starrocks]')") from exc
+        raise RuntimeError("translating a Flock job needs sqlglot (duckstring install lineage)") from exc
     return sqlglot, exp, qualify, annotate_types
 
 

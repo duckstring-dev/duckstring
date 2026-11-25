@@ -21,7 +21,7 @@ Table and Object references take two forms throughout:
 
 A reference is split at its first dot. For a name that itself contains a dot, put it in backticks: ``"`daily.v2`"`` is this Pond's own `daily.v2`, and ``"sales.`daily.v2`"`` is the Source's. Dotted names work but are best avoided. A reference to a Source the Pond doesn't declare raises `ValueError`, suggesting backticks if you meant a dotted name of your own.
 
-The Incremental methods (`append_table`, `merge_table`, `apply_zset`, `read_delta`, `trickle`) are documented on [Trickle I/O](trickle_io.md) and [Trickle Builder](trickle_builder.md).
+The Incremental methods (`append_table`, `merge_table`, `apply_zset`, `read_delta`, `is_new`, `trickle`) are documented on [Trickle I/O](trickle_io.md) and [Trickle Builder](trickle_builder.md).
 
 ## Attributes
 
@@ -43,7 +43,7 @@ pond.read_table(ref) -> duckdb.DuckDBPyRelation
 
 Returns a relation over a table's current contents.
 
-For a Source table, it also registers a view with the table's bare name, so the SQL that follows can refer to it directly (`FROM product`). If one of this Pond's own tables already has that name, the view isn't created, but the returned relation still works. Source reads are pinned to the run: a plain table is read at the version the Source had published when the run started, and a Trickle up to the run's freshness. Every Ripple in a run therefore sees the same Source data, even if the Source publishes again while the run is in progress.
+For a Source table, it also registers a view with the table's bare name, so the SQL that follows can refer to it directly (`FROM product`). If one of this Pond's own tables already has that name, the view isn't created, but the returned relation still works. Each Source is read as it stood when the run started: a plain table at the version the Source had published by then, and a Trickle with the rows it had published by then. That can be later than the run's own freshness, which is the oldest of its Sources'. Every Ripple in a run therefore sees the same Source data, even if the Source publishes again while the run is in progress.
 
 For a Trickle, the result is the clean current state, without the `_duckstring_f` and `_duckstring_d` system columns.
 
@@ -158,6 +158,47 @@ def score(pond):
     ...
 ```
 
+## App data
+
+An App's [Records and Media](../../guides/records_and_media.md) are read with these. An App line is named `name@major`, as in `"feedback@1"`. Neither is a Source, so nothing tells the engine when they change: an Inlet reading them always runs when asked, and in a Pond with Sources the Ripple reading them sets [`always_run=True`](decorators.md#ripple). Under `pond run`, they're read from the Puddles: a Records table from `puddles/records/{name}_v{major}/{table}.parquet` and Media from `puddles/media/{name}/m{major}/`.
+
+### `read_records`
+
+```python
+pond.read_records(ref) -> duckdb.DuckDBPyRelation
+```
+
+Returns an App line's Records table as a relation, read when the relation runs. To keep a history of what the App changed, [`merge_table`](trickle_io.md#merge_table) the result with its key.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `ref` | `str` | `"name@major.table"`, such as `"feedback@1.ratings"`. |
+
+### `media`
+
+```python
+pond.media(line, folder="") -> MediaInput
+```
+
+Returns an App line's Media, or a folder of it, as this Ripple's Run sees it.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `line` | `str` | `"name@major"`, such as `"feedback@1"`. |
+| `folder` | `str` | A folder within the line's Media, such as `"attachments"`. By default, all of it. |
+
+A `MediaInput` has:
+
+| Member | Description |
+|---|---|
+| `files()` | Every file, as `{"path", "size", "modified"}` dictionaries sorted by path. Paths are relative to the line's Media, and `modified` is an ISO 8601 time. |
+| `added()` | The files new or changed since this Ripple's previous completed Run. Every file on a first Run or after a Rebuild. |
+| `removed()` | The paths of files gone since this Ripple's previous completed Run. |
+| `open(path, mode="rb")` | A file, opened for reading. |
+| `path(path)` | A file as a local path, fetched into scratch space when Media is in an object store. |
+| `version` | A digest of every file's path, size and modification time. |
+| `changed` | Whether `version` differs from what this Ripple's previous completed Run read. Always `True` on a first Run and after a Rebuild. |
+
 ## Change detection
 
 Duckstring skips a Pond Run when none of its Sources changed since the last run. These methods let a Ripple take part in that decision, and find out which tables and Objects changed so it can skip just the work that depends on the rest.
@@ -174,9 +215,9 @@ Whether any of `refs` changed, as seen by this run. With no arguments, whether t
 
 | Reference | Changed when |
 |---|---|
-| A Source's plain table | The version this run reads was published after the previous run. |
-| A Source's append or merge Trickle | Rows were added, changed or removed in the window `(previous_f, f]`, or the window can't be read as changes (the Pond's first run, or `previous_f` older than the Source's retained history). |
-| A Source's Object | It was written after the previous run. |
+| A Source's plain table | The version this run reads is newer than the one the previous run read. |
+| A Source's append or merge Trickle | Rows were added, changed or removed since what the previous run read, or the change can't be read as changes (the Pond's first run, or the previous run's read is older than the Source's retained history). |
+| A Source's Object | It was written after what the previous run read. |
 | One of this Pond's own tables or Objects | This run wrote it and didn't keep the published copy. A Trickle write counts only if it changed the table. |
 
 | Parameter | Type | Description |
@@ -184,8 +225,6 @@ Whether any of `refs` changed, as seen by this run. With no arguments, whether t
 | `refs` | `str` | Table or Object references, `"name"` or `"source.name"`. |
 
 The own forms only see writes made through the handle (`write_table`, `write_object`, `append_table`, `merge_table`, `apply_zset` and the builder's terminals) and checks made with `detect_change`. A table changed with SQL on `pond.con` doesn't count.
-
-A Source is compared with the previous run's freshness. When a Pond reads several Sources that share an upstream, it can occasionally report `True` for a change the previous run already read. That costs a redundant recompute, never a missed change.
 
 **Raises** `RippleOrderError` for one of the Pond's own tables written by a Ripple that isn't this Ripple or one of its ancestors, as for `read_table`, and `MissingSourceAsset` for a Source table or Object that hasn't been published.
 
@@ -255,3 +294,36 @@ def by_product(pond):
     if not changed:
         pond.skip()
 ```
+
+## Run reports
+
+A Ripple can record facts about its Pond Run, such as how old the data an Inlet loaded already was. Duckstring carries them downstream with the data: every Pond below keeps the reports of each upstream Run whose data it read. Nothing in orchestration reads them.
+
+### `report`
+
+```python
+pond.report(reports: dict) -> None
+```
+
+Records `reports`, a dict of JSON values, for this Run. Datetimes and dates are stored as ISO strings; anything else JSON can't hold raises `TypeError`. Several calls in a Run merge, later keys winning, and the reports of a Pond's Ripples merge in Ripple-name order. A Run that calls [`skip`](#skip) still carries its reports.
+
+```python
+@ripple
+def load(pond):
+    ...  # load the newest hour the source has published
+    pond.report({"data_as_of": newest_hour})
+```
+
+### `reports`
+
+```python
+pond.reports() -> dict
+```
+
+Returns the reports of the upstream Runs whose data this Run read, keyed by the reporting Pond (`name@major`), then by the freshness of its Run:
+
+```python
+{"pageviews@1": {datetime(2026, 11, 9, 20, 0, tzinfo=timezone.utc): {"data_as_of": "2026-11-09T17:00:00+00:00"}}}
+```
+
+It holds the reports that reached the Pond's Sources since its previous Run, every one of them on a first Run. A Pond that runs less often than its Sources sees a report for each Source Run it caught up on. Reports come from every Pond upstream, not only the direct Sources. This Run's own reports aren't included.

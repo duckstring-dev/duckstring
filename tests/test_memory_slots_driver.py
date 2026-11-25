@@ -61,19 +61,21 @@ def test_no_slots_configured_sends_no_limit(tmp_path, monkeypatch):
     assert d.status()["ponds"][0]["memory"] is None
 
 
-def test_declared_memory_takes_slots_and_is_left_out_of_duckdbs_share(tmp_path, monkeypatch):
-    d = _driver(tmp_path, monkeypatch, slots="4", budget="16GB", ponds=(("a", 3 * 10**9), ("b", None)))
-    assert d.state.ponds["a@1"].slot_need == 2  # one slot for DuckDB, one for the 3 GB outside it
+def test_declared_memory_is_the_whole_runs_and_takes_the_slots_that_cover_it(tmp_path, monkeypatch):
+    # 4 GB slots: 3 GB fits in one, 5 GB needs two, more than the machine asks for every slot
+    d = _driver(tmp_path, monkeypatch, slots="4", budget="16GB",
+                ponds=(("a", 5 * 10**9), ("b", None), ("c", 3 * 10**9), ("d", 40 * 10**9)))
+    assert [d.state.ponds[p].slot_need for p in ("a@1", "b@1", "c@1", "d@1")] == [2, 1, 1, 4]
     d.refresh_now("b@1")  # b takes one slot... and, alone, the spare ones, less one kept while a has demand
     d.refresh_now("a@1")
     a_job = _begin(d, "a@1")
-    if a_job:  # a fit beside b
-        assert a_job[0]["memory_limit"] == f"{(2 * 4 - 3) * 1000}MB"  # its 8 GB less the 3 GB outside DuckDB
-    else:  # a waits for its two slots, and says so
+    if not a_job:  # a waits for its two slots, and says so
         st = {p["id"]: p for p in d.status()["ponds"]}["a@1"]
         assert st["status"] == "waiting" and st["memory"]["need"] == 2 and st["memory"]["position"] == 1
         _finish(d, "b@1")
-        assert _begin(d, "a@1")[0]["memory_limit"].endswith("MB")
+        a_job = _begin(d, "a@1")
+    slots = d.state.pond_states["a@1"].slots
+    assert slots >= 2 and a_job[0]["memory_limit"] == f"{slots * 4000}MB"  # DuckDB gets all of it: nothing subtracted
 
 
 def test_a_pond_waiting_for_memory_reports_it_and_its_place(tmp_path, monkeypatch):

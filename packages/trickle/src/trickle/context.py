@@ -47,6 +47,9 @@ class Context(Protocol):
 
     - ``count_table(ref) -> int`` — a metadata-fast current-row count of a source (no scan); the builder's
       ``.count()`` otherwise falls back to ``count(*)`` over :meth:`read_table`.
+    - ``estimate_rows(ref) -> int | None`` — an approximate current-row count of a source, from what the host
+      already knows, for the change-fraction threshold ``p``, which only chooses how to compute; ``None``
+      falls back to ``count_table``. An exact count can cost a read of every file the source has published.
     - ``record_lineage_write(name)`` and ``record_change(name, changed)`` — told after each terminal writes
       ``name``, and whether the write changed it.
     - ``dispatch_comprehensive(job) -> relation | None``: offered a terminal's comprehensive recompute (a

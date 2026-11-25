@@ -2,6 +2,422 @@
 
 Notable changes per release. Versions before 0.5.0 are recorded in the git history and the `v*` tags.
 
+## Unreleased
+
+Records and Media, the data Apps keep, and fixes from two showcase pipelines run unattended on 0.8.0: Melbourne's
+trains every 31 seconds, and a dozen Ponds over Wikipedia page views, news and Bluesky. Needs `duckstring-trickle`
+0.4.0.
+
+### Records and Media for Apps
+
+An App can now keep data the Catchment holds for it, which Ponds can read and the viewer can show:
+
+- **Records** are an App's tables, in PostgreSQL. `[app] records = true` gives each major line its own schema and
+  sign-in, `{name}_v{major}`, in a PostgreSQL the Catchment runs itself (started the first time an App needs it, its
+  memory set aside like an App's) or one it connects to (`duckstring catchment records --use postgres://...`). The
+  App gets `DUCKSTRING_RECORDS_URL`, a standard connection URL for any driver; `duckstring.app.records()` returns a
+  psycopg connection, and `duckstring.app.records_pool()` a connection pool sized to what one instance may hold
+  (`[app] connections`, default its `concurrency`; given as `DUCKSTRING_APP_CONNECTIONS`). Every App can read
+  every other App's Records; only its own are writable.
+- **Media** are an App's files. `[app] media = true` gives each line a folder on the Catchment's disk, or under an
+  object-store prefix (`duckstring catchment media --use s3://...`). The App gets `DUCKSTRING_MEDIA_URL`;
+  `duckstring.app.media()` is a filesystem rooted at it.
+- **Ponds read them**: `pond.read_records("feedback@1.ratings")` is a relation, and `pond.media("feedback@1",
+  "uploads")` lists the files with what was added or removed since the Ripple's previous Run. Both are outside
+  sources: an Inlet reading them always runs when asked. With an App reading the Pond's output (and a Tap on
+  itself), an App's writes flow through a pipeline and back.
+- **Major versions hand over**: an App with Records or Media has one live major. A new major starts as a trial
+  (Manage access only), filled with a copy of the live major's data and migrated by its `[app] migrate` command.
+  `pond promote` is the cutover: the App answers 503 while the final migration runs, then the new major is live
+  and the old one is retired (read-only; its address redirects). `duckstring app migrate` runs a trial's migration
+  again; `duckstring app purge APP@MAJOR` deletes a line's data, which is otherwise kept, even after the App is
+  removed.
+- **In the web UI**, the Catalog gains an App data section: a line's Records tables in the grid (they are the
+  catalog `records`, so SQL can read `records.feedback_v1.ratings` beside Pond tables) and its Media, with
+  download, and upload and delete for Manage access. An App node with Records or Media has a table icon. A Pond
+  can declare where its data comes from (`[pond] external = ["GDELT events", "app:feedback@1"]`), drawn as nodes.
+- **Several instances, on other machines too**: `[app] instances = 3` (with `state = "none"`) lets an App grow to
+  more processes as it gets busy, all sharing its Records and Media; a browser stays on the instance it reached. An
+  App that declares its own compute (`[pond] duck = "M"`, a Pool, or dedicated) runs its extra instances there:
+  each one dials back to the Catchment, which forwards requests to it, while it reads Pond data, Records and Media
+  directly. A quiet App stays on the Catchment until it gets busy; `min_instances = 1` keeps one running on its own
+  compute and the App off the Catchment entirely. It grows one instance at a time when, for 10 seconds, active
+  requests reach 70% of `concurrency`, or CPU, memory or the load the App reports itself
+  (`duckstring.app.report_load`, or an `X-Duckstring-Load` header) pass their thresholds (`[app.scale]`), and an
+  instance stops after its `idle_timeout`. `duckstring app scale` shows and overrides it all (`--min`, `--max`,
+  `--to 4 --hold 2h`), `duckstring app drain` empties one instance, and `DUCKSTRING_APP_SCALER` replaces the
+  decision with your own. `/metrics` and an opt-in `app_scale` alert show what it does.
+- **Spouts into Records**: a Spout to `records:` delivers a Pond's output into Records (`catalog_v1.prices`), where
+  every App reads it with its PostgreSQL driver.
+- **Ducks anywhere**: a Pond running on a Pool or other cloud compute reads Records directly when they listen
+  beyond the Catchment's machine (verified TLS), and Media directly from an object store; otherwise through the
+  Catchment.
+- **Beyond this machine**: `duckstring catchment records --listen ADDRESS` lets other machines reach Records over
+  TLS only (a self-signed certificate is made, or give your own); `--reader-url` prints a read-only URL for a BI tool.
+- **Backups**: `catchment download` and the state backup carry Records as a `pg_dump` (restored by a fresh
+  Catchment) and Media (the state backup up to 256 MB).
+- **Moving them**: `duckstring catchment records move postgres://...` (or `managed`) moves every App's Records to
+  another PostgreSQL, and `--postgres-version 19` moves a managed one to a new PostgreSQL major. `duckstring
+  catchment media move s3://...` moves Media. Apps answer 503 while the copy is taken; the copy is verified before
+  the switch and the old store is deleted after it.
+
+PostgreSQL comes from the operating system's official packages: `duckstring install postgres` installs it (the
+PostgreSQL project's apt or yum repository, or Homebrew), and the image carries it. `duckstring install` also
+fetches DuckDB's extensions for a machine without internet access (`extensions`) and installs Duckstring's extras
+pinned to the running version (`aws`, `dbt` and the rest).
+
+### Each Source read up to what it had published
+
+A Pond Run is stamped with the oldest of its Sources' freshness, and it read every append or merge table only up to
+that stamp. Two things went wrong, silently:
+
+- **A windowed Source's rows were hidden.** A Pond with a window is fresh until the window's end, so its rows are
+  stamped with it, in the future. A Pond reading it beside another Source didn't see them until the window ended: in
+  the transit showcase, a builder join found an empty timetable and its append output kept 2,568 observations as
+  unscheduled.
+- **A Sink stamped behind a fast merge Source could lose rows** once that Source folded or compacted its change
+  log, which its cleanup did on the Source's own schedule, not the Sink's.
+
+Now each Run reads each Source as it stood when the Run started, as plain tables already were, and the next Run
+reads that Source's changes from there, so every change is read once. A Run also sees the rows of the Source Run
+that started it, where before they waited for the next one. The Catchment records where each Run read up to
+(migration `038`); the first Run after upgrading goes on from its previous Run's freshness, as before. `pond run
+--incremental` reads the same way.
+
+A Pond skips a Run when none of its Sources changed after where its last Run read them, rather than after that
+Run's freshness. A Run reading a Source past its own stamp used to run once more after that Source went quiet (on
+every Refresh, while a windowed Source's window was open), reading empty changes.
+
+### Many small Runs
+
+A Pond that runs often on small tables slowed with every Run: about half a millisecond more per Run in the transit
+showcase, so a Run every 31 seconds would have outgrown its cycle within weeks. Now a Run reads what its window
+needs, whatever came before:
+
+- **A delta reads only the parts in its window,** chosen by name, where it read every part a Source had published
+  and filtered them.
+- **Resolving a builder's join keys** binds a Source's newest part, not all of them.
+- **The change-fraction check (`p`)** takes a Source's row count from its published size hint.
+- **The append fast path** (`.append()` keyed on the first source) looks up only the new rows' keys in the output's
+  history. It also no longer drops every row while any key is NULL.
+- **No more empty marker parts:** a merge table that loaded once and never changed gained an empty file per Run
+  (11,000 a day for one showcase Pond). It keeps one.
+- **A Run that calls `pond.skip()` publishes no new copy** of its plain tables or Objects. It wrote a new version of
+  each, and they were all kept until the next real change.
+- **Trickle's scratch views are temporary.** Every incremental write stored eight in the registry and none was ever
+  removed. A Duck drops those an earlier version left.
+- **Sizing a published table** for its sidecar hint takes one listing per directory, not a request per file on an
+  object store.
+- **Small files are combined.** Each Run that changes a Trickle table publishes a file (its new rows, or its change
+  log), so a table refreshed every 31 seconds gained 2,800 files a day, and every listing grew with them. Older files
+  are now combined into larger ones: 64 small files at a time, in tiers, up to the table's compaction threshold
+  (256 MiB by default; `DUCKSTRING_TIER_FILES` sets the count). Nothing is consolidated: each row keeps its
+  freshness stamp, so every read and delta returns the same rows, and the oldest freshness a delta can start from
+  doesn't move. The files a combined file replaces stay until no Run that might still read them is in flight. A
+  table holding a combined file is marked storage format 2 in its sidecar, which earlier versions refuse to read
+  by name.
+
+On the benchmark in `bench/small_runs/` (an Inlet appending 200 rows a Run, a builder join and an incremental
+aggregate downstream), the downstream Run went from 88 ms at Run 100 and 198 ms at Run 300 to 56 and 66 ms.
+
+### Checking Pond code before an upgrade
+
+A Catchment runs one Duckstring and every Pond deployed to it runs on that version, so upgrading a Catchment upgrades
+its Ponds, and code calling an API the new version removed failed only when its Ripple ran.
+
+- **`duckstring pond check [--fix]`** names each use of a removed API with its replacement, and `--fix` rewrites the
+  ones it can decide. The code is read, not run.
+- **The Catchment runs the same check** on every deployed Pond when it starts (so after an upgrade), logs what it
+  finds and lists it on the Pond's status (`compat`). `pond deploy` reports it as a warning.
+
+### Append tables kept once
+
+A Pond keeps its working copy of its tables in its own DuckDB database and publishes them as Parquet. An append
+table's whole history was in both: after two days of page views, 3.7 GB in the working copy beside 3.2 GB published.
+
+- **A publish moves an append table's older Runs out of the working copy** by the same rule that compacts a merge
+  table: once the Runs still held locally outgrow twice the compaction threshold (`DUCKSTRING_COMPACT_THRESHOLD`,
+  256 MiB by default), the oldest go, leaving about one threshold. They are read from their published files.
+- **Reads are unchanged.** The table's name is now a view over the published files and the rows still held
+  locally, so Ripple SQL, conflict checks (`on_conflict="keep_prior"` and `"fail"`) and recomputes see the whole
+  history. A Pond that rebuilds its working copy brings back only the recent Runs.
+- An existing append table changes to this layout at its next write.
+- **A working copy that is mostly free space is rewritten when its Duck starts.** A DuckDB file never shrinks:
+  deleted rows leave space it reuses but doesn't give back. Once its older Runs had moved out, `wa_views`' file
+  was 23 GiB, 98% of it free. A Duck opening a working copy of at least 64 MiB that is at least half free copies
+  the live data into a new file and swaps it in, before anything else uses it; a failure leaves the file as it was.
+- Writing to an append table with your own SQL (`INSERT INTO`) no longer works: write through `append_table`.
+- **Checking for an append table with `duckdb_tables()` no longer finds it,** since its name is a view (as a merge
+  table's already was). Use `information_schema.tables`, which lists both. `duckstring pond check` and a deploy name
+  each use of `duckdb_tables()` in a Pond's code: the attention showcase had it in six Ponds, deciding where to
+  resume, and they reloaded data they already had.
+
+### Fixes
+
+- **A Ripple's error was replaced by "stuck" 30 seconds after its Run gave up.** The Ripples below the failed one
+  kept waiting for the Run, so the Duck never went idle, its watchdog reported the Run as stuck, and that message
+  replaced the Ripple's own error on the Pond. They now stop waiting when the Run gives up; Runs pipelined behind
+  it carry on.
+- **A fix deployed while the broken code was retrying left the Pond failed.** A Duck on a version a redeploy
+  replaced kept spending its retries on the old code, then failed the Pond after the redeploy had cleared it. It now
+  gives a failing Run up at once, and the Catchment records the attempt and runs the Pond again on the new
+  version, without failing it or alerting.
+- **A Duck that ran a query before its first memory limit couldn't take one.** It set its spill directory with the
+  limit, which DuckDB refuses once anything has spilled, so the Run failed. It is now set as the working copy opens.
+- **A repair whose step failed stayed in progress for good.** Its Ponds waited as repairing, and another repair
+  was refused. Running `control repair` again now runs the failed steps again, and a Catchment restarted during a
+  repair carries it on (its Ponds stayed marked as repairing with nothing to finish them).
+- **A redeploy waited for every Run a busy Duck had already taken.** A Duck on the replaced version worked through
+  all of them on the old code (five Runs of several minutes each in the attention showcase), and switching at once
+  meant a Kill. It now finishes only the Run in progress and hands the others back, and they run on the new
+  version.
+- **Change points inside combined files were skipped.** Once a Source's small per-Run files were combined, its
+  change points (`/api/ponds/{name}/changes`, `--next-change`, a copied Puddle's history) named only each combined
+  file's two ends, so a dev Catchment stepped from one end of a week of Runs to the other. The Runs inside are read
+  back from their rows' stamps (append histories and change logs; a folded band's steps are gone by design).
+- **Upgrading a Catchment now reaches its Ponds' environments.** A Pond with its own `pyproject.toml` ran the
+  Duckstring it was deployed with until it was redeployed, so after an upgrade its Ducks ran the old version beside
+  the new one and failed reading data the new one wrote. A Duck's environment is now worked out when it starts,
+  for the Catchment's current Duckstring, and built then if needed (as a remote Duck already did). An App's
+  instance likewise.
+- **A relation with bound parameters couldn't be written** (`Values were not provided for the following
+  parameters`) by `append_table`, `merge_table` or the builder: since writes name their input as a connection's own
+  view, its SQL carried only the placeholders. Found by the attention showcase's `wa_chatter`, which failed every
+  Run after reading for four minutes.
+- **A Pond's first Run failed when Ripples ran in parallel** (`Catalog write-write conflict on create`): each
+  Ripple's first Trickle write created the same table. In the showcase it failed 3 first Runs in 6, and with the
+  default retry budgets of 0 the Pond stayed failed.
+- **Concurrent reads in an App failed** (`Table with name _duckstring_ds_consol_0 does not exist!`), and two
+  Ripples reading the same Source could see each other's version: `read_table` registered the Source's name as a
+  view stored in the registry, shared by every connection. It's now a temporary view on the reading connection.
+- **A Pond importing numpy at module level failed** ("cannot load module more than once per process"), and builder
+  Ripples failed now and then with `KeyError: 'duckstring.trickle_builder'`. Loading a Pond's code evicted every
+  module the import added; now only the Pond's own.
+- **A Run a later one overtook is `superseded`, not `failed`.** When Runs queue behind a long one, a later Run can
+  do the work of one still waiting, which then never finishes. It was recorded as failed ("abandoned"), so run
+  history, `duckstring_pond_failures_total` on `/metrics` and a failed Pond's error all counted it as a failure.
+  `/api/runs` gives the covering Run's freshness as `superseded_by`. Earlier rows are left as they were.
+  Migration `036`.
+- **Deploying a fix for a failed Pond left it showing running for good,** and re-ran only the Ripple that had
+  failed, on output the broken version wrote. The Duck took the earlier version's completed Ripples as its own
+  (the Run ledger is the major line's); a new version now runs every Ripple of the Run.
+- **Stopping the Catchment could fail an App**, which the restarted Catchment then showed failed until woken.
+- **Less log noise:** with the Flock off, no engine is looked for (`flock: engine 'starrocks' could not be
+  checked` repeated through every Run), an engine that can't be checked is reported once, and a first Run's
+  `no published base at or below 0001-01-01` is a debug line.
+- **`append_table` from Python data** (`con.from_arrow`, a registered DataFrame) failed in a Pond's registry on
+  DuckDB 2.0 ("it reads a Python object").
+- **`pond run` on an App with both `command` and `static` served no static files**: only the command ran, so every
+  file was a 404 locally while a Catchment served it. The files are now served beside the command, as on a
+  Catchment.
+- **An App with no Sources recorded a Run every second.** Its standing Wake asked for "now" on every tick, so each
+  tick passed it as a no-change Run and its run history filled. It now runs only when asked.
+- **`pond remove --wipe` on an App that had ever started failed** with a database error, leaving the removal half
+  done: its instances' records weren't deleted with its versions.
+
+### Integer sums published exactly
+
+DuckDB's `SUM` over integers is a 128-bit `HUGEINT`, which Parquet can't hold, so it was published as `DOUBLE`: a
+count of 9 read as `9.0` downstream, and anything above 2^53 (about 9×10^15) was rounded without a word.
+
+- **A major version first deployed from this release publishes it as `BIGINT`** (`UHUGEINT` as `UBIGINT`), in every
+  table and Trickle file. A value outside `BIGINT`'s range fails the Run, naming the column. Lines deployed
+  before keep `DOUBLE`, which their Sinks' contracts record; a new major version moves a Pond to `BIGINT`.
+  `pond run` publishes `BIGINT`. Migration `037`.
+- **An aggregate's state is stored exactly** in what it publishes, so a Duck that rebuilds its working database
+  from published state (a fresh cloud Duck, or after losing it) carries on summing exactly. It came back as
+  `DOUBLE`, and a sum above 2^53 lost its last digits.
+
+### Declared memory is the whole Run's (breaking)
+
+`@ripple(memory=)` and `[pond] memory` declared the memory a Ripple held outside DuckDB, and the Catchment took
+it out of DuckDB's limit. Read as "this Ripple needs 12 GB", which is how it reads, it shrank DuckDB's limit
+instead, and a Run that needed more than one memory slot for DuckDB failed the same way.
+
+- **`memory` is now what the Pond's Runs need, DuckDB and Python together.** On the Catchment's own machine the
+  Pond waits for the slots that cover it (one by default), and DuckDB's limit is all of them.
+- **`[pond] memory` applies to SQL Ripples and dbt models too.** Before, only Python Ripples took it.
+- A Pond that declared memory outside DuckDB now takes one slot fewer. Add what DuckDB needs to keep the old size.
+- An App's `[pond] memory` already meant the whole App and is unchanged.
+
+### One conflict rule for append tables (breaking)
+
+`fail_on_conflict=False` meant two things: on `append_table` it skipped the key check and appended every row,
+duplicates included; on the builder's `.append()` it dropped rows whose key was already in the table. The builder
+also had no way to append without checking the table, though speed is the reason to pick an append table.
+
+- **Both now take `on_conflict`, with the same values.** `"skip_check"` (the default) appends without reading the
+  table; a declared `pk` is your promise. `"keep_prior"` drops rows whose key is already there. `"fail"` raises
+  before writing when one arrives with different values. Without a `pk`, the whole row is the key.
+- **The builder's `.append()` defaults to `"skip_check"`.** A change that would alter a written row is left out (and
+  logged to `{name}__droplog`), so existing rows keep their values. A Run the builder has to recompute in full adds
+  only the rows the table doesn't hold yet. Before, it appended every row again when the output had no `pk`.
+- **`fail_on_conflict` is removed.** Passing it raises an error naming the replacement: on `append_table`, `False`
+  is `"skip_check"` and `True` is `"fail"`; on `.append()`, `False` is `"keep_prior"` and `True` is `"fail"`.
+- `append_table` takes `log_drops`, as `.append()` does.
+
+### A CLI for scripts and agents
+
+- **Without a terminal, nothing opens a live view.** `status` prints one snapshot; `refresh now`, `control wake`
+  and `control force` wait for their outcome; `refresh add` prints the Refresh it added. `--view` keeps the view (`status --follow`).
+  A `status` in a script used to wait out its caller's timeout.
+- **`--wait [--timeout D]`** on `refresh now`, `control wake|force|rebuild` and `pond deploy`: wait until the Pond has
+  done what was asked, then exit 0 if every Run it caused succeeded, 1 naming each failed Pond, Ripple and error
+  (or why the Pond is failed, killed or blocked), or 2 on the timeout. `rebuild` and `deploy` wait for the next
+  Run, which something must ask for.
+- **`duckstring runs [POND] [--upstream] [--ripples] [--limit N] [--json]`**: Run history, with each Ripple Run's
+  retries and errors.
+- **`--json`** on `status` (every field `/api/status` gives), `runs`, `refresh ls` and `data ls`.
+- `POST /api/ponds/{name}/refresh` returns the freshness it asked for (`requested`).
+
+### Live and replayable Puddles
+
+Every metric in the showcases was designed against real data outside Duckstring, because Puddles were small
+generated samples and each Pond's window of them differed. A Puddle can now be the real Source, read through its
+Catchment's query API (never from its files), and a local run can step through the Source's history.
+
+- **`p.read_source(table=None)`** stands for the Source's published table on the Catchment you hydrate from. A
+  Puddle can be a filter over it: `return p.read_source().filter("store_id = 7")`. The definition becomes a query
+  that runs on the Catchment (`POST /api/query` with `at`), so only the rows it keeps come back. A definition that
+  fetches rows into Python before writing them can't be sent there, and is refused.
+- **`pond hydrate --live`** copies nothing: each run reads a Source with no definition whole, and one with a
+  definition through its query, as it stood at the run's position, and its changes since the last run (`since`).
+  The hydration time is recorded, and the baseline reads the Sources as they stood then. Nothing on the Catchment
+  changes for a local reader.
+- **`pond hydrate --as-at TIME`** copies each Source's state at that time and every change since (through a
+  definition's query, so the copy holds only what it keeps). A time a Source holds nothing from is refused.
+- **`pond run --incremental`** goes on from the last run, as a Refresh would: every Source reaches a target first
+  (`--next-change`, the default, `--next-run`, `--most-recent` or `--to TIME`), the run is stamped with the oldest
+  Source freshness, and `pond.previous_f` is the last run's. A plain `pond run` is the baseline again. A Pond with
+  Sources must be hydrated before it runs.
+- **`@puddle.step(target)`** writes a Source's next window, for a new pipeline with no history or past its end. It
+  sees `p.previous_f`, `p.f` and `p.step`.
+- **Puddle sets:** `@puddle(target, set="week")` (or a tuple), chosen by `pond hydrate --set` or per Source in a
+  `puddles.toml` `[local]` section, falling back to the default set. Two definitions for one target in a set are an
+  error, where the last one used to win silently. `puddles.toml` is left out of deploys by default.
+- **The handle writes what a Source publishes:** `p.append_table` and `p.merge_table`, and `p.read_table` for the
+  Puddle's own table. Puddle tables are published through the data plane as a Pond's are (so
+  `puddles/ponds/{source}/data/{table}.parquet` is now a version directory), and a query over `read_source` is
+  read as the Source's kind, so deltas over it are the Source's.
+- **`GET /api/ponds/{name}/changes`** lists the times a line's published tables changed, which `--next-change`
+  steps through.
+- `pond puddle ls` shows how each Source is read, its set and the freshness the last run read it at.
+
+### Puddles on a dev Catchment
+
+A change spanning several Ponds can be tested on a Catchment of its own: deploy the Ponds under test there, and
+deploy Puddles in place of the Sources that live in production.
+
+- **`pond puddle deploy [SOURCE...] [--set S] [--from PROD [--live] [--as-at TIME]] [--force]`** deploys Puddles
+  of a Pond's Sources, built from its Puddle definitions. A Puddle is the Source's line on that Catchment
+  (`transactions@1`), and every Pond there reading the Source reads it. Without Sources named, each one not yet on
+  the Catchment is deployed, so a second Pond sharing some Sources deploys only the rest. A Puddle already there is
+  replaced once confirmed (`--force` skips the question); a Source deployed there as a Pond is refused, and
+  `pond deploy` of the Source replaces its Puddle once confirmed. Whichever deploys first wins.
+- **A Source can deploy a Puddle of itself:** `pond puddle deploy transactions`, run in `transactions`, builds it
+  from definitions against its own name, so the Pond that knows its data best defines its stand-in, and readers
+  deploy none of their own.
+- **Copied Puddles** hold their data on the Catchment, published where a Draw lands, so every Duck reads them as
+  any Source: written by the definitions alone (no `--from`: a wholly synthetic dev Catchment), or copied from
+  production with every change after `--as-at`. `@puddle.step` definitions run past the end of a copy's history.
+  **Live Puddles** (`--live`) copy nothing: their definitions are compiled to queries when deployed, and Ducks run
+  them on production through their Catchment, which forwards them with the credentials stored at deploy. No Duck
+  holds production's key, and nothing is read in place.
+- **The definitions run in a subprocess** in the deploying Pond's environment (`python -m duckstring.puddle_build`),
+  which keeps its own copy of the bundle so a Puddle can be built again. A definition that fails refuses the
+  deploy, and nothing changes.
+- **`refresh now POND --rewind`** resets the Ponds the Refresh reaches and runs them from the Puddles' baseline
+  (also the first Run after a deploy); **`--hydrate [--as-at TIME] [--from PROD]`** builds them again with their
+  definitions; **`--next-change`, `--next-run`, `--most-recent`, `--to TIME`** move them through their history as
+  `pond run --incremental` does (the two share one module, and a test runs the demo both ways). A plain Refresh, or
+  a recurring one, reaching a Puddle is refused.
+- Routes: `GET`/`POST /api/puddles`, `POST /api/ponds/{name}/puddles/hydrate|rewind|refresh`; `/api/deploy` takes
+  `replace_puddle`. `/api/status` carries `is_puddle` and `puddle` (its owner, set, mode, origin, baseline and
+  position). `pond remove` removes a Puddle whole.
+
+### Run reports
+
+A Pond's freshness says when its Inlets last read their sources, not how old the data they read was: the attention
+showcase's page views were "fresh as of 20:11" while their newest hour was 17:00. Only the Inlet knows that, so a
+Ripple can now say it, and Duckstring carries it downstream.
+
+- **`pond.report({...})`** records facts about the Run as a dict of JSON values (datetimes as ISO strings).
+- **`pond.reports()`** returns the reports of every upstream Run whose data this Run read, as
+  `{pond: {run_f: reports}}`, so a Pond that runs less often than its Sources sees each Run it caught up on. On an
+  App's handle, everything its Sources hold.
+- Reports travel with the published data (a hidden append table, `_duckstring_reports`), so they reach Ponds on
+  other Catchments through Ducts and survive a lost registry. A dbt-mode Pond passes its Sources' reports on.
+  Nothing in orchestration reads them, and a pipeline that never reports writes nothing.
+- **Reading them:** `GET /api/ponds/{name}/reports` lists a Pond's own reports, newest Run first, or with `f` gives
+  one Run's report and the upstream ones it read. `duckstring runs POND --reports` shows each Run's beside it, and
+  the web UI's Run Detail shows them for the selected Run.
+
+### Large tables in the web UI
+
+Opening a merge table in the data viewer consolidated its whole change log for every page: on a 575M-row table
+with 246M rows changed since its last compaction, each page took 30 seconds to 3 minutes.
+
+- **The viewer shows a merge table newest first,** as its log: the rows written by recent runs, then the rest, with
+  rows a later write replaced in grey and deleted rows in red. A page reads only its own rows and looks up their
+  keys, so on the same table it takes under a second, and the row count is instant. A freshness window still shows
+  the rows changed in it, and the exact current state is what a query of the table reads.
+- **An append table is shown newest run first.**
+- **A page is found by file:** each file's row count (from its footer) places the page, and only the file or
+  two it falls in are read. A page 400M rows into a 1B-row table took 23 s; it takes 0.01 s.
+- **Sorting a table of more than 100M rows asks first,** since a sort reads all of it.
+- **A long query can be cancelled.** After a second, the viewer offers Cancel, which stops the query on the
+  Catchment as well (`POST /api/query/cancel`).
+- **The web UI on a phone:** the data viewer's freshness window and SQL box fold behind one bar (closed to start,
+  noting when a window or query is set), its top row wraps, keeping its close button and row count on screen, and
+  held landscape, the run panels fold behind a bar and the sidebar into a strip (opening when you select a Pond),
+  so the graph has the screen.
+- **The web UI is served with caching headers,** so a browser picks up a new UI on its next load. Without them a
+  phone kept the old one after an upgrade.
+- **A query consolidates a merge table once per published version** of it, where every query did it twice (and
+  the viewer sends a count and then each page). The Catchment writes the consolidation beside its data, in
+  `.serving-cache` (left out of `catchment download`), and keeps the changed keys apart from the new images, so
+  a table that only gains rows reads as its base plus them. On the same table: 8 seconds the first time, then a
+  count in under a second and a page in 0.04 s, where each took 8 to 12 seconds.
+
+### Other changes
+
+- **Queries as of a time:** `duckstring query --pond POND --at TIME` (and `at=` on the Python client's `query`,
+  `at` on `POST /api/query`) reads a Pond's tables as they stood then: each plain table at its version at or before
+  it, each Trickle at its rows up to it. With `--since TIME` as well, the result is the query's change between the
+  two times, each row weighted `+1` or `-1` in `_duckstring_d`, so a filter over a large table sends only the rows
+  it keeps that changed. A Trickle that holds nothing from before the time is refused; a plain table whose version
+  then is gone is read at its newest, with a warning.
+- **A failed Ripple is retried once by default** (`immediate_retries = 1`), within the same Run. A transient error,
+  such as a race on a Pond's first Run or a fetch that timed out, left the Pond failed until someone cleared it.
+  It applies to a Pond line's first deploy; a line already deployed keeps its budget, and `pond.toml` or
+  `control failure-budget` can set 0. An App is likewise started once more after its process exits before it fails.
+- **`compact_threshold=` on the builder's `.merge()`**, as on `pond.merge_table`: a builder's output can fold its
+  change log at its own size, where only the Catchment-wide `DUCKSTRING_COMPACT_THRESHOLD` reached it.
+- **A builder can start from a table a parent Ripple wrote:** `pond.trickle("own_table")`, with the table's
+  changes read from the Pond's working database, as does `pond.read_delta("own_table")`. Before, a table had to
+  reach the builder through another Pond, so a Pond boundary was forced where none was needed.
+- **`pond.is_new(name)`** (and `is_new` on Trickle's standalone host): whether one of the Pond's own tables holds
+  nothing written before this run. A Ripple that applies changes by hand gets only the latest window when it is
+  added to a Pond that has already run, or when its output is deleted to refill it, and wrote a partial table.
+  Checking `delta.is_full or pond.is_new("output")` fills it from the Sources' full state; it stays new on a retry
+  of the run that first wrote it. The builder already checks its own output.
+- **The builder's `.filter()` and `.mutate()` take bare column names** when only one source has the column, as
+  `on` and `.aggregate()` do; `alias.col` was needed even with one source. A bare name two sources have raises a
+  `BuildError` saying to qualify it.
+- **`pond puddle ls|show|query` see append and merge tables,** read as a Sink reads them.
+- **An App's static files are sent with `Cache-Control: no-cache`,** so a cache in front of the Catchment
+  revalidates them after a redeploy.
+- **An App's `pond.freshness()` has `changed`:** when each Source's data last changed. A Source's freshness moves
+  on every Run, so an App rebuilding a cache on it rebuilt every Run.
+
+### Documentation
+
+Apps have their own section in the Guides: Building Apps, Records and Media (keeping an App's data, reading it in
+Ponds, handing it to a new major version, and running the PostgreSQL behind it) and Scaling Apps. The Reference
+covers the new `[app]` keys and `[app.scale]`, the App handle's Records and Media functions, `pond.read_records` and
+`pond.media`, `duckstring app scale|drain|migrate|purge`, `duckstring catchment records|media`, the new
+`duckstring install`, the `records:` Spout destination, and the new routes, metrics and environment variables.
+
 ## 0.8.0 — 2026-11-11
 
 Apps, cloud compute on Azure and Google Cloud, and Databricks and BigQuery in both directions: reading from

@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
 import { useLiveStore } from '@/lib/store';
 import { BATCH_OPS, type BatchOp } from '@/lib/api';
-import { useIsMobile } from '@/lib/useIsMobile';
+import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
 import { DagCanvas } from './DagCanvas';
 import { Sidebar, TracePanel } from './Sidebar';
 import { RunHistory } from './RunHistory';
@@ -112,6 +112,25 @@ function MobileRunsPanel() {
         </div>
         )
       )}
+    </div>
+  );
+}
+
+// A short screen (a phone held landscape) keeps the desktop layout, but the bottom panels fold behind a bar,
+// closed to start, so the canvas has the screen; open, they take at most half of it.
+function ShortBottom({ label, children }: { label: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ borderTop: '1px solid #27272a', background: '#0c0c10', flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+      <div
+        onClick={() => setOpen((v) => !v)}
+        style={{ display: 'flex', alignItems: 'center', padding: '6px 14px', cursor: 'pointer', userSelect: 'none', flexShrink: 0 }}
+      >
+        <span style={{ fontSize: 11, fontWeight: 700, color: '#a1a1aa', letterSpacing: '0.08em' }}>
+          {open ? '▾' : '▸'} {label}
+        </span>
+      </div>
+      {open && <div style={{ height: '50dvh', minHeight: 0, display: 'flex', borderTop: '1px solid #27272a' }}>{children}</div>}
     </div>
   );
 }
@@ -298,7 +317,33 @@ export function App() {
   const refresh = useLiveStore((s) => s.refresh);
   const needsKey = useLiveStore((s) => s.needsKey);
   const isMobile = useIsMobile();
+  const isShort = useIsShort();
   const appId = useSelectedApp();
+  const panelHeight = isShort ? '100%' : 260;
+  const bottom = appId ? (
+        <div style={{ display: 'flex', flex: isShort ? 1 : undefined, height: panelHeight, minHeight: 0, borderTop: isShort ? undefined : '1px solid #27272a' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <AppInstances pondId={appId} />
+          </div>
+          {/* Under the sidebar, as for a Pond: the App's data timing (interval and age). */}
+          <div style={{ width: 320, minWidth: 320, borderLeft: '1px solid #27272a' }}>
+            <TracePanel />
+          </div>
+        </div>
+  ) : (
+        <div style={{ display: 'flex', flex: isShort ? 1 : undefined, height: panelHeight, minHeight: 0, borderTop: isShort ? undefined : '1px solid #27272a' }}>
+          <div style={{ flex: 1, minWidth: 0, borderRight: '1px solid #27272a' }}>
+            <RunHistory />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <RunDetail />
+          </div>
+          {/* Bottom-right quadrant — aligned under the 320px sidebar: the selected node's run timing. */}
+          <div style={{ width: 320, minWidth: 320, borderLeft: '1px solid #27272a' }}>
+            <TracePanel />
+          </div>
+        </div>
+  );
 
   useEffect(() => {
     // Long-poll loop: refresh() holds (via /api/status?since=) until the engine state changes, then
@@ -339,33 +384,14 @@ export function App() {
             <DagCanvas />
           </div>
         </ReactFlowProvider>
-        <Sidebar mobile={isMobile} />
+        <Sidebar mobile={isMobile} short={isShort && !isMobile} />
       </div>
       {isMobile ? (
         <MobileRunsPanel />
-      ) : appId ? (
-        <div style={{ display: 'flex', height: 260, minHeight: 0, borderTop: '1px solid #27272a' }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <AppInstances pondId={appId} />
-          </div>
-          {/* Under the sidebar, as for a Pond: the App's data timing (interval and age). */}
-          <div style={{ width: 320, minWidth: 320, borderLeft: '1px solid #27272a' }}>
-            <TracePanel />
-          </div>
-        </div>
+      ) : isShort ? (
+        <ShortBottom label={appId ? 'INSTANCES' : 'RUNS'}>{bottom}</ShortBottom>
       ) : (
-        <div style={{ display: 'flex', height: 260, minHeight: 0, borderTop: '1px solid #27272a' }}>
-          <div style={{ flex: 1, minWidth: 0, borderRight: '1px solid #27272a' }}>
-            <RunHistory />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <RunDetail />
-          </div>
-          {/* Bottom-right quadrant — aligned under the 320px sidebar: the selected node's run timing. */}
-          <div style={{ width: 320, minWidth: 320, borderLeft: '1px solid #27272a' }}>
-            <TracePanel />
-          </div>
-        </div>
+        bottom
       )}
     </div>
   );

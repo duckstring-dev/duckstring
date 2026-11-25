@@ -3,12 +3,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLiveStore, atLeast, THEME_BLOCKED, THEME_BRAND, THEME_SUCCESS } from '@/lib/store';
 import {
-  fetchTables, fetchFreshness, fetchHistory, fetchCount, fetchPage, fetchObjects, downloadObject,
+  fetchTables, fetchFreshness, fetchHistory, fetchCount, fetchPage, cancelQuery, fetchObjects, downloadObject,
   deleteTable, deleteObject, fetchCatalog, promoteServe, exposeTable,
+  fetchAppData, fetchMedia, downloadMedia, uploadMedia, deleteMedia,
   type DataQuery, type TableInfo, type TrickleMode, type PageResult, type ObjectInfo,
-  type Catalog, type CatalogTable, UnauthorizedError,
+  type Catalog, type CatalogTable, type AppDataLine, type MediaFile, UnauthorizedError,
 } from '@/lib/api';
 import { ConfirmDialog, type ConfirmOpts } from './ConfirmDialog';
+import { useIsMobile, useIsShort } from '@/lib/useIsMobile';
 
 // The unified Catalog (plans/data-serving.md): one modal that IS the Data Viewer. Opened from Options →
 // Catalog (no preselection) or a Pond's table icon (that Pond+Major preselected). A collapsible left
@@ -24,7 +26,8 @@ const CHUNK = 400;
 const OVERSCAN = 80;
 
 // Trickle system columns surfaced by the consolidated browse view.
-const ACTIVE = '_duckstring_active'; // +1 present / -1 deleted — drives row colour, never shown
+const ACTIVE = '_duckstring_active'; // 1 current / 0 replaced / -1 deleted — drives row colour, never shown
+const SLOW_SORT_ROWS = 100_000_000; // a sort past this many rows asks first
 const FRESH = '_duckstring_f'; // most-recent run freshness
 const UPDATES = '_duckstring_updates'; // count of +1 changelog events
 const EVENT = '_duckstring_event'; // create | update | delete (per-record history)
@@ -63,6 +66,8 @@ function splitId(id: string): { name: string; major: number | null } {
 }
 
 type Pending = { pond: string; major: number; table: string; nonce: number };
+// An App line's data picked in the tree (plans/records-and-media.md): its Records tables or its Media.
+type AppSel = { name: string; major: number; view: 'records' | 'media'; table?: string };
 
 // ─── The modal shell: tree + viewer ─────────────────────────────────────────
 
@@ -86,13 +91,24 @@ function CatalogModal({ preselect, onClose }: { preselect: string | null; onClos
   const [leftCollapsed, setLeftCollapsed] = useState(!!preselect);
   const [pending, setPending] = useState<Pending | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [appLines, setAppLines] = useState<AppDataLine[]>([]);
+  const [appSel, setAppSel] = useState<AppSel | null>(null);
   const nonce = useRef(1);
 
   const load = useCallback(async () => {
+    const pre = preselect ? splitId(preselect) : null;
+    try {
+      const data = await fetchAppData();
+      setAppLines(data.lines);
+      // Opened from an App node's table icon: start on that line's data.
+      const line = pre && data.lines.find((l) => l.name === pre.name && l.major === pre.major);
+      if (line) setAppSel((a) => a ?? { name: line.name, major: line.major, view: line.records ? 'records' : 'media' });
+    } catch (e) {
+      on401(e);
+    }
     try {
       const c = await fetchCatalog();
       setCat(c);
-      const pre = preselect ? splitId(preselect) : null;
       setActive((a) => a ?? pre?.name ?? c.ponds[0]?.name ?? null);
       if (pre?.major != null) setTreeMajor((m) => (pre.name in m ? m : { ...m, [pre.name]: pre.major as number }));
     } catch (e) {
@@ -112,6 +128,7 @@ function CatalogModal({ preselect, onClose }: { preselect: string | null; onClos
     !!p && activePond != null && p.pond === activePond.name && p.major === activeMajor;
 
   const pickTable = (pond: string, major: number, table: string) => {
+    setAppSel(null);
     setActive(pond);
     setTreeMajor((m) => ({ ...m, [pond]: major }));
     setPending({ pond, major, table, nonce: nonce.current++ });
@@ -149,7 +166,10 @@ function CatalogModal({ preselect, onClose }: { preselect: string | null; onClos
               search={search}
               setSearch={setSearch}
               canManage={canManage}
-              onActivate={setActive}
+              onActivate={(name) => { setAppSel(null); setActive(name); }}
+              appLines={appLines}
+              appSel={appSel}
+              onPickApp={setAppSel}
               onPickMajor={(name, major) => setTreeMajor((m) => ({ ...m, [name]: major }))}
               onPickTable={pickTable}
               onExpose={onExpose}
@@ -158,8 +178,20 @@ function CatalogModal({ preselect, onClose }: { preselect: string | null; onClos
           </div>
         )}
 
-        {/* Right: the Data Viewer, keyed on pond+major so a switch remounts it fresh. */}
-        {activePond && activeMajor != null ? (
+        {/* Right: an App line's data, or the Data Viewer keyed on pond+major so a switch remounts it fresh. */}
+        {appSel && appLines.some((l) => l.name === appSel.name && l.major === appSel.major) ? (
+          <AppDataViewer
+            key={`${appSel.name}:${appSel.major}`}
+            line={appLines.find((l) => l.name === appSel.name && l.major === appSel.major)!}
+            sel={appSel}
+            onSelect={setAppSel}
+            canManage={canManage}
+            leftCollapsed={leftCollapsed}
+            onToggleLeft={() => setLeftCollapsed((v) => !v)}
+            onChanged={load}
+            onClose={onClose}
+          />
+        ) : activePond && activeMajor != null ? (
           <DataViewer
             key={`${activePond.name}:${activeMajor}`}
             pondName={activePond.name}
@@ -206,7 +238,11 @@ const chip: React.CSSProperties = {
 
 function PondTree({
   cat, active, treeMajor, search, setSearch, canManage, onActivate, onPickMajor, onPickTable, onExpose,
+  appLines, appSel, onPickApp,
 }: {
+  appLines: AppDataLine[];
+  appSel: AppSel | null;
+  onPickApp: (s: AppSel) => void;
   cat: Catalog | null;
   active: string | null;
   treeMajor: Record<string, number>;
@@ -298,8 +334,260 @@ function PondTree({
             {cat == null ? 'Loading…' : 'Nothing serviceable.'}
           </div>
         )}
+        <AppDataTree lines={appLines} sel={appSel} search={search} onPick={onPickApp} />
       </div>
     </>
+  );
+}
+
+// Apps' Records and Media, a section of their own below the Ponds: each App line, its Records tables and its Media.
+function AppDataTree({ lines, sel, search, onPick }: {
+  lines: AppDataLine[]; sel: AppSel | null; search: string; onPick: (s: AppSel) => void;
+}) {
+  const shown = lines.filter((l) => !search || l.name.includes(search) || (l.tables ?? []).some((t) => t.table.includes(search)));
+  if (shown.length === 0) return null;
+  const item = (active: boolean): React.CSSProperties => ({
+    display: 'flex', alignItems: 'center', gap: 6, padding: '3px 10px 3px 22px', cursor: 'pointer', fontSize: 12,
+    color: active ? '#f4f4f5' : '#c4c4c8', background: active ? '#1f1f27' : 'transparent',
+  });
+  return (
+    <div style={{ borderTop: '1px solid #27272a', marginTop: 6, paddingTop: 6 }}>
+      <div style={{ padding: '4px 10px', fontSize: 10.5, color: '#71717a', letterSpacing: 0.4, textTransform: 'uppercase' }}>
+        App data
+      </div>
+      {shown.map((l) => {
+        const isLine = sel?.name === l.name && sel?.major === l.major;
+        const tables = (l.tables ?? []).filter((t) => !search || t.table.includes(search) || l.name.includes(search));
+        return (
+          <div key={`${l.name}@${l.major}`}>
+            <div onClick={() => onPick({ name: l.name, major: l.major, view: l.records ? 'records' : 'media' })}
+                 style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', cursor: 'pointer', fontSize: 12.5,
+                          color: isLine ? '#f4f4f5' : '#c4c4c8' }}>
+              <span style={{ color: '#71717a', fontSize: 10, width: 8 }}>{isLine ? '▾' : '▸'}</span>
+              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {l.name} <span style={{ color: '#71717a' }}>v{l.major}</span>
+              </span>
+              {l.state !== 'live' && <span style={{ fontSize: 10.5, color: '#71717a' }}>{l.state}</span>}
+            </div>
+            {isLine && (
+              <div style={{ padding: '2px 0 6px 0' }}>
+                {l.records && tables.map((t) => (
+                  <div key={t.table} onClick={() => onPick({ name: l.name, major: l.major, view: 'records', table: t.table })}
+                       title={`records.${l.schema}.${t.table}`}
+                       style={item(sel?.view === 'records' && sel?.table === t.table)}>
+                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.table}</span>
+                  </div>
+                ))}
+                {l.records && tables.length === 0 && (
+                  <div style={{ padding: '4px 10px 4px 24px', color: '#52525b', fontSize: 11.5 }}>No Records tables yet.</div>
+                )}
+                {l.media && (
+                  <div onClick={() => onPick({ name: l.name, major: l.major, view: 'media' })} style={item(sel?.view === 'media')}>
+                    <span style={{ flex: 1 }}>Media</span>
+                    {l.usage && <span style={{ color: '#71717a', fontSize: 11 }}>{l.usage.files}</span>}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── An App line's data (right panel) ────────────────────────────────────────
+
+function AppDataViewer({ line, sel, onSelect, canManage, leftCollapsed, onToggleLeft, onChanged, onClose }: {
+  line: AppDataLine;
+  sel: AppSel;
+  onSelect: (s: AppSel) => void;
+  canManage: boolean;
+  leftCollapsed: boolean;
+  onToggleLeft: () => void;
+  onChanged: () => void;
+  onClose: () => void;
+}) {
+  const table = sel.view === 'records' ? (sel.table ?? line.tables?.[0]?.table) : undefined;
+  const [sort, setSort] = useState<{ col: string | null; desc: boolean }>({ col: null, desc: false });
+  const [runSeq, setRunSeq] = useState(0);
+  const [, setTotal] = useState<number | null>(null);
+  const cycleSort = (col: string) =>
+    setSort((s) => (s.col !== col ? { col, desc: false } : !s.desc ? { col, desc: true } : { col: null, desc: false }));
+  const sql = table ? `SELECT * FROM records."${line.schema}"."${table}"` : null;
+  const tab = (active: boolean): React.CSSProperties => ({
+    ...chip, fontSize: 12, padding: '5px 11px', color: active ? '#f4f4f5' : '#a1a1aa',
+    borderColor: active ? THEME_BRAND : '#3f3f46',
+  });
+  return (
+    <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderBottom: '1px solid #27272a', flexWrap: 'wrap' }}>
+        <button onClick={onToggleLeft} title={leftCollapsed ? 'Show ponds' : 'Hide ponds'} style={chip}>
+          {leftCollapsed ? '›' : '‹'}
+        </button>
+        <span style={{ color: '#f4f4f5', fontSize: 13.5, fontWeight: 700 }}>
+          {line.name} <span style={{ color: '#71717a', fontWeight: 400 }}>v{line.major}</span>
+        </span>
+        {line.state !== 'live' && (
+          <span title={line.state === 'retired' ? 'A newer major took over: this data is read-only' : 'Not yet promoted'}
+                style={{ fontSize: 11, color: '#a1a1aa', border: '1px solid #3f3f46', borderRadius: 4, padding: '1px 6px' }}>
+            {line.state}
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        {line.records && (
+          <button style={tab(sel.view === 'records')} onClick={() => onSelect({ ...sel, view: 'records' })}>Records</button>
+        )}
+        {line.media && (
+          <button style={tab(sel.view === 'media')} onClick={() => onSelect({ ...sel, view: 'media' })}>Media</button>
+        )}
+        <button onClick={onClose} style={chip}>✕</button>
+      </div>
+      {sel.view === 'records' && (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', borderBottom: '1px solid #27272a', fontSize: 12, color: '#a1a1aa' }}>
+            <select value={table ?? ''} onChange={(e) => onSelect({ ...sel, view: 'records', table: e.target.value })}
+                    style={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 6, padding: '4px 8px',
+                             color: '#e4e4e7', fontSize: 12, fontFamily: 'inherit', outline: 'none' }}>
+              {(line.tables ?? []).map((t) => <option key={t.table} value={t.table}>{t.table}</option>)}
+            </select>
+            {table && <span style={{ color: '#71717a' }}>records.{line.schema}.{table}</span>}
+          </div>
+          <div style={{ flex: 1, minHeight: 0 }}>
+            {sql ? (
+              <VirtualGrid key={`${sql}:${sort.col}:${sort.desc}:${runSeq}`}
+                           query={{ pond: `${line.name}@${line.major}`, sql, orderBy: sort.col, orderDesc: sort.desc }}
+                           onTotal={setTotal} onRowClick={() => undefined} sort={sort} onSort={cycleSort}
+                           onRetry={() => setRunSeq((n) => n + 1)} />
+            ) : (
+              <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>No Records tables yet.</div>
+            )}
+          </div>
+        </>
+      )}
+      {sel.view === 'media' && (
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <MediaPanel line={line} canManage={canManage && line.state !== 'retired'} onChanged={onChanged} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MediaPanel({ line, canManage, onChanged }: { line: AppDataLine; canManage: boolean; onChanged: () => void }) {
+  const [files, setFiles] = useState<MediaFile[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [folder, setFolder] = useState('uploads');
+  const [confirm, setConfirm] = useState<ConfirmOpts | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setFiles(await fetchMedia(line.name, line.major));
+    } catch (e) {
+      on401(e);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [line.name, line.major]);
+  useEffect(() => {
+    const t = setTimeout(() => void load(), 0);
+    return () => clearTimeout(t);
+  }, [load]);
+
+  const act = async (key: string, run: () => Promise<void>) => {
+    setBusy(key);
+    setError(null);
+    try {
+      await run();
+    } catch (e) {
+      on401(e);
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const upload = (list: FileList | null) => {
+    if (!list || list.length === 0) return;
+    const dir = folder.trim().replace(/^\/+|\/+$/g, '');
+    void act('upload', async () => {
+      for (const f of Array.from(list)) await uploadMedia(line.name, line.major, dir ? `${dir}/${f.name}` : f.name, f);
+      await load();
+      onChanged();
+    });
+  };
+  const remove = (f: MediaFile) => setConfirm({
+    title: `Delete “${f.path}”?`,
+    body: 'The file is removed from the App’s Media. The App and the Ponds reading it no longer see it.',
+    confirmLabel: 'Delete file',
+    action: () => act(f.path, async () => { await deleteMedia(line.name, line.major, f.path); await load(); onChanged(); }),
+  });
+
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      {canManage && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', borderBottom: '1px solid #27272a', fontSize: 12, color: '#a1a1aa' }}>
+          <span>Upload into</span>
+          <input value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="folder"
+                 style={{ background: '#18181b', border: '1px solid #3f3f46', borderRadius: 6, color: '#e4e4e7',
+                          padding: '4px 8px', fontSize: 12, fontFamily: 'inherit', outline: 'none', width: 160 }} />
+          <button onClick={() => input.current?.click()} disabled={busy === 'upload'}
+                  style={{ ...chip, fontSize: 12, color: THEME_BRAND, borderColor: `${THEME_BRAND}66` }}>
+            {busy === 'upload' ? 'Uploading…' : 'Choose files'}
+          </button>
+          <input ref={input} type="file" multiple style={{ display: 'none' }}
+                 onChange={(e) => { upload(e.target.files); e.target.value = ''; }} />
+        </div>
+      )}
+      {error && <div style={{ padding: '8px 14px', color: '#ef4444', fontSize: 12.5 }}>{error}</div>}
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+        {files == null ? (
+          <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>Loading…</div>
+        ) : files.length === 0 ? (
+          <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>No files.</div>
+        ) : (
+          <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12, color: '#d4d4d8' }}>
+            <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
+              <tr>
+                <th style={th({})}>path</th>
+                <th style={th({ textAlign: 'right' })}>size</th>
+                <th style={th({})}>modified</th>
+                <th style={th({ textAlign: 'right' })}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {files.map((f, i) => (
+                <tr key={f.path} style={{ height: ROW_H, background: i % 2 ? '#121217' : 'transparent' }}>
+                  <td style={td({ color: '#e4e4e7' })} title={f.path}>{f.path}</td>
+                  <td style={td({ textAlign: 'right', color: '#a1a1aa' })}>{fmtBytes(f.size)}</td>
+                  <td style={td({ color: '#a1a1aa' })}>{f.modified ? fmtTs(f.modified) : ''}</td>
+                  <td style={td({ textAlign: 'right' })}>
+                    <span style={{ display: 'inline-flex', gap: 6, justifyContent: 'flex-end' }}>
+                      <button onClick={() => act(f.path, () => downloadMedia(line.name, line.major, f.path))}
+                              disabled={busy === f.path}
+                              style={{ background: 'transparent', border: '1px solid #3f3f46', borderRadius: 5, padding: '2px 10px',
+                                       color: busy === f.path ? '#52525b' : THEME_BRAND, fontSize: 11.5, fontWeight: 700,
+                                       cursor: 'pointer', fontFamily: 'inherit' }}>
+                        {busy === f.path ? '…' : 'Download'}
+                      </button>
+                      {canManage && (
+                        <button onClick={() => remove(f)} disabled={busy === f.path}
+                                style={{ background: 'transparent', border: `1px solid ${THEME_BLOCKED}66`, borderRadius: 5,
+                                         padding: '2px 10px', color: THEME_BLOCKED, fontSize: 11.5, fontWeight: 700,
+                                         cursor: 'pointer', fontFamily: 'inherit' }}>
+                          Delete
+                        </button>
+                      )}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+      {confirm && <ConfirmDialog opts={confirm} onClose={() => setConfirm(null)} />}
+    </div>
   );
 }
 
@@ -381,6 +669,13 @@ function DataViewer({
   const [mode, setMode] = useState<'browse' | 'query'>('browse');
   const [sqlText, setSqlText] = useState('');
   const [activeSql, setActiveSql] = useState('');
+  // On a phone, either way up, the freshness window and the SQL box fold behind one bar (rarely used, and they took
+  // most of the screen).
+  const isMobile = useIsMobile();
+  const isShort = useIsShort();
+  const foldTools = isMobile || isShort;
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [runSeq, setRunSeq] = useState(0); // bumps on Run, so the same SQL runs again (after a cancel, say)
   const [expanded, setExpanded] = useState(false);
   const [total, setTotal] = useState<number | null>(null);
   const [tablesError, setTablesError] = useState<string | null>(null);
@@ -395,8 +690,21 @@ function DataViewer({
   const [confirm, setConfirm] = useState<ConfirmOpts | null>(null);
   // Opt-in column sort (null = the efficient base order). Clicking a header cycles asc → desc → off.
   const [sort, setSort] = useState<{ col: string | null; desc: boolean }>({ col: null, desc: false });
-  const cycleSort = (col: string) =>
-    setSort((s) => (s.col !== col ? { col, desc: false } : !s.desc ? { col, desc: true } : { col: null, desc: false }));
+  const cycleSort = (col: string) => {
+    const next = sort.col !== col ? { col, desc: false } : !sort.desc ? { col, desc: true } : { col: null, desc: false };
+    // A sort reads the whole table: past SLOW_SORT_ROWS, ask first. Turning a sort off never does.
+    if (next.col && total != null && total > SLOW_SORT_ROWS) {
+      setConfirm({
+        title: `Sort ${total.toLocaleString()} rows?`,
+        body: `Sorting by ${next.col} reads the whole table, so each page can take a while.`,
+        confirmLabel: 'Sort',
+        tone: 'neutral',
+        action: () => setSort(next),
+      });
+      return;
+    }
+    setSort(next);
+  };
   const taRef = useRef<HTMLTextAreaElement>(null);
   // The selectSig nonce already consumed (the mount picks `initialTable`; later tree clicks fire here).
   const lastSig = useRef<number | undefined>(selectSig?.nonce);
@@ -517,6 +825,7 @@ function DataViewer({
   const runQuery = () => {
     if (!sqlText.trim()) return;
     setActiveSql(sqlText);
+    setRunSeq((n) => n + 1);
     setMode('query');
     setTotal(null);
     setSort({ col: null, desc: false });
@@ -540,14 +849,15 @@ function DataViewer({
         : null;
   if (query && sort.col) query = { ...query, orderBy: sort.col, orderDesc: sort.desc };
   const queryKey =
-    (mode === 'query' ? `sql:${activeSql}` : `tbl:${table}:${trickle}:${fLo}:${fHi}`) + `:${sort.col}:${sort.desc}`;
+    (mode === 'query' ? `sql:${activeSql}` : `tbl:${table}:${trickle}:${fLo}:${fHi}`) + `:${sort.col}:${sort.desc}:${runSeq}`;
 
   const canPromote = canManage && servedMajor != null && major !== servedMajor;
 
   return (
     <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
-      {/* Top row: [◂ tree] pond · Promote | table select | Delete | rows | ✕ */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderBottom: '1px solid #27272a', flexShrink: 0 }}>
+      {/* Top row: [◂ tree] pond · Promote | table select | Delete | rows | ✕. It wraps on a narrow screen, with ✕
+          pinned top-right so the viewer can always be closed. */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, padding: '10px 52px 10px 14px', borderBottom: '1px solid #27272a', flexShrink: 0, position: 'relative' }}>
         <button onClick={onToggleLeft} title={leftCollapsed ? 'Show ponds' : 'Hide ponds'} style={chip}>
           {leftCollapsed ? '›' : '‹'}
         </button>
@@ -622,16 +932,31 @@ function DataViewer({
             {total == null ? '' : `${total.toLocaleString()} row${total === 1 ? '' : 's'}`}
           </span>
         )}
-        <button onClick={onClose} title="Close (Esc)" style={{ ...chip, marginLeft: 'auto' }}>✕</button>
+        <button onClick={onClose} title="Close (Esc)" style={{ ...chip, position: 'absolute', top: 10, right: 14 }}>✕</button>
       </div>
 
+      {foldTools && view === 'tables' && (
+        <div
+          onClick={() => setToolsOpen((o) => !o)}
+          style={{ padding: '8px 14px', borderBottom: '1px solid #27272a', cursor: 'pointer', userSelect: 'none',
+            fontSize: 11, fontWeight: 700, color: '#a1a1aa', letterSpacing: '0.06em', flexShrink: 0 }}
+        >
+          {toolsOpen ? '▾' : '▸'} {mode === 'browse' && trickle ? 'FRESHNESS & SQL' : 'SQL'}
+          {!toolsOpen && (mode === 'query' || fLo || fHi) && (
+            <span style={{ color: '#ee9333', fontWeight: 400, marginLeft: 8, letterSpacing: 0 }}>
+              {mode === 'query' ? 'custom query' : 'window set'}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Freshness window — only for a Trickle table being browsed */}
-      {view === 'tables' && mode === 'browse' && trickle && (
+      {(!foldTools || toolsOpen) && view === 'tables' && mode === 'browse' && trickle && (
         <FreshnessWindow freshness={freshness} floor={floor} fLo={fLo} fHi={fHi} setLo={setFLo} setHi={setFHi} />
       )}
 
       {/* SQL box — hand-written SQL runs cross-pond (serving core); browse names are pre-filled per major */}
-      {view === 'tables' && (
+      {(!foldTools || toolsOpen) && view === 'tables' && (
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '10px 14px', borderBottom: '1px solid #27272a', flexShrink: 0 }}>
           <textarea
             ref={taRef}
@@ -695,7 +1020,8 @@ function DataViewer({
             This Pond has no {canManage ? 'exported' : 'serviceable'} tables.{hasObjects ? ' See the Objects tab.' : ''}
           </div>
         ) : (
-          <VirtualGrid key={queryKey} query={query} onTotal={setTotal} onRowClick={setHistoryPk} sort={sort} onSort={cycleSort} />
+          <VirtualGrid key={queryKey} query={query} onTotal={setTotal} onRowClick={setHistoryPk} sort={sort} onSort={cycleSort}
+                       onRetry={() => setRunSeq((n) => n + 1)} />
         )}
       </div>
 
@@ -910,14 +1236,17 @@ function FreshnessWindow({
 
 // ─── Virtual grid ──────────────────────────────────────────────────────────────
 
+const SLOW_MS = 1000; // a request in flight this long offers Cancel
+
 function VirtualGrid({
-  query, onTotal, onRowClick, sort, onSort,
+  query, onTotal, onRowClick, sort, onSort, onRetry,
 }: {
   query: DataQuery;
   onTotal: (n: number) => void;
   onRowClick: (pk: Record<string, unknown>) => void;
   sort: { col: string | null; desc: boolean };
   onSort: (col: string) => void;
+  onRetry: () => void;
 }) {
   const [total, setTotal] = useState<number | null>(null);
   const [columns, setColumns] = useState<string[]>([]);
@@ -930,6 +1259,31 @@ function VirtualGrid({
   const queued = useRef<number | null>(null);
   const loaded = useRef({ start: 0, end: 0 });
   const fetchWindowRef = useRef<(start: number) => void>(() => {});
+  // Requests in flight (id → abort), so a slow one can be cancelled here and on the Catchment.
+  const pending = useRef(new Map<string, AbortController>());
+  const [slow, setSlow] = useState(false);
+  const [cancelled, setCancelled] = useState(false);
+  const cancelledRef = useRef(false);
+  const tracked = useCallback(<T,>(run: (c: { queryId: string; signal: AbortSignal }) => Promise<T>): Promise<T> => {
+    // Not crypto.randomUUID: it exists only in a secure context, and a phone on the LAN reaches the UI over http.
+    const queryId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+    const ctl = new AbortController();
+    pending.current.set(queryId, ctl);
+    const timer = setTimeout(() => setSlow(pending.current.size > 0), SLOW_MS);
+    return run({ queryId, signal: ctl.signal }).finally(() => {
+      clearTimeout(timer);
+      pending.current.delete(queryId);
+      if (pending.current.size === 0) setSlow(false);
+    });
+  }, []);
+  const cancel = () => {
+    cancelledRef.current = true;
+    setCancelled(true);
+    for (const [id, ctl] of pending.current) {
+      void cancelQuery(id).catch(() => {});
+      ctl.abort();
+    }
+  };
 
   const fetchWindow = useCallback(
     async (start: number) => {
@@ -942,14 +1296,14 @@ function VirtualGrid({
       }
       inFlight.current = true;
       try {
-        const res = await fetchPage({ ...query, limit: CHUNK, offset: start });
+        const res = await tracked((c) => fetchPage({ ...query, limit: CHUNK, offset: start }, c));
         setColumns((prev) => (res.columns.length ? res.columns : prev));
         setRows(res.rows);
         setWindowStart(start);
         loaded.current = { start, end: start + res.rows.length };
       } catch (e) {
         on401(e);
-        setError(e instanceof Error ? e.message : String(e));
+        if (!cancelledRef.current) setError(e instanceof Error ? e.message : String(e));
       } finally {
         inFlight.current = false;
         // Land the most recent window scrolled to while this request was in flight.
@@ -958,7 +1312,7 @@ function VirtualGrid({
         if (next !== null && next !== loaded.current.start) void fetchWindowRef.current(next);
       }
     },
-    [query]
+    [query, tracked]
   );
   useEffect(() => {
     fetchWindowRef.current = fetchWindow;
@@ -969,12 +1323,12 @@ function VirtualGrid({
       try {
         // Always fetch the first window — the count only *sizes* the scroll; gating the page on it would
         // let a 0/stale count silently hide real rows (and suppress the /page request entirely).
-        const [c] = await Promise.all([fetchCount(query), fetchWindow(0)]);
+        const [c] = await Promise.all([tracked((cc) => fetchCount(query, cc)), fetchWindow(0)]);
         setTotal(c);
         onTotal(c);
       } catch (e) {
         on401(e);
-        setError(e instanceof Error ? e.message : String(e));
+        if (!cancelledRef.current) setError(e instanceof Error ? e.message : String(e));
       } finally {
         setLoading(false);
       }
@@ -1001,8 +1355,23 @@ function VirtualGrid({
     }
   };
 
+  const button = { background: 'transparent', border: '1px solid #3f3f46', borderRadius: 5, color: '#e4e4e7',
+    fontSize: 11.5, fontWeight: 700, padding: '3px 10px', cursor: 'pointer', fontFamily: 'inherit' } as const;
+  if (cancelled) {
+    return (
+      <div style={{ padding: 16, color: '#a1a1aa', fontSize: 12.5, display: 'flex', alignItems: 'center', gap: 12 }}>
+        Query cancelled. <button onClick={onRetry} style={button}>Run again</button>
+      </div>
+    );
+  }
+  const running = slow && (
+    <div style={{ position: 'sticky', top: 0, zIndex: 2, display: 'flex', alignItems: 'center', gap: 12, padding: '6px 14px',
+      background: '#18181b', borderBottom: '1px solid #27272a', color: '#a1a1aa', fontSize: 12 }}>
+      Running… <button onClick={cancel} style={button}>Cancel</button>
+    </div>
+  );
   if (error) return <div style={{ padding: 16, color: '#ef4444', fontSize: 12.5, whiteSpace: 'pre-wrap' }}>{error}</div>;
-  if (loading) return <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>Loading…</div>;
+  if (loading) return running || <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>Loading…</div>;
   if (rows.length === 0 || columns.length === 0) return <div style={{ padding: 16, color: '#71717a', fontSize: 12.5 }}>No rows.</div>;
 
   // Hide the active-flag column; it drives row colour instead. Merge rows are clickable (→ history).
@@ -1020,6 +1389,7 @@ function VirtualGrid({
 
   return (
     <div ref={scrollRef} onScroll={onScroll} style={{ height: '100%', overflow: 'auto' }}>
+      {running}
       <table style={{ tableLayout: 'fixed', borderCollapse: 'collapse', width: tableWidth, fontSize: 12, color: '#d4d4d8' }}>
         <colgroup>
           <col style={{ width: NUM_W }} />
@@ -1050,8 +1420,9 @@ function VirtualGrid({
           )}
           {rows.map((row, i) => {
             const idx = windowStart + i;
-            const inactive =
-              (activeIdx >= 0 && Number(row[activeIdx]) < 0) || (deltaIdx >= 0 && Number(row[deltaIdx]) < 0);
+            const active = activeIdx >= 0 ? Number(row[activeIdx]) : 1;
+            const inactive = active < 0 || (deltaIdx >= 0 && Number(row[deltaIdx]) < 0);
+            const replaced = active === 0;
             return (
               <tr
                 key={idx}
@@ -1060,10 +1431,11 @@ function VirtualGrid({
                   height: ROW_H,
                   cursor: clickable ? 'pointer' : 'default',
                   background: inactive ? `${THEME_BLOCKED}22` : idx % 2 ? '#121217' : 'transparent',
-                  color: inactive ? '#fca5a5' : undefined,
+                  color: inactive ? '#fca5a5' : replaced ? '#71717a' : undefined,
                 }}
               >
-                <td style={td({ color: '#52525b', textAlign: 'right' })}>{idx + 1}</td>
+                <td style={td({ color: '#52525b', textAlign: 'right' })}
+                  title={active < 0 ? 'Deleted' : replaced ? 'Replaced by a later write' : undefined}>{idx + 1}</td>
                 {display.map((ci) => (
                   <td key={ci} style={td({})} title={row[ci] == null ? '' : String(row[ci])}>
                     {row[ci] == null

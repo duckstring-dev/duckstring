@@ -108,7 +108,9 @@ def test_app_config_validates_the_declaration(tmp_path):
     assert app_config({"pond": {"name": "x"}}) is None
     cfg = app_config({"pond": {"type": "app"}, "app": {"command": "run", "idle_timeout": "1h30m"}})
     assert cfg == {"command": "run", "static": None, "memory": None, "idle_timeout_s": 5400, "state": "local",
-                   "health": None, "strip_path": True, "download": None}
+                   "health": None, "strip_path": True, "download": None, "records": False, "media": False,
+                   "migrate": None, "instances": 1, "min_instances": 0, "concurrency": 4, "connections": None,
+                   "stop_grace_s": 10, "scale": {}}
     assert app_config({"pond": {"type": "app", "memory": "2GB"}, "app": {"command": "run"}})["memory"] == 2 * 10**9
     assert app_config({"pond": {"type": "app"}, "app": {"command": "run", "idle_timeout": "0"}})["idle_timeout_s"] == 0
     (tmp_path / "out").mkdir()
@@ -122,7 +124,11 @@ def test_app_config_validates_the_declaration(tmp_path):
                 {"pond": {"type": "app", "memory": "lots"}, "app": {"command": "run"}},
                 {"pond": {"type": "app"}, "app": {"command": "run", "download": ""}},
                 {"pond": {"type": "app"}, "app": {"command": "run", "state": "none", "download": "snap"}},
-                {"pond": {}, "app": {"command": "run"}}):
+                {"pond": {}, "app": {"command": "run"}},
+                {"pond": {"type": "app"}, "app": {"command": "run", "min_instances": 2}},
+                {"pond": {"type": "app"}, "app": {"command": "run", "concurrency": 0}},
+                {"pond": {"type": "app"}, "app": {"command": "run", "scale": {"cpu": 1.5}}},
+                {"pond": {"type": "app"}, "app": {"command": "run", "scale": {"burst": 1}}}):
         with pytest.raises(ValueError):
             app_config(bad)
     with pytest.raises(ValueError, match="no directory"):
@@ -184,7 +190,7 @@ def test_an_idle_instance_stops_and_the_next_request_starts_another(catchment_cl
     _deploy_pipeline(client)
     assert client.get("/apps/dash/v1/hello").status_code == 200
     supervisor = client.app.state.app_supervisor
-    inst = supervisor._instances["dash@1"]
+    inst = supervisor._instances["dash@1"][0]
     inst.last_used -= 3600  # longer ago than the default idle timeout
     supervisor.reconcile()
     assert inst.proc.poll() is not None and "dash@1" not in supervisor._instances
@@ -220,16 +226,32 @@ def test_an_app_redeploys_its_running_version_in_place(catchment_client):
     assert client.get("/apps/dash/v1/new").json() == {"new": True}
     # An instance started before the redeploy's record lands is replaced by the next reconcile.
     supervisor = client.app.state.app_supervisor
-    inst = supervisor._instances["dash@1"]
+    inst = supervisor._instances["dash@1"][0]
     inst.deployed_at = "an earlier deploy"
     supervisor.reconcile()
     assert inst.proc.poll() is not None and "dash@1" not in supervisor._instances
+
+
+def test_an_app_that_has_run_is_removed_with_wipe(catchment_client):
+    # Its instance rows hang off the version, so --wipe deletes them with it (before, the version's delete
+    # failed on the foreign key with a 500).
+    client = catchment_client
+    _deploy_pipeline(client)
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    assert client.post("/api/ponds/dash/sleep").status_code == 200
+    r = client.delete("/api/ponds/dash", params={"wipe": True})
+    assert r.status_code == 200, r.text
+    assert all(p["name"] != "dash" for p in client.get("/api/status").json()["ponds"])
+    assert client.get("/apps/dash/v1/hello").status_code == 404
 
 
 def test_an_app_that_exits_fails_until_woken(catchment_client):
     client = catchment_client
     _deploy_pipeline(client, {"pond.toml": _app_toml(command="python -c 'import sys; sys.exit(3)'"),
                               "main.py": _APP_PY})
+    r = client.get("/apps/dash/v1/hello")
+    assert r.status_code == 503 and "exited while starting" in r.text
+    assert not _app_entry(client)["is_failed"]  # immediate_retries defaults to 1: one more start
     r = client.get("/apps/dash/v1/hello")
     assert r.status_code == 503 and "exited while starting" in r.text
     entry = _app_entry(client)
@@ -241,11 +263,40 @@ def test_an_app_that_exits_fails_until_woken(catchment_client):
     assert client.get("/apps/dash/v1/hello").status_code == 503  # tried again, and failed again
 
 
+def test_a_shutdown_during_a_reconcile_pass_never_fails_the_app(catchment_client):
+    """The supervisor's pass runs in a thread that cancelling its loop at shutdown doesn't stop. A pass that had
+    checked an instance just before shutdown stopped it found the process gone, recorded it as exited and failed
+    the App, which the restarted Catchment then showed failed (the transit showcase, one restart in three).
+    Reproduced here by stopping everything at the moment the pass looks the App up."""
+    client = catchment_client
+    _deploy_pipeline(client)
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    supervisor = client.app.state.app_supervisor
+    inst = supervisor._instances["dash@1"][0]
+    driver = supervisor.driver
+    real_view = driver.app_view
+
+    def view_then_shut_down(key):
+        view = real_view(key)
+        supervisor.shutdown()  # the Catchment's shutdown lands mid-pass
+        return view
+
+    driver.app_view = view_then_shut_down
+    try:
+        supervisor.reconcile()
+    finally:
+        driver.app_view = real_view
+    assert inst.proc.poll() is not None
+    assert not _app_entry(client)["is_failed"]
+    instances = client.get("/api/ponds/dash/app/instances").json()["instances"]
+    assert [i["stop_reason"] for i in instances] == ["shutdown"]
+
+
 def test_kill_stops_the_instance(catchment_client):
     client = catchment_client
     _deploy_pipeline(client)
     assert client.get("/apps/dash/v1/hello").status_code == 200
-    inst = client.app.state.app_supervisor._instances["dash@1"]
+    inst = client.app.state.app_supervisor._instances["dash@1"][0]
     assert client.post("/api/ponds/dash/kill").status_code == 200
     assert inst.proc.poll() is not None
     assert client.get("/apps/dash/v1/hello").status_code == 503
@@ -311,6 +362,13 @@ def test_an_apps_freshness_follows_its_sources(catchment_client):
     runs = client.get("/api/runs", params={"pond": "dash"}).json()["runs"]
     assert [r["f"] for r in runs] == [g.isoformat(), f.isoformat()]
     assert all(r["status"] == "success" and r["started_at"] == r["finished_at"] for r in runs)
+    with driver.lock:  # a Run that changed nothing moves the Source's freshness but not its changed time
+        h = datetime(2026, 1, 3, tzinfo=timezone.utc)
+        ps = driver.state.pond_states["sales@1"]
+        ps.start_f = ps.end_f = h
+        driver.scheduler_tick()
+    assert driver.app_freshness("dash@1") == {"freshness": h.isoformat(), "sources": {"sales": h.isoformat()},
+                                              "changed": {"sales": g.isoformat()}}
 
 
 _ECHO_PY = """async def app(scope, receive, send):
@@ -338,7 +396,8 @@ def test_static_files_are_served_by_the_catchment(catchment_client):
     assert r.status_code == 200, r.text
     assert catchment_client.get("/apps/site/v1/").text == "<h1>hi</h1>"
     assert catchment_client.get("/apps/site/v1/docs/").text == "docs"
-    assert catchment_client.get("/apps/site/v1/app.js").text == "x"
+    r = catchment_client.get("/apps/site/v1/app.js")
+    assert r.text == "x" and r.headers["cache-control"] == "no-cache" and r.headers["etag"]
     assert catchment_client.get("/apps/site/v1/missing").status_code == 404
     assert catchment_client.get("/apps/site/v1/../../pond.toml").status_code == 404
 
@@ -385,7 +444,14 @@ def test_the_handle_reads_sources_and_refuses_writes(tmp_path, monkeypatch):
     assert pond is ds_app.pond()
     assert pond.count_table("sales.revenue") == 3
     assert pond.read_table("sales.revenue").aggregate("max(id)").fetchall() == [(2,)]
-    assert pond.freshness() == {"freshness": None, "sources": {}}
+    assert pond.freshness() == {"freshness": None, "sources": {}, "changed": {}}
+    pond._runtime = tmp_path / "runtime"  # as the Catchment writes it for an instance
+    pond._runtime.mkdir()
+    (pond._runtime / "freshness.json").write_text(json.dumps(
+        {"freshness": "2026-01-03T00:00:00+00:00", "sources": {"sales": "2026-01-03T00:00:00+00:00"},
+         "changed": {"sales": "2026-01-02T00:00:00+00:00"}}))
+    assert str(pond.freshness()["changed"]["sales"]) == "2026-01-02 00:00:00+00:00"
+    pond._runtime = None
     with pytest.raises(ValueError, match="'other' is not a Source"):
         pond.read_table("other.revenue")
     with pytest.raises(ValueError, match="reads only its Sources"):
@@ -405,6 +471,52 @@ def test_the_handle_reads_sources_and_refuses_writes(tmp_path, monkeypatch):
     time.sleep(0)
 
 
+def test_threads_read_a_merge_source_through_the_handle_at_once(tmp_path, monkeypatch):
+    """Reading a merge Trickle Source consolidates its change log into a temporary table on the reading cursor,
+    and ``read_table`` names the Source as a view. That view was stored in the database, so every thread saw
+    one view, pointing at whichever thread's temporary table registered it last: "Table with name
+    _duckstring_ds_consol_0 does not exist!" on the others (the attention showcase, 6 of 8 concurrent
+    searches)."""
+    import threading
+    from datetime import datetime, timezone
+
+    import duckstring.app as ds_app
+    from duckstring import trickle_io as T
+    from duckstring.dataplane import get_data_plane
+
+    data = tmp_path / "ponds" / "sales" / "data"
+    data.mkdir(parents=True)
+    reg = duckdb.connect(str(tmp_path / "registry.duckdb"))
+    f1, f2 = datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2026, 1, 2, tzinfo=timezone.utc)
+    T.merge_table(reg, "hour", reg.sql("SELECT range AS k, range AS n FROM range(200)"), f1, ("k",))
+    get_data_plane().export(reg, data, f=f1)
+    T.merge_table(reg, "hour", reg.sql("SELECT range AS k, range * 2 AS n FROM range(200)"), f2, ("k",))
+    get_data_plane().export(reg, data, f=f2)
+    reg.close()
+    monkeypatch.setenv(ds_app.ENV, json.dumps({"name": "dash", "major": 1, "root": str(tmp_path),
+                                               "sources": ["sales"]}))
+    monkeypatch.setattr(ds_app, "_handle", None)
+    pond = ds_app.pond()
+    errors: list[BaseException] = []
+    counts: list[int] = []
+
+    def reader():
+        try:
+            for _ in range(10):
+                pond.read_table("sales.hour")
+                counts.append(pond.con.execute("SELECT count(*), sum(n) FROM hour").fetchall()[0][1])
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=reader) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors[0]
+    assert counts == [2 * sum(range(200))] * 80
+
+
 def test_pond_run_gives_an_app_its_puddles(tmp_path):
     from duckstring.local import load_project
     from duckstring.local.app import app_env
@@ -416,6 +528,100 @@ def test_pond_run_gives_an_app_its_puddles(tmp_path):
     assert env["DUCKSTRING_APP_STATE"] == str(tmp_path / "puddles" / "app" / "state")
     cfg = json.loads(env["DUCKSTRING_APP"])
     assert cfg["root"] == str(tmp_path / "puddles") and cfg["sources"] == ["sales"] and "source_majors" not in cfg
+
+
+_FRONTED_PY = '''import os
+from pathlib import Path
+
+from fastapi import FastAPI, Request, WebSocket
+
+Path("command.pid").write_text(str(os.getpid()))
+api = FastAPI()
+
+
+@api.api_route("/echo/{rest:path}", methods=["GET", "POST"])
+async def echo(request: Request, rest: str):
+    return {"path": request.url.path, "query": request.url.query, "body": (await request.body()).decode(),
+            "port": os.environ["PORT"]}
+
+
+@api.websocket("/ws")
+async def ws(socket: WebSocket):
+    await socket.accept()
+    await socket.send_text("echo:" + await socket.receive_text())
+    await socket.close()
+'''
+
+
+def _fronted_app(tmp_path, command: str) -> None:
+    (tmp_path / "pond.toml").write_text('[pond]\nname = "site"\nversion = "1.0.0"\ntype = "app"\n\n[app]\n'
+                                        f'command = {json.dumps(command)}\nstatic = "out"\n')
+    (tmp_path / "out" / "docs").mkdir(parents=True)
+    (tmp_path / "out" / "index.html").write_text("<h1>hi</h1>")
+    (tmp_path / "out" / "docs" / "index.html").write_text("docs")
+    (tmp_path / "out" / "app.js").write_text("x")
+
+
+def test_pond_run_serves_an_apps_static_files_beside_its_command(tmp_path):
+    """showcase-fixes item 9: with both ``command`` and ``static``, ``pond run`` ran only the command, so every static
+    path was a 404 locally while a Catchment served it. A front server now does what the Catchment does."""
+    import signal
+    import subprocess
+
+    import httpx
+    from websockets.sync.client import connect
+
+    from duckstring.local.app import _free_port
+
+    _fronted_app(tmp_path, "uvicorn api:api --port $PORT")
+    (tmp_path / "api.py").write_text(_FRONTED_PY)
+    port = _free_port()
+    script = ("import sys; from pathlib import Path; from duckstring.local import load_project; "
+              "from duckstring.local.app import serve_app; "
+              f"sys.exit(serve_app(load_project(Path({str(tmp_path)!r})), {port}))")
+    proc = subprocess.Popen([sys.executable, "-c", script], cwd=tmp_path, start_new_session=True)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        deadline = time.monotonic() + 60
+        while True:  # the front server answers 502 until the command is listening
+            try:
+                if httpx.get(f"{base}/echo/ready").status_code == 200:
+                    break
+            except httpx.HTTPError:
+                pass
+            assert time.monotonic() < deadline and proc.poll() is None, "the App never came up"
+            time.sleep(0.2)
+
+        r = httpx.get(f"{base}/")
+        assert r.text == "<h1>hi</h1>" and r.headers["cache-control"] == "no-cache"
+        assert httpx.get(f"{base}/docs/").text == "docs"
+        assert httpx.get(f"{base}/app.js").text == "x"
+        echo = httpx.get(f"{base}/echo/a/b%20c?q=1").json()  # not a file: the command's, path and query unchanged
+        assert echo["path"] == "/echo/a/b c" and echo["query"] == "q=1" and echo["port"] != str(port)
+        assert httpx.post(f"{base}/echo/x", content="body").json()["body"] == "body"
+        assert httpx.get(f"{base}/missing").status_code == 404  # neither a file nor a route of the command's
+        assert httpx.get(f"{base}/../pond.toml").status_code == 404
+        with connect(f"ws://127.0.0.1:{port}/ws") as socket:
+            socket.send("hi")
+            assert socket.recv(timeout=10) == "echo:hi"
+
+        command_pid = int((tmp_path / "command.pid").read_text())
+        proc.send_signal(signal.SIGINT)  # Ctrl-C stops the front server and the command
+        proc.wait(timeout=30)
+        with pytest.raises(ProcessLookupError):
+            os.kill(command_pid, 0)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+
+
+def test_pond_run_ends_when_a_fronted_apps_command_exits(tmp_path):
+    from duckstring.local import load_project
+    from duckstring.local.app import _free_port, serve_app
+
+    _fronted_app(tmp_path, f"{sys.executable} -c 'import sys; sys.exit(3)'")
+    assert serve_app(load_project(tmp_path), _free_port()) == 3
 
 
 # ─── read leases, Taps and memory slots ───────────────────────────────────────
@@ -435,7 +641,7 @@ def test_a_request_in_flight_keeps_the_source_version_it_may_read(catchment_clie
     _deploy_pipeline(client)
     assert client.get("/apps/dash/v1/hello").status_code == 200
     driver, supervisor = client.app.state.driver, client.app.state.app_supervisor
-    inst = supervisor._instances["dash@1"]
+    inst = supervisor._instances["dash@1"][0]
     f1, f2 = datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2026, 1, 2, tzinfo=timezone.utc)
     _publish(driver, f1)
     ticket = supervisor.begin(inst)  # a request arrives while f1 is the published version
@@ -456,7 +662,7 @@ def test_a_websocket_renews_its_lease_and_keeps_the_previous_one_for_a_while(cat
     _deploy_pipeline(client)
     assert client.get("/apps/dash/v1/hello").status_code == 200
     driver, supervisor = client.app.state.driver, client.app.state.app_supervisor
-    inst = supervisor._instances["dash@1"]
+    inst = supervisor._instances["dash@1"][0]
     f1, f2, f3 = (datetime(2026, 1, d, tzinfo=timezone.utc) for d in (1, 2, 3))
     _publish(driver, f1)
     ticket = supervisor.begin(inst)  # the connection opens at f1
@@ -542,7 +748,7 @@ def test_a_running_app_sets_its_memory_aside_and_the_slots_share_the_rest(tmp_pa
         assert r.status_code == 200, r.text
         assert abs(_size(r.json()["limit"]) - 10**9) < 10**7
         assert driver.app_reserved == {"dash@1": 10**9} and driver._slot_bytes() == 1.5 * 10**9
-        supervisor._instances["dash@1"].last_used -= 3600
+        supervisor._instances["dash@1"][0].last_used -= 3600
         supervisor.reconcile()  # an idle stop gives it back
         assert driver.app_reserved == {} and driver._slot_bytes() == 2 * 10**9
 

@@ -77,7 +77,8 @@ export function AppInstances({ pondId, vertical = false }: { pondId: PondId; ver
         if (!alive) return;
         setInstances(rows.map((r) => ({
           id: r.id, version: r.version, startedAt: r.started_at, readyAt: r.ready_at, stoppedAt: r.stopped_at,
-          stopReason: r.stop_reason, exitCode: r.exit_code,
+          stopReason: r.stop_reason, exitCode: r.exit_code, elsewhere: r.place === 'remote',
+          startReason: r.start_reason ?? null,
         })));
       })
       .catch((e) => { if (e instanceof UnauthorizedError) useLiveStore.setState({ needsKey: true }); });
@@ -159,6 +160,7 @@ export function AppInstances({ pondId, vertical = false }: { pondId: PondId; ver
               )}
               <div
                 onClick={() => setSelected(i.id === instances[0]?.id ? null : i.id)}
+                title={i.startReason ? `Started for ${i.startReason}` : undefined}
                 style={{
                   display: 'flex', gap: 8, whiteSpace: 'pre', cursor: 'pointer', borderRadius: 4, padding: '0 4px', margin: '0 -4px',
                   background: isSel ? `${THEME_BRAND}1f` : 'transparent', boxShadow: isSel ? `inset 2px 0 0 ${THEME_BRAND}` : undefined,
@@ -167,6 +169,7 @@ export function AppInstances({ pondId, vertical = false }: { pondId: PondId; ver
                 <span style={{ color: '#3f3f46' }}>{clock(i.startedAt)}</span>
                 <span style={{ width: 80, overflow: 'hidden', textOverflow: 'ellipsis', color: stopColor(i) }}>{stopLabel(i)}</span>
                 <span style={{ width: 52, overflow: 'hidden', textOverflow: 'ellipsis', color: '#52525b' }}>v{i.version}</span>
+                <span style={{ width: 64, color: i.elsewhere ? '#a1a1aa' : '#52525b' }}>{i.elsewhere ? 'elsewhere' : 'catchment'}</span>
                 <span style={{ color: '#71717a' }}>{formatAge(parseTs(i.startedAt), end)}</span>
                 {crashed(i) && i.exitCode !== null && <span style={{ color: '#52525b' }}>exit {i.exitCode}</span>}
               </div>

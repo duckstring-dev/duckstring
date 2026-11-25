@@ -13,20 +13,40 @@ Every command takes `-c` / `--catchment`, `-m` / `--major` and `-v` / `--version
 ## `refresh now`
 
 ```bash
-duckstring refresh now POND [--fresh-within DURATION] [--silent] [--watch]
+duckstring refresh now POND [--fresh-within DURATION] [--silent | --watch | --wait [--timeout D] | --view]
+duckstring refresh now POND --hydrate --live --from CATCHMENT [--as-at TIME] [TARGET]
+duckstring refresh now POND --rewind [TARGET]
+duckstring refresh now POND TARGET    # --next-change | --next-run | --most-recent | --to TIME
 ```
 
-Asks for data at least as fresh as the moment the command runs. Every Pond upstream that is older runs (an optional Source only if it has never run), and the result flows down to `POND`. Requests that arrive faster than the pipeline can serve them are paced to its slowest step. Opens the live status view until the Pond settles; `--watch` keeps it open, and `--silent` returns once the request is sent.
+Asks for data at least as fresh as the moment the command runs. Every Pond upstream that is older runs (an optional Source only if it has never run), and the result flows down to `POND`. Requests that arrive faster than the pipeline can serve them are paced to its slowest step. In a terminal it opens the live status view until the Pond settles; without one, or with `--wait`, it waits until `POND` is that fresh and exits 0 if every Run succeeded. See [Following a request](index.md#following-a-request).
 
 | Option | Default | Description |
 |---|---|---|
 | `--fresh-within`, `-f` | none | Ask for data no older than this [duration](../formats.md#durations) instead. Only the Ponds older than it run: the request stops at any Pond upstream that is already that fresh. |
 
+### Puddles
+
+On a Catchment where a Pond reads [Puddles](pond.md#puddle-deploy) in place of some of its Sources, a Refresh at now that reaches one is refused: a Puddle stands for a point in production's history, and production may not have reached now. Run from the Puddles' baseline, then move them through their history:
+
+| Option | Description |
+|---|---|
+| `--rewind` | Go back to the baseline: every Pond the Refresh reaches on this Catchment, `POND` and those upstream of it, is reset (registry, published data and Run history) and runs from each Puddle's baseline, with anything its steps wrote dropped. This is also the first Run after a Puddle is deployed. |
+| `--hydrate` | Build each Puddle reached again with the definitions it was deployed with, as of `--as-at` (default now), then reset the Ponds and run from the new baseline as `--rewind` does. |
+| `--as-at` | With `--hydrate`: the baseline as of this time (ISO 8601). |
+| `--from` | With `--hydrate`: read this registered Catchment instead of the one the Puddles read, and store its address and credentials here. Use it to store new credentials. A Puddle built from its definitions alone is left reading none. |
+| `--next-change` | Move the Puddles to the first change after the Pond's last Run, and refresh at it. |
+| `--next-run` | Move them to the Pond's own next Run in production (it must be deployed there). |
+| `--most-recent` | Move them as far as all of them have got. |
+| `--to` | Move them to this freshness (ISO 8601). |
+
+Each Puddle moves to its earliest point that reaches the target, and is read as it stood when the last of them got there, as `pond run --incremental` does locally. A live Puddle's points are production's; a copied Puddle's are the history it was copied with. A copied Puddle with [`@puddle.step`](../python/decorators.md#puddlestep) definitions runs them past the end of its history, stamped at the target. A target that can't be reached is refused, naming the Puddle. A target given with `--hydrate` or `--rewind` is sent once the baseline Run has finished.
+
 ## `refresh add`
 
 ```bash
-duckstring refresh add POND --every PERIOD [--start TIME [--on DAYS] [--until TIME]] [--name NAME] [--silent]
-duckstring refresh add POND --continuous [--name NAME] [--silent]
+duckstring refresh add POND --every PERIOD [--start TIME [--on DAYS] [--until TIME]] [--name NAME] [--silent] [--view]
+duckstring refresh add POND --continuous [--name NAME] [--silent] [--view]
 ```
 
 Adds a recurring Refresh, which repeats the request:
@@ -35,7 +55,7 @@ Adds a recurring Refresh, which repeats the request:
 - **At set times** (`--every` with `--start`): asks at each time on the grid `START + k × PERIOD`, whatever else refreshes the Pond. A Catchment that was down through some of them asks once, for the latest, when it returns.
 - **Continuous** (`--continuous`, or `--every 0s`): asks whenever the Pond can take more, paced to the pipeline's slowest step.
 
-A Pond can have any number of scheduled Refreshes and one `--every` or continuous Refresh. Adding another `--every` or continuous Refresh replaces it; adding one with an existing name replaces that one. Opens the live status view (a recurring Refresh keeps it open until `Ctrl+C`) unless `--silent`.
+A Pond can have any number of scheduled Refreshes and one `--every` or continuous Refresh. Adding another `--every` or continuous Refresh replaces it; adding one with an existing name replaces that one. In a terminal it opens the live status view (a recurring Refresh keeps it open until `Ctrl+C`) unless `--silent`; without one it prints the Refresh's name and exits, unless `--view`.
 
 | Option | Default | Description |
 |---|---|---|
@@ -53,10 +73,10 @@ duckstring refresh add reports --every 1d --start 06:00 --on MON,TUE,WED,THU,FRI
 ## `refresh ls`
 
 ```bash
-duckstring refresh ls POND
+duckstring refresh ls POND [--json]
 ```
 
-Lists the Pond's recurring Refreshes, scheduled first, with their details and when each next asks.
+Lists the Pond's recurring Refreshes, scheduled first, with their details and when each next asks. `--json` prints them as JSON.
 
 ## `refresh rm`
 

@@ -67,7 +67,8 @@ class FlightSqlServer(flight.FlightServerBase):
     def _arrow(self, principal: auth.Principal, sql: str):
         from .serving import _cache
         sandboxed = principal.tap is not None or principal.level < auth.Level.FULL
-        cur = _cache(self.driver).connection(self.driver, sandboxed=sandboxed, tap=principal.tap).cursor()
+        cur = _cache(self.driver).connection(self.driver, sandboxed=sandboxed, tap=principal.tap,
+                                         sql=sql).cursor()
         return cur.execute(sql).to_arrow_table()  # a materialised Table (schema + num_rows)
 
     def get_flight_info(self, context, descriptor):

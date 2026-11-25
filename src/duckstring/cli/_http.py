@@ -17,7 +17,8 @@ def pond_params(major: int | None = None, version: str | None = None) -> dict:
 def request(method: str, url: str, auth: dict | None = None, **kwargs):
     """``auth`` is the registered catchment's config dict — its `key` and/or custom `headers`
     (``catchment connect --key/--header``) are attached to the request via
-    :func:`duckstring.cli.config.auth_headers`."""
+    :func:`duckstring.cli.config.auth_headers`. ``allow`` lists HTTP statuses returned to the caller rather
+    than reported as errors."""
     import httpx
 
     from .config import HeaderCommandError, auth_headers
@@ -35,6 +36,7 @@ def request(method: str, url: str, auth: dict | None = None, **kwargs):
         timeout = raw_timeout
 
     given = kwargs.pop("headers", None) or {}
+    allow = tuple(kwargs.pop("allow", ()))
 
     def _send(refresh: bool = False):
         headers = dict(given)
@@ -51,6 +53,8 @@ def request(method: str, url: str, auth: dict | None = None, **kwargs):
         resp = _send()
         if resp.status_code == 401 and auth and auth.get("header_commands"):
             resp = _send(refresh=True)  # the cached token may have been revoked or the clock skewed
+        if resp.status_code in allow:
+            return resp
         resp.raise_for_status()
         return resp
     except httpx.ConnectError:

@@ -198,11 +198,11 @@ def test_pond_foreign_read_rejects_a_stale_local_source(tmp_path):
     remote = str(tmp_path / "durable")
 
     fresh = Pond("me", "1.0.0", con=None, root=str(tmp_path), source_majors={"src": 1},
-                 source_f={"src": "2026-01-01T00:00:00+00:00"}, data_root=remote)
+                 read_positions={"src": "2026-01-01T00:00:00+00:00"}, data_root=remote)
     assert str(local) in fresh._source_data_dir("src").uri()
 
     moved = Pond("me", "1.0.0", con=None, root=str(tmp_path), source_majors={"src": 1},
-                 source_f={"src": "2026-06-01T00:00:00+00:00"}, data_root=remote)
+                 read_positions={"src": "2026-06-01T00:00:00+00:00"}, data_root=remote)
     assert remote in moved._source_data_dir("src").uri()
 
 
@@ -301,7 +301,7 @@ def test_begin_run_job_carries_each_sources_published_freshness(tmp_path):
         ss.start_f = ss.end_f = ss.changed_f = ss.persisted_f = t0
     driver.refresh_now("rpt@1", at=t0)
     job = next(j for j in driver.jobs["rpt@1"] if j["kind"] == "begin_run")
-    assert job["source_f"] == {"sales": t0.isoformat()}
+    assert job["read_positions"] == {"sales": t0.isoformat()}
     # A pass (end_f advanced, nothing written) must not raise the claim above the content anchor.
     with driver.lock:
         driver.state.pond_states["sales@1"].end_f = datetime(2026, 2, 1, tzinfo=timezone.utc)
@@ -500,7 +500,7 @@ def test_export_keeps_unhydrated_parts_and_prunes_only_below_floor(tmp_path):
     assert len(list((data_dir / "ev").glob("*.parquet"))) == 3
 
     # Simulate partial hydration: the registry loses the f1/f2 rows WITHOUT retention (floor unmoved).
-    con.execute("DELETE FROM ev WHERE id IN (1, 2)")
+    con.execute(f"DELETE FROM {T.hot_name('ev')} WHERE id IN (1, 2)")  # its rows; 'ev' is a view over them
     ParquetDataPlane().export(con, data_dir, f=ts(3))
     assert len(list((data_dir / "ev").glob("*.parquet"))) == 3, \
         "registry absence must NOT prune published parts (partial hydration is not retention)"

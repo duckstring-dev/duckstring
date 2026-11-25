@@ -110,6 +110,52 @@ Replaces the Catchment's API keys and prints the new ones once. The old key for 
 | `--level` | `read`, `demand` or `full`. Repeatable. Defaults to all three. |
 | `--yes`, `-y` | Skip the confirmation. |
 
+## Records and Media
+
+Where Apps' [Records and Media](../../guides/records_and_media.md) live. Both settings can only change while no App line holds data there; after that, `move` copies everything to a new place. Showing the settings needs read access, and changing them or moving needs full access.
+
+### `records`
+
+```bash
+duckstring catchment records [-c NAME] [--use TARGET] [--memory SIZE] [--listen ADDRESS] [--host NAME]
+                             [--tls-cert PATH --tls-key PATH] [--reader-url]
+```
+
+Shows where Records live and, for the Catchment's own PostgreSQL, whether it's running, its PostgreSQL version, memory, listen address and TLS certificate. With options, changes them.
+
+| Option | Description |
+|---|---|
+| `--use` | `managed`, a PostgreSQL the Catchment runs (the default, started the first time an App needs it; install it with [`duckstring install postgres`](install.md)), or a `postgres://` URI whose user has `CREATEROLE` and `CREATEDB`. Credentials as `${secret:NAME}` or `${env:NAME}`. |
+| `--memory` | The managed PostgreSQL's memory, such as `1GB`, set aside from the memory Pond Runs share. Default 512 MB. |
+| `--listen` | The managed PostgreSQL's listen address. Default `127.0.0.1`. Connections from beyond the Catchment's machine must use TLS. |
+| `--host` | The address other machines reach it at, used in their connection URLs and the self-signed certificate. |
+| `--tls-cert`, `--tls-key` | A certificate and key to serve TLS with, as paths on the Catchment's machine. Without them, a self-signed certificate is made, whose SHA-256 fingerprint the command shows. |
+| `--reader-url` | Print a read-only connection URL for a client on another machine, such as a BI tool. Needs full access. |
+
+### `records move`
+
+```bash
+duckstring catchment records move TARGET [-c NAME] [--postgres-version N] [--yes]
+```
+
+Moves every App line's Records to `TARGET`, `managed` or a `postgres://` URI. Apps with Records answer `503`, and Spouts into Records wait, while the database is copied with `pg_dump` and restored. Row counts are compared, the Catchment switches, and the old store is deleted. A failure before the switch leaves the old store as it was. With `--postgres-version`, moves the managed PostgreSQL to that major version, installed first with `duckstring install postgres --postgres-version N`. Asks for confirmation unless `--yes` is given, and prints progress until it finishes.
+
+### `media`
+
+```bash
+duckstring catchment media [-c NAME] [--use TARGET]
+```
+
+Shows where Media lives. `--use` sets it: `local`, the Catchment's own state directory (the default), or an object-store prefix (`s3://`, `gs://`, `az://` or `abfss://`), with credentials as for a [data root](../formats.md#data-root-uris).
+
+### `media move`
+
+```bash
+duckstring catchment media move TARGET [-c NAME] [--yes]
+```
+
+Moves every App line's Media to `TARGET`. Files are copied while Apps run; then Apps with Media stop while what changed is copied, the listings are compared, the Catchment switches, and the old files are deleted. Asks for confirmation unless `--yes` is given.
+
 ## State
 
 ### `download`
@@ -118,7 +164,7 @@ Replaces the Catchment's API keys and prints the new ones once. The old key for 
 duckstring catchment download [-c NAME] [--path DIR] [--yes]
 ```
 
-Downloads the Catchment's state directory: its database, deployed code, run ledgers and working databases. Use it to back up a Catchment, or to carry its state across a platform redeploy. Shows the size and asks for confirmation first. Secrets are never included, nor are Pond environments, which are rebuilt when needed. When the Catchment has an external data root, the published tables are not included, since they're already stored there. An App's state is included only as its [`download`](../pond_toml.md#app) command writes it, and its logs aren't included.
+Downloads the Catchment's state directory: its database, deployed code, run ledgers and working databases. Use it to back up a Catchment, or to carry its state across a platform redeploy. Shows the size and asks for confirmation first. Secrets are never included, nor are Pond environments, which are rebuilt when needed. When the Catchment has an external data root, the published tables are not included, since they're already stored there. An App's state is included only as its [`download`](../pond_toml.md#app) command writes it, and its logs aren't included. Records are included as a `pg_dump`, which a new Catchment's own PostgreSQL restores when it first starts, and Media is included as files.
 
 Download while nothing is running: the working databases are copied as they are.
 

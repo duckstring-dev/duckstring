@@ -151,14 +151,17 @@ the throttle: demand reaching it while it waits counts against them (`_count_dem
 idle (`_settle_throttle`), and as a bottleneck it releases upstream once they start a new run, which is when
 its slot comes. Outside the throttle, waiting is not running (the Inlet rule, liveness and status unchanged).
 
-### Memory outside DuckDB, and failures
+### Declared memory, and failures
 
-- A Python Ripple that holds data outside DuckDB declares it, `@ripple(memory="6GB")` (a Pond default in
-  `pond.toml`); a Pond's need is the slots that covers, rounded up (`Pond.slot_need`, default 1).
+- A Pond whose Runs need more than one slot declares it, `@ripple(memory="6GB")` (a Pond default in
+  `pond.toml`); a Pond's need is the slots that covers, rounded up (`Pond.slot_need`, default 1). (As first
+  built it was memory held outside DuckDB, taken off DuckDB's limit, with one slot for DuckDB on top. Changed
+  2026-11-22, the author's call, attention FINDINGS 10: one meaning, the whole Run's, DuckDB's limit all of
+  its slots, and concurrency doing the rest. No history-based sizing: a person or agent tunes the number.)
 - A Ripple that fails for memory (a DuckDB `OutOfMemoryException`, or a Duck the kernel killed, `-9`) is
   retried once by the Catchment, separately from the user's failure budget (which defaults to 0; running out
   of memory isn't a fault in the Ripple's logic), asking for every slot (`PondState.slot_exclusive`). Failing
-  again with the machine to itself is a genuine failure, reported as such, pointing at `memory=` for a kill.
+  again with the machine to itself is a genuine failure, reported as such, pointing at a larger machine for a kill.
 - A Duck parked on a missing Source asset rolls its Run back (`block_on_missing_asset`), so it holds no slot;
   a failed or killed Pond holds none. (Otherwise four parked Runs could hold every slot while the Source they
   wait for queued behind them.)
@@ -177,13 +180,13 @@ unmet), with its place in the queue.
 2. **Driver and Duck** (built 2026-10-27, `tests/test_memory_slots_driver.py`, `tests/test_memory_slots_runtime.py`):
    `DUCKSTRING_RUN_SLOTS` (default 4, `0` off), `DUCKSTRING_MEMORY_BUDGET` (default 80% of physical memory less
    2 GB) and `DUCKSTRING_IDLE_MEMORY` (default 256 MB); `slot_capacity` for the `catchment` pool; the grant
-   (slots times budget/`N`, less the memory declared outside DuckDB, at least 256 MB) as the `begin_run` job's
+   (slots times budget/`N`, at least 256 MB; before 2026-11-22 less the memory declared outside DuckDB) as the `begin_run` job's
    `memory_limit`, which the Duck applies only when it has nothing in flight, with spills in its own
    `tmp/{pond}_m{major}`, and its `idle_memory` floor once it has nothing in flight again; status `waiting` and
    the `memory` entry (slots held, of, need, place in the queue) on `/api/status`, and a "Waiting for memory"
    card in the UI; one retry with every slot for a DuckDB out-of-memory error or a Duck killed with SIGKILL
    (`_retry_for_memory`: the Run is failed, cleared and woken, outside the failure budget), and a message
-   pointing at `memory=` when the retry also fails. dbt Ponds have no persistent registry instance, so their
+   pointing at a larger machine when the retry also fails. dbt Ponds have no persistent registry instance, so their
    limit isn't applied yet.
 3. **Declarations** (built): `@ripple(memory=)`, `pond.toml [pond] memory` for Python Ripples, the
    `ripple.memory_bytes` column (migration `033`); a Pond's need is one slot plus enough for its largest

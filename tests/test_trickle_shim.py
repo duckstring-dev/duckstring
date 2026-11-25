@@ -35,7 +35,7 @@ def test_a_newer_storage_format_is_refused_when_published(tmp_path):
     f = datetime(2026, 1, 1, tzinfo=timezone.utc)
     io.merge_table(con, "m", con.sql("SELECT 1 AS id"), f, ("id",))
     ParquetDataPlane().export(con, tmp_path, f=f)
-    assert io.load_sidecar(tmp_path)["m"]["format_version"] == io.FORMAT_VERSION
+    assert io.load_sidecar(tmp_path)["m"]["format_version"] == io.WRITE_FORMAT
 
     sidecar = io.load_sidecar(tmp_path)
     sidecar["m"]["format_version"] = io.FORMAT_VERSION + 1

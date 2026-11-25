@@ -17,9 +17,12 @@ export interface Pond {
   kind: string; // inlet | pond | outlet
   isDraw: boolean; // a Pond Draw — fed by a duct from an upstream Catchment
   isSpout: boolean; // a Spout — egresses its source's output to an external system (terminal)
+  isPuddle: boolean; // a Puddle node (also a Draw): a Source read from another Catchment as a Puddle
   dbt: boolean; // a dbt-mode Pond — its Ripples are dbt models (no @ripple code)
   isApp: boolean; // an App: an Outlet that serves HTTP from the Catchment (plans/apps.md)
   sources: PondId[];
+  // Declared external sources ([pond] external): drawn as nodes feeding it. `app:name@major` is an App line's data.
+  external: string[];
 }
 
 export interface Ripple {
@@ -98,17 +101,23 @@ export interface PondInfo {
   spout?: { destination: string; table: string | null; mode: string; armed: boolean } | null;
 }
 
-// An App's serving state. An App runs at most one instance at a time: started by a request, stopped when idle.
+// An App's serving state: its instances start on a request, the warm floor or load, and stop when idle.
 export interface AppInfo {
   path: string; // served at, from the Catchment's root ("/apps/{name}/v{major}/")
   deployedAt: string | null; // ISO; a version can be redeployed in place, so this tells deploys apart
   idleTimeoutS: number; // 0 = never stops for idleness
+  records: boolean; // declares Records (plans/records-and-media.md)
+  media: boolean; // declares Media
+  dataState: 'trial' | 'live' | 'retired' | null; // its line's, once it has started
   instance: {
     id: number;
     startedAt: string;
     readyAt: string | null; // null while starting
     active: number; // requests and WebSockets in flight
     idleAt: string | null; // when it will stop for idleness (null while busy or with no idle timeout)
+    count: number; // instances running ([app] instances): requests and idleness above are over all of them
+    elsewhere: number; // of them, on the App's own compute (plans/app-scaling.md)
+    pressed: string | null; // held at its maximum under this pressure
   } | null;
 }
 
@@ -121,6 +130,8 @@ export interface AppInstance {
   stoppedAt: string | null;
   stopReason: string | null;
   exitCode: number | null;
+  elsewhere: boolean; // ran on the App's own compute, not the Catchment
+  startReason: string | null;
 }
 
 // ─── Run history ─────────────────────────────────────────────────────────────
@@ -146,6 +157,7 @@ export interface PondRun {
   status: string;
   error: string | null; // Pond-level failure message (dead/silent Duck, ledger error), if any
   traceback: string | null; // full traceback for a Pond-level failure, if any
+  supersededBy: string | null; // status "superseded": the freshness of the later Run that did its work
   // The async mirror to the durable plane (plans/persist.md) — its own log item, landing after the run.
   persist?: { status: string; error: string | null; startedAt: string | null; finishedAt: string | null } | null;
   ripples?: RippleRun[];

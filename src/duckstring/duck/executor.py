@@ -17,6 +17,7 @@ from pathlib import Path
 from ..catchment.registry import pond_data_dir, pond_major_dir, pond_registry_path
 from ..dataplane import KEEP_ALL
 from ..objects import STAGING_DIR
+from ..trickle_io import first_row
 
 _import_lock = threading.Lock()
 
@@ -47,6 +48,22 @@ def _dbt_topology(source_dir: Path, info: dict) -> dict[str, list[str]]:
 
 
 
+def _drop_scratch_views(con) -> None:
+    """Drop the scratch views Duckstring 0.8.0 and earlier stored in a registry, eight or so per incremental
+    write and never removed, which slowed every later write's catalog lookups (``trickle.io.temp_view``). Best
+    effort: a registry that can't be cleaned now runs as before."""
+    from ..core import retry_on_lock
+    from ..trickle_io import drop_scratch_views
+
+    try:
+        dropped = retry_on_lock(lambda: drop_scratch_views(con))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[executor] could not drop leftover scratch views: {exc}", flush=True)
+        return
+    if dropped:
+        print(f"[executor] dropped {dropped} leftover scratch view(s) from the registry", flush=True)
+
+
 def _load_ripple(source_path: str, root: str, ripple_name: str):
     """Load ``ripple_name``'s function (Python or SQL) from the deployed code, with the Pond's Ripples
     around it (:func:`duckstring.core.load_ripples`). Importing here (lazily, per run) keeps executor
@@ -64,8 +81,10 @@ def _run_ripple(
     func, pond_name: str, version: str, con, root_str: str,
     source_majors: dict[str, int], f: datetime | None, previous_f: datetime | None,
     data_root: str | None = None, sources_changed: bool = True, skip_sink=None,
-    staging_dir=None, own_data_dir=None, source_f: dict[str, str] | None = None,
+    staging_dir=None, own_data_dir=None, read_positions: dict[str, str] | None = None,
+    previous_positions: dict[str, str] | None = None,
     flock: dict[str, str] | None = None, scope: dict | None = None, change_sink=None,
+    remote_sources: dict | None = None,
 ) -> dict:
     from ..core import Pond
 
@@ -78,9 +97,10 @@ def _run_ripple(
     # so they coexist without the "file handle conflict" two separate connect()s to the same file raise.
     pond = Pond(
         name=pond_name, version=version, con=con, root=Path(root_str),
-        source_majors=source_majors, source_f=source_f, f=f, previous_f=previous_f, data_root=data_root,
+        source_majors=source_majors, read_positions=read_positions, previous_positions=previous_positions,
+        f=f, previous_f=previous_f, data_root=data_root,
         sources_changed=sources_changed, skip_sink=skip_sink, change_sink=change_sink,
-        staging_dir=staging_dir, own_data_dir=own_data_dir,
+        staging_dir=staging_dir, own_data_dir=own_data_dir, remote_sources=remote_sources,
         # Flock is a Pond-level posture (not per-Ripple). flock.comprehensive still applies
         # engine-eligibility and the OOM fail-up.
         flock=(flock_env or os.environ).get("DUCKSTRING_FLOCK_MODE"), flock_env=flock_env,
@@ -88,6 +108,9 @@ def _run_ripple(
         **(scope or {}),
     )
     try:
+        from ..reports import clear
+
+        clear(con, f, pond._ripple)  # a Ripple launching again (a retry, a replay) reports afresh
         func(pond)
         return pond.take_lineage()  # the observed reads/writes this Ripple made (plans/lineage.md)
     finally:
@@ -95,7 +118,7 @@ def _run_ripple(
 
 
 def _export_data(con, data_dir, f: datetime | None, contract=None, retain_from=KEEP_ALL,
-                 held=frozenset()) -> dict | None:
+                 held=frozenset(), exact_ints: bool = False) -> dict | None:
     from ..dataplane import get_data_plane
     from ..schema_contract import CONTRACT_PREFIX, ContractViolation, contract_violations, extract_schema
 
@@ -104,7 +127,7 @@ def _export_data(con, data_dir, f: datetime | None, contract=None, retain_from=K
     # file handle the way a separate connect() to the same file would. The data plane owns the publish
     # format (Parquet today); ``f`` is the run's freshness, recorded by backends that snapshot.
     try:
-        schema = extract_schema(con)
+        schema = extract_schema(con, exact_ints)
         # The contract gate: vet the output BEFORE publishing. A violation aborts the publish, so the
         # live tables keep last-good data; the Catchment fails the Pond and blocks downstream.
         violations = contract_violations(schema, contract)
@@ -112,7 +135,8 @@ def _export_data(con, data_dir, f: datetime | None, contract=None, retain_from=K
             # The stable prefix is the failure's machine-readable sub-reason: the Catchment's status
             # derives failure_kind="contract" from it (survives restarts — no extra state to persist).
             raise ContractViolation(f"{CONTRACT_PREFIX}{'; '.join(violations)}")
-        get_data_plane().export(con, data_dir, mode="overwrite", f=f, retain_from=retain_from, held=held)
+        get_data_plane().export(con, data_dir, mode="overwrite", f=f, retain_from=retain_from, held=held,
+                                exact_ints=exact_ints)
         return schema
     finally:
         con.close()
@@ -136,17 +160,28 @@ def _is_unreadable(exc: BaseException) -> bool:
     return "lock" not in msg and any(m in msg for m in _UNREADABLE_MARKERS)
 
 
-def open_registry(path: Path):
+def open_registry(path: Path, spill_dir: Path | None = None):
     """Open a Pond's registry, returning ``(connection, recovery)``: ``recovery`` is ``"missing"`` when
     the file didn't exist, ``"unreadable"`` when it existed but this DuckDB can't open it (it is renamed
     aside with its WAL, kept for inspection, and a fresh registry is created), else ``None``. Either
-    recovery means the caller should rebuild the registry from published state."""
+    recovery means the caller should rebuild the registry from published state.
+
+    ``spill_dir`` is set as DuckDB's temporary directory on every connection opened here, before anything runs:
+    DuckDB refuses to switch it once a query has spilled, and a Duck that ran (or compacted its registry) before
+    being told its memory limit failed its next Run setting it (the attention showcase, 2026-11-22)."""
     import duckdb
 
+    def connect():
+        con = duckdb.connect(str(path))
+        if spill_dir is not None:
+            spill_dir.mkdir(parents=True, exist_ok=True)
+            con.execute(f"SET temp_directory = '{spill_dir}'")
+        return con
+
     if not path.exists():
-        return duckdb.connect(str(path)), "missing"
+        return connect(), "missing"
     try:
-        return duckdb.connect(str(path)), None
+        return _compact_if_mostly_free(connect(), path, connect), None
     except duckdb.Error as exc:
         if not _is_unreadable(exc):
             raise
@@ -154,7 +189,65 @@ def open_registry(path: Path):
     aside = _set_aside(path, "unreadable")
     print(f"[executor] registry {path} is unreadable ({reason}); moved it to {aside.name} and rebuilding",
           flush=True)
-    return duckdb.connect(str(path)), "unreadable"
+    return connect(), "unreadable"
+
+
+# A DuckDB file never shrinks: deleted rows leave free blocks it reuses but doesn't hand back. Once an append table's
+# older runs move out of the registry (dataplane.fold_append), wa_views' registry was 23 GiB with 98% of its blocks
+# free. A registry at least this large that is at least this free is rewritten when a Duck opens it.
+_COMPACT_MIN_BYTES = 64 * 2**20
+_COMPACT_FREE_SHARE = 0.5
+
+
+def _copy_database(con, tmp: Path) -> None:
+    """Copy ``con``'s database (tables, views and their comments, constraints, sequences) into a new file."""
+    name = first_row(con.execute("SELECT current_database()"))[0]
+    con.execute(f"ATTACH '{tmp}' AS _ds_compact")
+    try:
+        con.execute(f'COPY FROM DATABASE "{name}" TO _ds_compact')
+        con.execute("CHECKPOINT _ds_compact")
+    finally:
+        con.execute("DETACH _ds_compact")
+
+
+def _compact_if_mostly_free(con, path: Path, connect=None):
+    """``con`` on ``path``, rewritten first when the file is mostly free blocks: the live data is copied into a new
+    file beside it, which replaces it (one rename), and a connection on that is returned. Run as a Duck opens its
+    registry, before anything else uses it. Any failure leaves the registry as it was."""
+    import os
+
+    import duckdb
+
+    connect = connect or (lambda: duckdb.connect(str(path)))
+    try:
+        _, _, block_size, total, _, free, *_ = first_row(con.execute("PRAGMA database_size"))
+    except duckdb.Error:
+        return con
+    if total * block_size < _COMPACT_MIN_BYTES or free < total * _COMPACT_FREE_SHARE:
+        return con
+    tmp = path.with_name(f"{path.name}.compact")
+    for leftover in (tmp, tmp.with_name(f"{tmp.name}.wal")):
+        leftover.unlink(missing_ok=True)
+    try:
+        con.execute("CHECKPOINT")  # the WAL into the file, so the copy and the rename see everything
+        _copy_database(con, tmp)
+        con.close()
+        os.replace(tmp, path)
+        path.with_name(f"{path.name}.wal").unlink(missing_ok=True)  # the old file's, if any: never replayed on the new
+        compacted = connect()
+        size = (total - free) * block_size
+        print(f"[executor] compacted registry {path}: {total * block_size / 2**30:.1f} GiB -> "
+              f"{size / 2**30:.2f} GiB of data", flush=True)
+        return compacted
+    except Exception as exc:  # noqa: BLE001 — a compaction is an economy; the registry stays as it was
+        print(f"[executor] couldn't compact registry {path} ({exc}); keeping it as it is", flush=True)
+        for leftover in (tmp, tmp.with_name(f"{tmp.name}.wal")):
+            leftover.unlink(missing_ok=True)
+        try:
+            con.execute("SELECT 1")
+            return con
+        except Exception:  # noqa: BLE001 — closed above: open it again
+            return connect()
 
 
 def _set_aside(path: Path, why: str) -> Path:
@@ -170,30 +263,61 @@ def _set_aside(path: Path, why: str) -> Path:
 
 class RunInputs:
     """What each ``begin_run`` job tells the Duck about its Run's inputs, kept per Run freshness so
-    pipelined Runs don't share them: the Sources' published freshness (the version pins its reads use),
+    pipelined Runs don't share them: the Sources' read positions (what each had published when the Run
+    started, which every read of it is at),
     the Catchment's ``retain_from`` for this line's own overwrite versions, and the Pond's Flock settings
     (``flock.job_settings``). Shared by both executors."""
+
+    # Whether this line publishes a 128-bit integer as BIGINT (``pond.exact_ints``, lines first deployed from
+    # 0.9 on; older lines keep DOUBLE, which their Sinks' contracts record). The line's, so constant: taken
+    # from each begin_run job.
+    exact_ints: bool = False
 
     def _inputs(self) -> dict:
         if not hasattr(self, "_run_inputs"):
             self._run_inputs: dict[datetime, dict] = {}
         return self._run_inputs
 
-    def begin_run_inputs(self, f: datetime, source_f: dict[str, str] | None, retain_from=KEEP_ALL,
-                         force: bool = False, flock: dict[str, str] | None = None) -> None:
+    def begin_run_inputs(self, f: datetime, read_positions: dict[str, str] | None, retain_from=KEEP_ALL,
+                         force: bool = False, flock: dict[str, str] | None = None,
+                         puddles: dict[str, dict] | None = None) -> None:
         """Record Run ``f``'s inputs. The first job for ``f`` wins (a re-dispatch after a Catchment restart
-        must not move a Run's pins under its running Ripples), unless ``force`` restarts the Run.
+        must not move a Run's read positions under its running Ripples), unless ``force`` restarts the Run.
         ``retain_from`` is a datetime, ``None`` (keep only the newest version) or ``KEEP_ALL`` (no job
         value: prune nothing)."""
-        self.source_f = source_f or {}  # the latest job's view (fallback for a Run with no recorded inputs)
+        self.read_positions = read_positions or {}  # the latest job's (fallback for a Run with no recorded inputs)
         self.flock = flock  # likewise
+        self.puddles = puddles  # likewise
         inputs = self._inputs()
         if force or f not in inputs:
-            inputs[f] = {"source_f": dict(source_f or {}), "retain_from": retain_from, "flock": flock}
+            inputs[f] = {"read_positions": dict(read_positions or {}), "retain_from": retain_from, "flock": flock,
+                         "puddles": dict(puddles) if puddles else None}
 
-    def source_f_for(self, f: datetime | None) -> dict[str, str]:
+    def remote_sources_for(self, f: datetime | None) -> dict | None:
+        """Run ``f``'s live Puddle Sources (``{name: RemoteSource}``): each read on the Catchment it lives on through
+        the queries its definitions compiled to when it was deployed (the job's ``puddles``: ``{name: {major,
+        queries, kinds}}``), through this Duck's Catchment (catchment/puddles.py); ``None`` without any. Made once per
+        Run and shared by its Ripples, so a table's reads at one position are fetched once."""
         rec = self._inputs().get(f)
-        return rec["source_f"] if rec is not None else self.source_f
+        puddles = rec.get("puddles") if rec is not None else getattr(self, "puddles", None)
+        if not puddles:
+            return None
+        cache = self.__dict__.setdefault("_remote_sources", {})
+        if f in cache:
+            return cache[f]
+        from ..remote_source import RemoteSource
+
+        out = {source: RemoteSource(source, int(p["major"]), self.puddle_transport, queries=p.get("queries"),
+                                    kinds={t: tuple(k) for t, k in (p.get("kinds") or {}).items()})
+               for source, p in puddles.items()}
+        for old in [k for k in cache if k is not None and f is not None and k < f]:
+            cache.pop(old)  # a Run's reads go once a later Run needs its own
+        cache[f] = out
+        return out
+
+    def read_positions_for(self, f: datetime | None) -> dict[str, str]:
+        rec = self._inputs().get(f)
+        return rec["read_positions"] if rec is not None else self.read_positions
 
     def flock_for(self, f: datetime | None) -> dict[str, str] | None:
         """Run ``f``'s Flock settings from its job, or ``None`` (no job carried any: the environment's)."""
@@ -255,7 +379,9 @@ class RippleExecutor(RunInputs):
         # ONE registry instance for the Duck's life: ripples (and the export) each run on a `.cursor()`
         # off it. Separate `connect()`s to the same file in one process raise a "file handle conflict"
         # (a Binder error, not a transient lock) the moment two overlap — single instance avoids it.
-        self._registry, recovery = open_registry(self.registry_path)
+        # Spills go to this Duck's own directory under the root's ``tmp``, set before the registry runs anything.
+        self._spill_dir = Path(self.root) / "tmp" / f"{self.pond_name}_m{self.major}"
+        self._registry, recovery = open_registry(self.registry_path, self._spill_dir)
         if recovery is None:
             # A registry older than its published state (a state backup older than the data root) would
             # resume against old state: set it aside and rebuild, as for an unreadable one.
@@ -270,16 +396,14 @@ class RippleExecutor(RunInputs):
                 print(f"[executor] registry {self.registry_path} is behind the published state ({published}); "
                       f"moved it to {aside.name} and rebuilding", flush=True)
                 self._registry, recovery = duckdb.connect(str(self.registry_path)), "behind"
+                self._registry.execute(f"SET temp_directory = '{self._spill_dir}'")
         recover = recovery is not None
         # A containerised Duck must hit DuckDB's own limit (a catchable OutOfMemoryException,
         # with disk spill first) rather than the kernel's cgroup OOM-kill: the launcher sets
         # DUCKSTRING_MEMORY_LIMIT to ~80% of the pod cap. Absent env => DuckDB defaults, no change.
         mem_limit = os.environ.get("DUCKSTRING_MEMORY_LIMIT")
-        if mem_limit:
-            spill = Path(self.root) / "tmp"
-            spill.mkdir(parents=True, exist_ok=True)
+        if mem_limit:  # spills go to this Duck's directory, set as the registry opened
             self._registry.execute(f"SET memory_limit = '{mem_limit}'")
-            self._registry.execute(f"SET temp_directory = '{spill}'")
         # Configure the data-plane's object-store credentials on the registry INSTANCE up front (a DuckDB
         # SECRET is instance-wide, shared by every cursor), so registry-loss hydration below, cross-Pond
         # foreign reads, and the export can all reach S3/GCS. A no-op for a local data root. Without this,
@@ -302,6 +426,7 @@ class RippleExecutor(RunInputs):
             if hydrated:
                 print(f"[executor] registry file was {recovery} — hydrated {len(hydrated)} table(s) "
                       f"from the {where}: {', '.join(hydrated)}", flush=True)
+        _drop_scratch_views(self._registry)
         self._cursor_lock = threading.Lock()
         # Which major line of each Source this Pond's reads resolve to (its pond.toml pins).
         sources = read_pond_toml(root / source_path).get("sources", {})
@@ -309,7 +434,7 @@ class RippleExecutor(RunInputs):
         # What the Catchment says each Source has published ({name: iso}) — carried on the begin_run job
         # and used to reject a stale LOCAL publish left behind by a Source that moved to a remote Pool.
         # Empty until a job supplies it; then the resolve is only ever more correct, never less.
-        self.source_f: dict[str, str] = {}
+        self.read_positions: dict[str, str] = {}
         # {table: the Ripple that writes it}, learned from each completed Ripple's lineage (a Python
         # Ripple's tables aren't known until it runs). Backs Pond's own-table read check.
         self.table_writers: dict[str, str] = {}
@@ -338,7 +463,8 @@ class RippleExecutor(RunInputs):
             return self._registry.cursor()
 
     def submit(self, ripple_name: str, f: datetime | None, previous_f: datetime | None, on_done, on_error,
-               sources_changed: bool = True, skip_sink=None, change_sink=None):
+               sources_changed: bool = True, skip_sink=None, change_sink=None,
+               previous_positions: dict[str, str] | None = None):
         """Load and run ``ripple_name`` at freshness ``f`` (exposed to the ripple as ``pond.f``, with
         the prior run's freshness as ``pond.previous_f``); call ``on_done(name, started_at,
         finished_at, lineage)`` on success — ``lineage`` is the Ripple's observed reads/writes
@@ -359,10 +485,10 @@ class RippleExecutor(RunInputs):
                 func, self.pond_name, self.version, self._cursor(), str(self.root),
                 self.source_majors, f, previous_f, self.data_root,
                 sources_changed=sources_changed, skip_sink=skip_sink, change_sink=change_sink,
-                source_f=self.source_f_for(f),
-                flock=self.flock_for(f),
+                read_positions=self.read_positions_for(f), previous_positions=previous_positions,
+                flock=self.flock_for(f), remote_sources=self.remote_sources_for(f),
                 staging_dir=self.staging_dir, own_data_dir=self.own_data_dir,
-                scope={"static_tables": pond.statics, "ripple": ripple_name,
+                scope={"static_tables": pond.statics, "ripple": ripple_name, "exact_ints": self.exact_ints,
                        "ancestors": pond.ancestors(ripple_name),
                        "table_writers": {**self.table_writers, **pond.sql_writers()}},
             )
@@ -384,15 +510,37 @@ class RippleExecutor(RunInputs):
         fut.add_done_callback(_cb)
         return fut
 
-    def export(self, f: datetime | None = None, contract=None, held=frozenset()) -> dict | None:
+    def collect_reports(self, f: datetime, previous_f: datetime | None,
+                        previous_positions: dict[str, str] | None = None) -> None:
+        """Carry the Run's reports, and its Sources' in its window, into the reports table
+        (:func:`duckstring.reports.collect`), through a handle at the Run's freshness."""
+        from ..core import Pond, retry_on_lock
+        from ..reports import collect
+
+        con = self._cursor()
+        try:
+            pond = Pond(name=self.pond_name, version=self.version, con=con, root=self.root,
+                        source_majors=self.source_majors, read_positions=self.read_positions_for(f),
+                        previous_positions=previous_positions, f=f, remote_sources=self.remote_sources_for(f),
+                        previous_f=previous_f, data_root=self.data_root, own_data_dir=self.own_data_dir)
+            retry_on_lock(lambda: collect(pond))
+        finally:
+            con.close()
+
+    def export(self, f: datetime | None = None, contract=None, held=frozenset(),
+               previous_f: datetime | None = None, previous_positions: dict[str, str] | None = None) -> dict | None:
         """Publish the Pond's tables for cross-Pond consumption via the data plane, stamped with the
         run's freshness ``f`` (recorded by snapshotting backends). ``contract`` is the major line's
         additive contract — a violation raises :class:`ContractViolation` *before* publishing (last-good
         is left intact). ``held`` names the tables and Objects the run checked as unchanged, which keep
-        their published copy. Returns the published output schema (for the Catchment to capture)."""
+        their published copy. ``previous_f`` is the Run's window start, for the Run reports it carries.
+        Returns the published output schema (for the Catchment to capture)."""
         from ..objects import commit_objects
 
-        schema = _export_data(self._cursor(), self.own_data_dir, f, contract, self.take_retain_from(f), held)
+        if f is not None:
+            self.collect_reports(f, previous_f, previous_positions)
+        schema = _export_data(self._cursor(), self.own_data_dir, f, contract, self.take_retain_from(f), held,
+                              self.exact_ints)
         # Objects commit only after the table publish passed the contract gate — a failed run leaves the
         # last-good Object intact (the staged writes are discarded on the next run / wipe).
         commit_objects(self.staging_dir, self.own_data_dir, f, held)
@@ -421,10 +569,6 @@ class RippleExecutor(RunInputs):
 
         if limit == getattr(self, "_memory_limit", None):
             return True
-        if not getattr(self, "_spill_dir", None):
-            self._spill_dir = Path(self.root) / "tmp" / f"{self.pond_name}_m{self.major}"
-            self._spill_dir.mkdir(parents=True, exist_ok=True)
-            self._registry.execute(f"SET temp_directory = '{self._spill_dir}'")
         try:
             self._registry.execute(f"SET memory_limit = '{limit}'")
         except duckdb.Error as exc:

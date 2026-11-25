@@ -21,6 +21,9 @@ Metric families (all `duckstring_*`):
   spout_failed                  — 0/1 per Spout
   alert_deliveries_total        — queued notifications by status (sent/pending/failed)
   tap_queries_total             — queries through each Tap (plans/taps.md)
+  app_instances / app_active / app_cpu_share / app_memory_share / app_reported_load / app_at_maximum
+                                : App instances and what scales them (plans/app-scaling.md)
+  app_instance_starts_total / app_instance_stops_total: App instances started by place, stopped by reason
   tap_refreshes_total           — Refreshes each Tap's queries sent
 """
 
@@ -124,6 +127,34 @@ def render_metrics(snap: dict) -> str:
     family("alert_deliveries_total", "counter", "Queued alert notifications by status.")
     for status in ("sent", "pending", "failed"):
         line("alert_deliveries_total", snap["alert_deliveries"].get(status, 0), status=status)
+
+    # App instances (plans/app-scaling.md).
+    apps = snap.get("apps") or []
+    family("app_instances", "gauge", "Running App instances, on the Catchment or elsewhere.")
+    for a in apps:
+        line("app_instances", a["catchment"], pond=a["name"], major=a["major"], place="catchment")
+        line("app_instances", a["elsewhere"], pond=a["name"], major=a["major"], place="elsewhere")
+    family("app_active", "gauge", "Active requests and WebSockets across an App's instances.")
+    for a in apps:
+        line("app_active", a["active"], pond=a["name"], major=a["major"])
+    for metric, key, text in (("app_cpu_share", "cpu", "Mean CPU of an App's instances, as a share of their cores."),
+                              ("app_memory_share", "memory", "Mean memory of an App's instances, as a share of their "
+                                                             "limit."),
+                              ("app_reported_load", "load", "Mean load an App's instances report themselves.")):
+        family(metric, "gauge", text)
+        for a in apps:
+            if a[key] is not None:
+                line(metric, round(a[key], 4), pond=a["name"], major=a["major"])
+    family("app_at_maximum", "gauge", "1 while an App is held at its maximum instances under pressure.")
+    for a in apps:
+        line("app_at_maximum", 1 if a["at_maximum"] else 0, pond=a["name"], major=a["major"])
+    family("app_instance_starts_total", "counter", "App instances started, by place.")
+    for name, major, place, n in snap.get("app_starts") or []:
+        line("app_instance_starts_total", n, pond=name, major=major,
+             place="elsewhere" if place == "remote" else "catchment")
+    family("app_instance_stops_total", "counter", "App instances stopped, by reason.")
+    for name, major, reason, n in snap.get("app_stops") or []:
+        line("app_instance_stops_total", n, pond=name, major=major, reason=reason)
 
     family("tap_queries_total", "counter", "Queries through a Tap.")
     for t in snap.get("taps", []):

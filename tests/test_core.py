@@ -106,3 +106,36 @@ def test_read_table_view_yields_to_own_table(tmp_path):
     assert rel.fetchall() == [(99,)]  # the relation reads the Source
     assert con.sql("SELECT id FROM event").fetchall() == [(1,)]  # own table untouched
     con.close()
+
+
+def test_importing_a_pond_evicts_only_its_own_modules(tmp_path):
+    """The import is isolated by evicting the Pond's own modules afterwards, so the next import reads its code
+    afresh. Evicting everything it added also dropped the libraries it imported first: numpy then refused to load
+    a second time, and another Ripple thread lost a module it was importing (attention FINDINGS 14)."""
+    import sys
+
+    from duckstring.core import import_pond_module, load_ripples
+
+    lib = "duckstring_test_lib_never_imported"
+    site = tmp_path / ".venv" / "lib" / "python3" / "site-packages"
+    site.mkdir(parents=True)
+    (site / f"{lib}.py").write_text("LOADS = []\nLOADS.append(1)\n")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "helper.py").write_text("FACTOR = 2\n")
+    (src / "pond.py").write_text(
+        f"import {lib}\nimport colorsys\nfrom helper import FACTOR\nfrom duckstring import ripple\n\n"
+        "@ripple\ndef out(pond):\n    pass\n"
+    )
+    sys.path.insert(0, str(site))
+    sys.modules.pop("colorsys", None)
+    try:
+        import_pond_module(tmp_path, "src/pond.py")
+        assert "colorsys" in sys.modules and lib in sys.modules  # libraries stay loaded, once
+        assert "helper" not in sys.modules and "pond" not in sys.modules  # the Pond's own code is evicted
+        first = sys.modules[lib]
+        assert [r["name"] for r in load_ripples(tmp_path).by_name.values()] == ["out"]
+        assert sys.modules[lib] is first and first.LOADS == [1]
+    finally:
+        sys.path.remove(str(site))
+        sys.modules.pop(lib, None)

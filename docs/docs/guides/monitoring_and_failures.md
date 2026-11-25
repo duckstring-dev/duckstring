@@ -52,7 +52,7 @@ A Ripple that reads a Source table that hasn't been published, because the Sourc
 
 ## Retries
 
-Two retry budgets, both 0 by default, control how hard Duckstring tries before marking a Pond failed:
+Two retry budgets control how hard Duckstring tries before marking a Pond failed. By default a failed Ripple is retried once within its run (`immediate_retries = 1`), and a failed run isn't retried when a Source updates (`source_retries = 0`):
 
 ```toml
 [pond]

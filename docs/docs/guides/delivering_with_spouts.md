@@ -70,6 +70,16 @@ Duckstring creates `analytics.priced_line` on first delivery, from the table's c
 
 A delivery is a single transaction, so readers of the database see the old rows or the new ones, never a mix. Delivery is exactly-once. The last delivered freshness is stored in a `_duckstring_egress` table in the same schema, updated in the same transaction as the data, so a delivery interrupted by a crash is rolled back and redone without duplicating anything.
 
+## Delivering to Records
+
+`records:` delivers into the Catchment's own [Records](records_and_media.md), the PostgreSQL its Apps keep their tables in, so an App can look up a Pond's output with its PostgreSQL driver:
+
+```bash
+duckstring spout add reports --table monthly_summary --to records:
+```
+
+The table lands in a schema named after the Pond's line, here `reports_v1.monthly_summary`, which every App can read and none can write. Delivery works as for Postgres above. The Pond's name must be lower-case letters, digits and underscores, starting with a letter or underscore. While Records are being [moved](records_and_media.md#moving-them), deliveries wait and then continue.
+
 ## Delivering to a DuckLake
 
 A [DuckLake](https://ducklake.select) keeps its tables as Parquet files with their metadata in a SQL database, so DuckDB, Spark and Trino can all read them. A DuckLake Spout delivers a Pond's tables into one:

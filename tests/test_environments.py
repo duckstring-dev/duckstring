@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from duckstring import environments as envs
-from duckstring.environments import ENV_MARKER, EnvError, ensure_env, env_hash, pond_env, python_for
+from duckstring.environments import EnvError, ensure_env, env_hash, pond_env, python_for
 
 pytestmark = pytest.mark.timeout(10)
 
@@ -31,9 +31,7 @@ def _write(base: Path, files: dict[str, str]) -> Path:
 
 def test_no_pyproject_is_the_default_environment(tmp_path):
     assert pond_env(tmp_path) is None
-    (tmp_path / ENV_MARKER).write_text("stale")
     assert ensure_env(tmp_path / "root", tmp_path) == Path(sys.executable)
-    assert not (tmp_path / ENV_MARKER).exists()
 
 
 def test_a_pyproject_needs_a_lock(tmp_path):
@@ -63,27 +61,38 @@ def test_duckstring_requirement_is_the_catchments_own():
 # ── where a deployed Pond's Duck runs ──────────────────────────────────────────
 
 
-def test_python_for_reads_the_marker(tmp_path):
-    source = tmp_path / "ponds" / "p" / "1.0.0"
-    source.mkdir(parents=True)
-    assert python_for(tmp_path, "ponds/p/1.0.0") == sys.executable  # default environment
+def test_python_for_follows_this_catchments_duckstring(tmp_path, monkeypatch):
+    """The environment a Duck spawned here runs in is the one for this Catchment's Duckstring, not the one recorded
+    at deploy: after an upgrade the recorded one still holds the old Duckstring, and its Ducks read data the new
+    one wrote (the attention showcase's wa_stories, FINDINGS 18). Not built yet: the Duck starts on this Python
+    and builds it, as a remote Duck does."""
+    source = _write(tmp_path / "ponds" / "p" / "1.0.0", {"pyproject.toml": "[project]\nname = 'p'\n",
+                                                         "uv.lock": "version = 1\n"})
+    assert python_for(tmp_path, "ponds/x/1.0.0") == sys.executable  # no such dir: the default environment
 
-    (source / ENV_MARKER).write_text("abc")
-    assert python_for(tmp_path, "ponds/p/1.0.0") == sys.executable  # not built here: fall back
+    def built(digest):
+        (tmp_path / "envs" / digest).mkdir(parents=True, exist_ok=True)
+        (tmp_path / "envs" / digest / envs._COMPLETE).write_text(digest)
+        return str(envs._python_in(tmp_path / "envs" / digest))
 
-    (tmp_path / "envs" / "abc").mkdir(parents=True)
-    (tmp_path / "envs" / "abc" / envs._COMPLETE).write_text("abc")
-    assert python_for(tmp_path, "ponds/p/1.0.0") == str(envs._python_in(tmp_path / "envs" / "abc"))
+    assert python_for(tmp_path, "ponds/p/1.0.0") == sys.executable  # not built here: the Duck builds it
+    old_python = built(env_hash(pond_env(source)))
+    assert python_for(tmp_path, "ponds/p/1.0.0") == old_python
+
+    monkeypatch.setattr(envs, "duckstring_requirement", lambda: ["duckstring==99.0.0"])  # the Catchment upgraded
+    assert python_for(tmp_path, "ponds/p/1.0.0") == sys.executable  # the old environment is never used
+    new_python = built(env_hash(pond_env(source)))
+    assert python_for(tmp_path, "ponds/p/1.0.0") == new_python != old_python
 
 
 def test_the_launcher_spawns_the_ducks_in_the_ponds_environment(tmp_path, monkeypatch):
     from duckstring.catchment import launcher as launcher_mod
 
-    source = tmp_path / "ponds" / "p" / "1.0.0"
-    source.mkdir(parents=True)
-    (source / ENV_MARKER).write_text("abc")
-    (tmp_path / "envs" / "abc").mkdir(parents=True)
-    (tmp_path / "envs" / "abc" / envs._COMPLETE).write_text("abc")
+    source = _write(tmp_path / "ponds" / "p" / "1.0.0", {"pyproject.toml": "[project]\nname = 'p'\n",
+                                                         "uv.lock": "version = 1\n"})
+    digest = env_hash(pond_env(source))
+    (tmp_path / "envs" / digest).mkdir(parents=True)
+    (tmp_path / "envs" / digest / envs._COMPLETE).write_text(digest)
 
     spawned = []
 
@@ -97,7 +106,7 @@ def test_the_launcher_spawns_the_ducks_in_the_ponds_environment(tmp_path, monkey
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", FakePopen)
     launcher = launcher_mod.SubprocessLauncher(tmp_path, "http://127.0.0.1:1", "token")
     launcher.ensure("p@1", "1.0.0", "ponds/p/1.0.0")
-    assert spawned[0][0] == str(envs._python_in(tmp_path / "envs" / "abc"))
+    assert spawned[0][0] == str(envs._python_in(tmp_path / "envs" / digest))
 
 
 # ── local runs re-execute under the Pond's .venv ───────────────────────────────

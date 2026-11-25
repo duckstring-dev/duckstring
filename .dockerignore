@@ -2,4 +2,3 @@
 *
 !dist
 !Dockerfile
-!docker/duckdb_extensions.py

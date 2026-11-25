@@ -118,15 +118,24 @@ def query(
     parquet_out: Optional[str] = typer.Option(None, "--parquet", metavar="FILENAME", help="Write the result as Parquet."),
     path: Optional[Path] = typer.Option(None, "--path", help="Directory for the file (default: ./ponds/{pond}/{table} "
                                                              "for a table, ./ponds/{pond} with --pond, else here)."),
+    at: Optional[str] = typer.Option(None, "--at", metavar="TIME", help="Read the Pond's tables as they stood at this "
+                                                                        "freshness (ISO 8601, UTC by default). "
+                                                                        "Needs --pond or POND.TABLE."),
+    since: Optional[str] = typer.Option(None, "--since", metavar="TIME", help="With --at: the change in the result "
+                                                                              "since this freshness, each row weighted "
+                                                                              "+1 or -1 in _duckstring_d."),
 ) -> None:
     """Run read-only SQL, and print or save the result.
 
     SQL runs across the catalog, where each Pond is a schema: `reports` for its served major, `reports_v2` for a
     given one. With --pond, it runs against that Pond's tables by bare name. A table, POND.TABLE, shows its
-    first 10 rows.
+    first 10 rows. --at reads one Pond's tables as they stood at a freshness, and --since the change from then.
     """
     from . import _http
 
+    if since and not at:
+        typer.echo("Error: --since needs --at: the change is from --since to --at.", err=True)
+        raise typer.Exit(1)
     cfg = _cfg(catchment)
     url = cfg["url"]
     out_name = csv_out or json_out or parquet_out
@@ -153,13 +162,22 @@ def query(
             payload["sql"] = sql
         if fmt:
             payload["format"] = fmt
+        if at:
+            payload["at"] = at
+        if since:
+            payload["since"] = since
         resp = _http.post(f"{url}/api/query", auth=cfg, json=payload)
+        if resp.headers.get("x-duckstring-warning"):
+            typer.echo(f"Warning: {resp.headers['x-duckstring-warning']}", err=True)
         default_dir = Path("ponds") / name / table_ref[1] if table_ref else Path("ponds") / name
         if not fmt:
             rows = resp.json() or []
             cols = list(rows[0].keys()) if rows else []
             _print_rows(cols, [list(r.values()) for r in rows[:limit]])
             return
+    elif at:
+        typer.echo("Error: --at reads one Pond: give --pond, or a table as POND.TABLE.", err=True)
+        raise typer.Exit(1)
     else:
         body = {"sql": sql, "limit": 0 if fmt else limit}
         if fmt:
@@ -226,6 +244,7 @@ def ls(
     pond: Optional[str] = typer.Argument(None, help="The Pond whose tables and Objects to list (default: every Pond)."),
     catchment: Optional[str] = _CATCHMENT,
     major: Optional[int] = _MAJOR,
+    as_json: bool = typer.Option(False, "--json", help="Print the tables and Objects as JSON."),
 ) -> None:
     """List each Pond's published tables and Objects, with whether each table is exposed and when it last changed."""
     from rich.console import Console
@@ -240,9 +259,10 @@ def ls(
     if pond is not None and not ponds:
         raise typer.BadParameter(f"no Pond named '{pond}' with published tables")
     console = Console()
-    if not ponds:
+    if not ponds and not as_json:
         console.print("[dim]No published tables.[/dim]")
         return
+    listing = []
     for p in ponds:
         m = major if major is not None else p["served_major"]
         try:
@@ -250,6 +270,15 @@ def ls(
         except typer.Exit:
             fr = {}
         changed = {**(fr.get("tables") or {}), **{f"\0{k}": v for k, v in (fr.get("objects") or {}).items()}}
+        if as_json:
+            listing.append({
+                "pond": p["name"], "major": m, "majors": p["majors"], "served_major": p["served_major"],
+                "tables": [{"name": t["table"], "exposed": bool(t.get("exposed")), "source": t.get("source"),
+                            "changed": (fr.get("tables") or {}).get(t["table"])}
+                           for t in sorted((t for t in p["tables"] if t["major"] == m), key=lambda t: t["table"])],
+                "objects": [{"name": k, "changed": v} for k, v in sorted((fr.get("objects") or {}).items())],
+            })
+            continue
         majors = ", ".join(str(x) for x in p["majors"])
         console.print(f"[bold]{p['name']}[/bold] v{m}  [dim](majors {majors}; served v{p['served_major']})[/dim]")
         table = Table(show_header=True, header_style="bold dim", box=None, padding=(0, 1))
@@ -262,6 +291,10 @@ def ls(
         for name, f in sorted((k[1:], v) for k, v in changed.items() if k.startswith("\0")):
             table.add_row(name, "Object", "", _short(f))
         console.print(table)
+    if as_json:
+        import json
+
+        typer.echo(json.dumps(listing, indent=2))
 
 
 def _short(iso: Optional[str]) -> str:

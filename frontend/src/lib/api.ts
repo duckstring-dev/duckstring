@@ -104,6 +104,8 @@ export interface RawPond {
   kind: string;
   is_draw: boolean; // a Pond Draw — fed by a duct from an upstream Catchment, not run by a Duck
   is_spout: boolean; // a Spout — egresses its source's output to an external system (run by the egress worker)
+  is_puddle?: boolean; // a Puddle node: a Source read from another Catchment as a Puddle (also is_draw)
+  external?: string[]; // declared external sources ([pond] external), drawn as nodes feeding it
   dbt: boolean; // a dbt-mode Pond — its Ripples are dbt models
   is_app?: boolean; // an App: an Outlet serving HTTP; its one Ripple (`serve`) is synthetic
   app?: RawApp | null;
@@ -150,7 +152,11 @@ export interface RawApp {
   path: string;
   deployed_at: string | null;
   idle_timeout_s: number;
-  instance: { id: number; started_at: string; ready_at: string | null; active: number; idle_at: string | null } | null;
+  records?: boolean; // declares Records (plans/records-and-media.md)
+  media?: boolean; // declares Media
+  data_state?: 'trial' | 'live' | 'retired' | null; // the line's, once it has started; null before
+  instance: { id: number; started_at: string; ready_at: string | null; active: number; idle_at: string | null;
+              count?: number; elsewhere?: number; pressed?: string | null } | null;
 }
 
 // A named Duck Pool — Catchment-level remote compute (plans/cloud-config.md). On DSC the S/M/L/XL
@@ -262,6 +268,7 @@ export interface RawPondRun {
   status: string;
   error: string | null;
   traceback: string | null;
+  superseded_by?: string | null; // a superseded Run: the freshness of the later Run that did its work
   // The run's Persist (the async mirror to the durable plane — a separate log item from the run, which
   // closes at local publish). null = no mirror recorded (no cloud / direct-to-plane / not landed yet).
   persist?: RawPersist | null;
@@ -373,6 +380,8 @@ export interface RawAppInstance {
   stopped_at: string | null;
   stop_reason: string | null;
   exit_code: number | null;
+  place?: 'catchment' | 'remote'; // where it ran (plans/app-scaling.md)
+  start_reason?: string | null; // why it started: a request, the warm floor, the scaler's reason
 }
 
 export async function fetchAppInstances(pond: string, limit = 50): Promise<RawAppInstance[]> {
@@ -986,11 +995,12 @@ function splitPond(pond: string): { name: string; major: number | undefined } {
   return { name: at === -1 ? pond : pond.slice(0, at), major: at === -1 ? undefined : Number(pond.slice(at + 1)) };
 }
 
-async function postData<T>(path: string, body: object): Promise<T> {
+async function postData<T>(path: string, body: object, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${apiBase()}${path}`, {
     method: 'POST',
     headers: authHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(body),
+    signal,
   });
   if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `${path} → ${res.status}`);
@@ -1079,6 +1089,20 @@ export async function fetchFreshness(pond: string, table: string): Promise<{ fre
   return getJSON(`/ponds/${encodeURIComponent(name)}/tables/${encodeURIComponent(table)}/runs?${params}`);
 }
 
+// What a Run reported with pond.report(): its own facts, and those of the upstream Runs whose data it read.
+export interface RunReports {
+  f: string;
+  reports: Record<string, unknown> | null;
+  upstream: { pond: string; f: string; reports: Record<string, unknown> }[];
+}
+
+export async function fetchRunReports(pond: string, f: string): Promise<RunReports> {
+  const { name, major } = splitPond(pond);
+  const params = new URLSearchParams({ f });
+  if (major !== undefined) params.set('major', String(major));
+  return getJSON(`/ponds/${encodeURIComponent(name)}/reports?${params}`);
+}
+
 // The full changelog history of one record (merge Trickle), for the per-row history view.
 export async function fetchHistory(pond: string, table: string, pk: Record<string, unknown>): Promise<PageResult> {
   const { name, major } = splitPond(pond);
@@ -1086,16 +1110,28 @@ export async function fetchHistory(pond: string, table: string, pk: Record<strin
 }
 
 // Total rows of a query — sizes the viewer's virtual scroll.
-export async function fetchCount(q: DataQuery): Promise<number> {
-  return postData<{ count: number }>('/query/count', queryBody(q)).then((d) => d.count);
+// A request of the data viewer's: ``queryId`` names it so /query/cancel can interrupt it on the Catchment, and
+// ``signal`` aborts it here.
+export interface Cancellable {
+  queryId?: string;
+  signal?: AbortSignal;
+}
+export async function fetchCount(q: DataQuery, c: Cancellable = {}): Promise<number> {
+  return postData<{ count: number }>('/query/count', { ...queryBody(q), query_id: c.queryId }, c.signal)
+    .then((d) => d.count);
+}
+// Stop the data viewer's query ``queryId`` on the Catchment (interrupt it, or refuse it if it hasn't started).
+export async function cancelQuery(queryId: string): Promise<void> {
+  await postData('/query/cancel', { query_id: queryId });
 }
 
 // A windowed read [offset, offset+limit) for the virtual grid. The server wraps the query in a subquery
 // with LIMIT/OFFSET; a static Parquet scan is deterministic, so windows are stable.
-export async function fetchPage(q: DataQuery & { limit: number; offset: number }): Promise<PageResult> {
+export async function fetchPage(q: DataQuery & { limit: number; offset: number }, c: Cancellable = {}): Promise<PageResult> {
   return postData<PageResult>('/query/page', {
     ...queryBody(q), order_by: q.orderBy, order_desc: q.orderDesc, limit: q.limit, offset: q.offset,
-  });
+    query_id: c.queryId,
+  }, c.signal);
 }
 
 export function fetchWindows(pond: string): Promise<RawWindow[]> {
@@ -1118,4 +1154,71 @@ export function addWindow(pond: string, body: AddWindowBody): Promise<void> {
 
 export function removeWindow(pond: string, name: string): Promise<void> {
   return postJSON(pondPath(pond, `windows/${encodeURIComponent(name)}/remove`));
+}
+
+// ─── Apps' Records and Media (plans/records-and-media.md) ─────────────────────
+
+export interface AppDataTable {
+  table: string;
+  kind: 'table' | 'view';
+  rows: number | null; // PostgreSQL's estimate; null before a table is first analysed
+}
+
+export interface AppDataLine {
+  name: string;
+  major: number;
+  records: boolean;
+  media: boolean;
+  state: 'trial' | 'live' | 'retired';
+  schema: string; // the Records schema, `{name}_v{major}` (records.{schema}.{table} in the query catalog)
+  tables?: AppDataTable[];
+  usage?: { files: number; bytes: number } | null;
+}
+
+export interface MediaFile {
+  path: string;
+  size: number;
+  modified: string | null;
+}
+
+export async function fetchAppData(): Promise<{ lines: AppDataLine[]; records_error: string | null }> {
+  return getJSON('/app-data');
+}
+
+const mediaPath = (name: string, major: number) => `/app-data/${encodeURIComponent(name)}/${major}/media`;
+
+export async function fetchMedia(name: string, major: number): Promise<MediaFile[]> {
+  return getJSON<{ files: MediaFile[] }>(mediaPath(name, major)).then((d) => d.files);
+}
+
+// Fetched with auth then handed to the browser as a blob (a plain link wouldn't carry the auth header).
+export async function downloadMedia(name: string, major: number, path: string): Promise<void> {
+  const res = await fetch(`${apiBase()}${mediaPath(name, major)}/file?path=${encodeURIComponent(path)}`,
+                          { headers: authHeaders() });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error(`download failed: ${res.status}`);
+  const href = URL.createObjectURL(await res.blob());
+  const a = document.createElement('a');
+  a.href = href;
+  a.download = path.split('/').pop() || 'file';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 10_000);
+}
+
+export async function uploadMedia(name: string, major: number, path: string, file: File): Promise<void> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${apiBase()}${mediaPath(name, major)}/file?path=${encodeURIComponent(path)}`,
+                          { method: 'POST', headers: authHeaders(), body: form });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `upload failed: ${res.status}`);
+}
+
+export async function deleteMedia(name: string, major: number, path: string): Promise<void> {
+  const res = await fetch(`${apiBase()}${mediaPath(name, major)}/file?path=${encodeURIComponent(path)}`,
+                          { method: 'DELETE', headers: authHeaders() });
+  if (res.status === 401) throw new UnauthorizedError();
+  if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `delete failed: ${res.status}`);
 }

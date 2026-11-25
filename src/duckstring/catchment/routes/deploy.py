@@ -43,7 +43,7 @@ def _selected_version(db, source_name: str, major: int) -> str | None:
         "SELECT pv.version FROM pond p "
         "JOIN pond_version pv ON pv.id = p.pond_version_id "
         "JOIN pond_name pn ON pn.id = p.pond_name_id "
-        "WHERE pn.name = ? AND p.major = ?",
+        "WHERE pn.name = ? AND p.major = ? AND p.is_puddle = 0",  # a Puddle stands outside version pins
         (source_name, major),
     ))
     return row[0] if row else None
@@ -108,18 +108,24 @@ def _flock_accept(value) -> str | None:
     return ",".join(dict.fromkeys(names))
 
 
+# A failed Ripple is retried once within its Pond Run unless pond.toml says otherwise (plans/showcase-fixes.md):
+# a transient error (a first-Run race, a flaky fetch) otherwise left a Pond failed until someone cleared it. Seeds a
+# line's budget at its first deploy; after that the Catchment's value is the operator's.
+DEFAULT_IMMEDIATE_RETRIES = 1
+
+
 def _pond_config(toml_path: Path) -> dict:
     """Extract the deploy-relevant config from pond.toml: sources, retries, kind, dbt_project. (Windows
     are operational config managed via `duckstring window`, not declared at deploy time.)"""
-    cfg = {"sources": {}, "immediate_retries": 0, "source_retries": 0, "kind": None, "dbt_project": None,
-           "duck_pool": None, "flock_mode": None, "flock_engine": None, "oom_policy": None,
-           "flock_accept": None, "app": None}
+    cfg = {"sources": {}, "immediate_retries": DEFAULT_IMMEDIATE_RETRIES, "source_retries": 0, "kind": None,
+           "dbt_project": None, "duck_pool": None, "flock_mode": None, "flock_engine": None, "oom_policy": None,
+           "flock_accept": None, "app": None, "external": None}
     if not toml_path.exists():
         return cfg
     info = _read_toml(toml_path.read_text(encoding="utf-8"))
     cfg["sources"] = info.get("sources", {})
     pond = info.get("pond", {})
-    cfg["immediate_retries"] = pond.get("immediate_retries", 0)
+    cfg["immediate_retries"] = pond.get("immediate_retries", DEFAULT_IMMEDIATE_RETRIES)
     cfg["source_retries"] = pond.get("source_retries", 0)
     cfg["kind"] = pond.get("type")
     cfg["dbt_project"] = pond.get("dbt_project")
@@ -129,6 +135,7 @@ def _pond_config(toml_path: Path) -> dict:
     # override in pond_duck coalesces over them. Validated loosely here (a pool name is Catchment-local
     # and may not exist yet — resolution falls back to the Catchment Duck, keeping pond.toml portable).
     cfg["duck_pool"] = pond.get("duck")  # pool name | 'catchment' | None
+    cfg["external"] = _external(pond.get("external"))
     flock = info.get("flock", {})
     cfg["flock_mode"] = _validate_choice(flock.get("mode"), ("off", "upgrade", "always"), "[flock] mode")
     cfg["flock_engine"] = flock.get("engine")
@@ -153,6 +160,21 @@ def _pond_config(toml_path: Path) -> dict:
             raise ValueError(f"an App serves HTTP and has no Ripples: remove {entry}, [ripples], [static] and "
                              "dbt_project from it, or make it a Pond")
     return cfg
+
+
+def _external(value) -> list[str] | None:
+    """``[pond] external``: names of where the Pond's data ultimately comes from, drawn on the canvas (visual
+    only; plans/records-and-media.md). ``app:name@major`` names an App line's Records and Media."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or any(not isinstance(v, str) or not v.strip() for v in value):
+        raise ValueError('pond.toml [pond] external: expected a list of names, such as ["GDELT events"]')
+    import re
+
+    for v in value:
+        if v.startswith("app:") and not re.fullmatch(r"app:[a-z_][a-z0-9_]*@[0-9]+", v):
+            raise ValueError(f"pond.toml [pond] external: {v!r}: an App's data is app:name@major, such as app:feedback@1")
+    return list(dict.fromkeys(v.strip() for v in value))
 
 
 def _validate_choice(value, choices, label):
@@ -231,7 +253,7 @@ APP_RIPPLE = "serve"
 def _prepare(root: Path, staging: Path, db_catalog: dict, *, app: dict | None = None) -> tuple[Path, dict]:
     """Build the staged Pond's environment and discover its Ripples in it. Runs in a worker thread. An App
     (``app``, its config) has no Ripples to discover, only its environment to build; its synthetic Ripple
-    carries ``[pond] memory``, what its process holds outside DuckDB, for its memory slots."""
+    carries ``[pond] memory``, the whole App's, DuckDB included."""
     from ...discover import discover
     from ...environments import ensure_env
 
@@ -265,6 +287,7 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
     major = int(version.split(".")[0])
     deployed_at = datetime.now(timezone.utc).isoformat()
     app_json = json.dumps(cfg["app"]) if cfg.get("app") is not None else None
+    external_json = json.dumps(cfg["external"]) if cfg.get("external") else None
     with db:
         db.execute("INSERT OR IGNORE INTO pond_name (name, kind) VALUES (?, ?)", (name, kind))
         db.execute("UPDATE pond_name SET kind = ? WHERE name = ?", (kind, name))
@@ -294,28 +317,30 @@ def _register(db, name, version, kind, source_path, cfg, ripples) -> None:
             db.execute(
                 "UPDATE pond_version SET source_path = ?, major = ?, immediate_retries = ?, "
                 "source_retries = ?, deployed_at = ?, duck_pool = ?, flock_mode = ?, flock_engine = ?, "
-                "oom_policy = ?, flock_accept = ?, dbt = ?, app = ? WHERE id = ?",
+                "oom_policy = ?, flock_accept = ?, dbt = ?, app = ?, external = ? WHERE id = ?",
                 (source_path, major, cfg["immediate_retries"], cfg["source_retries"], deployed_at,
                  cfg.get("duck_pool"), cfg.get("flock_mode"), cfg.get("flock_engine"),
                  cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project"))),
-                 app_json, pv_id),
+                 app_json, external_json, pv_id),
             )
         else:
             db.execute(
                 "INSERT INTO pond_version (pond_name_id, version, major, source_path, "
                 "immediate_retries, source_retries, deployed_at, duck_pool, flock_mode, flock_engine, "
-                "oom_policy, flock_accept, dbt, app) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "oom_policy, flock_accept, dbt, app, external) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (pn_id, version, major, source_path, cfg["immediate_retries"], cfg["source_retries"],
                  deployed_at, cfg.get("duck_pool"), cfg.get("flock_mode"), cfg.get("flock_engine"),
-                 cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project"))), app_json),
+                 cfg.get("oom_policy"), cfg.get("flock_accept"), int(bool(cfg.get("dbt_project"))), app_json,
+                 external_json),
             )
             (pv_id,) = first_row(db.execute(
                 "SELECT id FROM pond_version WHERE pond_name_id = ? AND version = ?", (pn_id, version)
             ))
 
         # Select this version for (pond_name, major) — the `pond` pointer.
+        # A new line publishes exact integers (migration 037); an existing one keeps what it had.
         db.execute(
-            "INSERT INTO pond (pond_name_id, major, pond_version_id) VALUES (?, ?, ?) "
+            "INSERT INTO pond (pond_name_id, major, pond_version_id, exact_ints) VALUES (?, ?, ?, 1) "
             "ON CONFLICT(pond_name_id, major) DO UPDATE SET pond_version_id = excluded.pond_version_id",
             (pn_id, major, pv_id),
         )
@@ -386,6 +411,7 @@ class _GitBody(BaseModel):
     git_ref: str
     repo_url: str
     force: bool = False
+    replace_puddle: bool = False  # see deploy
 
 
 @router.post("/deploy", dependencies=[auth.full])
@@ -411,6 +437,7 @@ async def deploy(request: Request):
             version = form["version"]
             kind = form.get("type", "pond")
             force = form.get("force") == "true"
+            replace_puddle = form.get("replace_puddle") == "true"
             archive_bytes = await form["pond"].read()
             try:
                 with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
@@ -420,6 +447,7 @@ async def deploy(request: Request):
         else:
             body = _GitBody(**(await request.json()))
             name, version, kind, force = body.name, body.version, body.type, body.force
+            replace_puddle = body.replace_puddle
             shutil.rmtree(staging)  # git clone wants to create the directory itself
             try:
                 subprocess.run(["git", "clone", body.repo_url, str(staging)], check=True, capture_output=True)
@@ -441,6 +469,18 @@ async def deploy(request: Request):
             raise HTTPException(status_code=409, detail=(
                 f"{name} {version} is already deployed. Bump the version, or pass --force to replace it in place "
                 "(a running Duck keeps the code it loaded until it restarts)."))
+        # A Puddle of this line (catchment/puddles.py) is replaced once the deployer confirms it (replace_puddle).
+        driver = getattr(request.app.state, "driver", None)
+        key = pond_key(name, int(version.split(".")[0]))
+        puddle = driver.puddle_status(key) if driver is not None else None
+        if puddle is not None and not replace_puddle:
+            raise HTTPException(status_code=409, detail=(
+                f"{key} is a Puddle here (from {puddle['owner']}'s definitions): deploying {name} replaces it once "
+                "confirmed (replace_puddle)."))
+        # Uses of APIs this Duckstring removed: named in the response, never refused (compat.py).
+        from ...compat import check_project
+
+        compat = [f.as_dict() for f in check_project(staging)]
         with locked(db):
             catalog = _source_schemas(db, cfg["sources"])
         try:
@@ -470,6 +510,8 @@ async def deploy(request: Request):
     # Discovery returns names for func and parents, the row shape dbt mode has always used.
     ripples = [{"func": r["name"], **r} for r in found["ripples"]]
     source_path = f"ponds/{name}/{version}"
+    if puddle is not None:
+        await asyncio.to_thread(driver.remove_puddle, key)
     try:
         with locked(db):
             _register(db, name, version, kind, source_path, cfg, ripples)
@@ -478,8 +520,8 @@ async def deploy(request: Request):
     with locked(db):
         _store_column_lineage(db, name, version, found["lineage"])
 
-    if getattr(request.app.state, "driver", None) is not None:
-        request.app.state.driver.reload()
+    if driver is not None:
+        driver.reload()
         # A fix redeploy auto-clears the failure on the deployed major line.
-        request.app.state.driver.clear_on_redeploy(name, int(version.split(".")[0]))
-    return {"ok": True}
+        driver.clear_on_redeploy(name, int(version.split(".")[0]))
+    return {"ok": True, "replaced_puddle": puddle is not None, "compat": compat}

@@ -758,7 +758,8 @@ def test_refresh_at_is_met_by_an_inlet_run_stamped_when_it_runs(tmp_path, monkey
     key = "transactions@1"
 
     T = clock[0] - timedelta(seconds=5)  # an earlier demand epoch
-    assert client.post("/api/ponds/transactions/refresh", params={"at": T.isoformat()}).json() == {"ok": True}
+    assert client.post("/api/ponds/transactions/refresh", params={"at": T.isoformat()}).json() == {
+        "ok": True, "requested": T.isoformat()}
     assert d.state.pond_states[key].start_f == clock[0]
     _complete_run(d, key)
 
@@ -883,6 +884,29 @@ def test_repair_releases_children_as_parents_finish(tmp_path):
     assert d._repair is None  # the whole scope rebuilt
 
 
+def test_a_stalled_repair_runs_its_failed_steps_again_when_asked(tmp_path):
+    """A repair step that failed (a Rebuild that ran out of disk, in the attention showcase) left the repair "in
+    progress" for good: its scope waited as repairing, and another repair was refused. Asking again now retries the
+    failed steps; a repair still making progress is refused as before."""
+    d = _diamond(tmp_path)
+    d.repair([("A", 1)], downstream=True)
+    f = d.state.pond_states["A@1"].start_f.isoformat()
+    d.on_event("A@1", {"kind": "failed", "f": f, "ripple": "r1", "status": "failed", "error": "No space left"})
+    assert d.state.pond_states["A@1"].is_failed
+    again = d.repair([("A", 1)], downstream=True)
+    assert again["retried"] == ["A@1"]
+    ps = d.state.pond_states["A@1"]
+    assert not ps.is_failed and ps.repairing and ps.start_f > ps.end_f  # rebuilding again
+    with pytest.raises(ValueError, match="in progress"):
+        d.repair([("A", 1)], downstream=True)  # nothing has failed: refused
+    d._advance_repair("A@1", _now())
+    assert d._repair["released"] >= {"B@1", "C@1"}
+    # A failed step runs again while another is still going (B failed, C still rebuilding).
+    d.state.pond_states["B@1"].is_failed = True
+    assert d.repair([("A", 1)], downstream=True)["retried"] == ["B@1"]
+    assert not d.state.pond_states["B@1"].is_failed and "C@1" in d._repair["released"]
+
+
 # ─── Draw versions: [sources] pins on a drawn Pond check against the upstream's real version ──────────
 
 
@@ -943,3 +967,14 @@ def test_poller_records_the_upstream_version(tmp_path):
     asyncio.run(poll_once(d, tmp_path, client))
     asyncio.run(client.aclose())
     assert _draw_version(d) == "1.6.2"
+
+
+def test_a_restart_resumes_the_repair_it_interrupted(tmp_path):
+    """The repair plan lived only in memory: after a restart its Ponds stayed marked repairing, blocked for good."""
+    d = _diamond(tmp_path)
+    d.repair([("A", 1)], downstream=True)
+    d._advance_repair("A@1", _now())  # A rebuilt; B and C under way, D waiting
+    d2 = Driver(d.db, tmp_path, "http://x", NoopLauncher())
+    assert d2._repair is not None and d2._repair["scope"] == {"B@1", "C@1", "D@1"}
+    assert d2._repair["released"] == {"B@1", "C@1"}
+    assert not d2.state.pond_states["A@1"].repairing

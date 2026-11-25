@@ -47,7 +47,7 @@ Starts a builder on a source table.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `ref` | `str` | | `"source.table"`. Any published table works: an append or merge Trickle, or a plain table. To use one of this Pond's own tables, write it with a terminal earlier in the same chain (see [Chaining](#chaining)). |
+| `ref` | `str` | | `"source.table"`: any published table, an append or merge Trickle or a plain table. Or `"table"`, one of this Pond's own tables that a parent Ripple writes. Within one Ripple, chain from the terminal that writes it instead (see [Chaining](#chaining)). |
 | `p` | `float` | `0.3` | Change-fraction threshold. If this source's changes touch more than `p` of its current rows, the builder recomputes in full for that run, since filtering by key no longer saves work. `1.0` disables the check and skips the row count it needs. |
 
 A plain table that hasn't changed since the last run contributes no changes and costs nothing. One that has changed forces a full recompute, so for large, frequently changing inputs it's worth making the upstream table a Trickle. A plain table counts as unchanged when the Source didn't republish it: either it didn't run, or it wrote the table with `write_table(..., if_changed=True)` and the content was the same.
@@ -109,7 +109,7 @@ Keeps rows matching a SQL boolean expression.
 
 | Parameter | Type | Description |
 |---|---|---|
-| `predicate` | `str` | A SQL expression over the columns available at this point: source columns (`s0.col`, or `alias.col`) and any columns added by an earlier `.mutate()`. |
+| `predicate` | `str` | A SQL expression over the columns available at this point: source columns and any columns added by an earlier `.mutate()`. A source column can be named bare (`col`) when only one source has it; otherwise qualify it as `alias.col` (`s0.col` for the first source). |
 
 ### `.mutate`
 
@@ -117,20 +117,20 @@ Keeps rows matching a SQL boolean expression.
 .mutate(**columns) -> TrickleBuilder
 ```
 
-Adds computed columns and keeps all existing ones. Each keyword is a column name and a SQL expression. A name matching an existing column replaces it.
+Adds computed columns and keeps all existing ones. Each keyword is a column name and a SQL expression, naming source columns as for `.filter()`. A name matching an existing column replaces it.
 
 Columns in one call are computed side by side and can't refer to each other; chain another `.mutate()` to build on a new column. A computed column can be used as the output `pk` but not as a join key.
 
 ```python
 (
     pond.trickle("orders.order_line")
-    .mutate(order_date="CAST(s0.ordered_at AS DATE)")
+    .mutate(order_date="CAST(ordered_at AS DATE)")
     .filter("order_date >= DATE '2026-01-01'")
     .merge("recent_orders", pk="order_id")
 )
 ```
 
-**Raises** `BuildError` for a column name starting with `_duckstring_`.
+**Raises** `BuildError` for a column name starting with `_duckstring_`, and (from `.filter()` too) for a bare name more than one source has.
 
 ### `.select`
 
@@ -275,7 +275,7 @@ b.sql(t.group_by("product_id").agg(median_revenue=t.revenue.median())).merge("me
 
 ```python
 .merge(name, *, pk=None, ivm=True, key_filter=True, retain_t=None, retain_n=None,
-       cluster_by=None, interleave=True, cluster_bits=None) -> TrickleBuilder
+       compact_threshold=None, cluster_by=None, interleave=True, cluster_bits=None) -> TrickleBuilder
 ```
 
 Computes the result and writes its changes to the merge Trickle `name`.
@@ -287,6 +287,7 @@ Computes the result and writes its changes to the merge Trickle `name`.
 | `ivm` | `bool` | `True` | `False` ignores source changes and recomputes the whole output each run, recording the difference. |
 | `key_filter` | `bool` | `True` | `False` stops changed keys being passed down into an operand that is itself a join. No effect with `ivm=False`. |
 | `retain_t`, `retain_n` | | `None` | Change-log retention, as for [`merge_table`](trickle_io.md#merge_table). |
+| `compact_threshold` | `int` (bytes) | `None` | The size the change log must reach before it is folded into the output's base, as for [`merge_table`](trickle_io.md#merge_table). |
 | `cluster_by`, `interleave`, `cluster_bits` | | | How the output's compacted base is ordered, as for [`merge_table`](trickle_io.md#merge_table). |
 
 Only change `ivm` or `key_filter` after measuring that the default is slower for a particular build.
@@ -298,29 +299,31 @@ Only change `ivm` or `key_filter` after measuring that the default is slower for
 ### `.append`
 
 ```python
-.append(name, *, pk=None, fail_on_conflict=True, log_drops=True, ivm=True, key_filter=True,
+.append(name, *, pk=None, on_conflict="skip_check", log_drops=True, ivm=True, key_filter=True,
         retain_t=None, retain_n=None) -> TrickleBuilder
 ```
 
 Computes the result and adds its new rows to the append Trickle `name`. Suited to transformations whose output rows are only ever added, such as an append-only fact table joined to dimensions.
 
-A removed output row, or an added row whose `pk` is already in the table with different values, is a conflict: it would mean changing history, which an append table can't do. A row identical to one already in the table is skipped.
+A removed output row, or an added row whose `pk` is already in the table with different values, is a conflict: it would mean changing history, which an append table can't do.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `name` | `str` | | Output table. |
-| `pk` | `str` or list of `str` | `None` | The output's primary key. Needed to detect conflicts on changed rows. |
-| `fail_on_conflict` | `bool` | `True` | Raise on a conflict, before writing anything. `False` drops conflicting rows and keeps history as it was. |
-| `log_drops` | `bool` | `True` | With `fail_on_conflict=False`, record dropped rows in a published `{name}__droplog` table (your columns plus `_duckstring_d` and `_duckstring_f`). |
+| `pk` | `str` or list of `str` | `None` | The output's primary key. Without one, the whole row is the key. |
+| `on_conflict` | `str` | `"skip_check"` | `"skip_check"` appends each run's new rows without reading the table. A removed row is left out, and with `pk` set so is the row that replaced it, so existing rows keep their values. `"keep_prior"` also drops any new row whose key is already in the table. `"fail"` raises on a conflict, before writing anything. |
+| `log_drops` | `bool` | `True` | Record dropped rows that carried a change (removed rows, and rows whose key is already in the table with different values) in a published `{name}__droplog` table (your columns plus `_duckstring_d` and `_duckstring_f`). |
 | `ivm`, `key_filter`, `retain_t`, `retain_n` | | | As for `.merge()`. |
 
-Two rows with the same `pk` and different values within one run always raise.
+When the builder recomputes the whole result (see How it computes), it adds only the rows the table doesn't hold yet: by `pk`, or without one, copy for copy, so identical rows that are separate events are kept. Under `"skip_check"`, a key the table already has that arrives again with no change beside it is appended on an incremental run and left out on a recompute.
 
-When the output `pk` is the first source's own key passed through unchanged (`s0.col`), and both `fail_on_conflict` and `log_drops` are `False`, changes to the other sources can't affect the result. The builder then only joins the first source's new rows against the others' current state, which is much cheaper when a joined table changes a lot.
+Under `"keep_prior"` and `"fail"`, a row identical to one already in the table is skipped, and two rows with the same `pk` and different values within one run raise.
+
+When the output `pk` is the first source's own key passed through unchanged (`s0.col`), with `on_conflict="keep_prior"` and `log_drops=False`, changes to the other sources can't affect the result. The builder then only joins the first source's new rows against the others' current state, which is much cheaper when a joined table changes a lot.
 
 **Returns** a builder rooted at the written table.
 
-**Raises** `BuildError` after `.aggregate()`, and `DeltaError` on a conflict when `fail_on_conflict=True`.
+**Raises** `BuildError` after `.aggregate()`, and `DeltaError` on a conflict under `on_conflict="fail"`.
 
 ### `.count`
 
@@ -360,13 +363,13 @@ The builder a terminal returns is rooted at the table it just wrote, so the chai
 )
 ```
 
-When only `stores.store` changes, the second join reuses `priced_line` instead of recomputing the first join. Chaining is also the only way to join on a column that only exists after an earlier join. The steps run one after another; split them into separate Ripples if you want them to run in parallel.
+When only `stores.store` changes, the second join reuses `priced_line` instead of recomputing the first join. Chaining is also how to join on a column that only exists after an earlier join. The steps run one after another. To run them in parallel, write `priced_line` in one Ripple and start another from it with `pond.trickle("priced_line")`, listing the first Ripple in its `parents`.
 
-A chained builder can only continue as the left-hand side of a join, not be passed as the right-hand side.
+A chained builder can only continue as the left-hand side of a join, not be passed as the right-hand side. A table written by a parent Ripple, started with `pond.trickle("table")`, can be either.
 
 ## Errors
 
 | Exception | Import from | Raised when |
 |---|---|---|
 | `BuildError` | `duckstring.trickle.builder` | The builder is used incorrectly, such as a missing `pk`, an ambiguous join key, or a method used where it isn't allowed. Raised when the terminal is called or when the method is called, whichever detects it first. A subclass of `ValueError`. |
-| `DeltaError` | `duckstring.trickle.io` | An `.append()` conflict with `fail_on_conflict=True`. |
+| `DeltaError` | `duckstring.trickle.io` | An `.append()` conflict under `on_conflict="fail"`. |

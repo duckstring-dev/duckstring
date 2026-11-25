@@ -35,6 +35,7 @@ from pathlib import Path
 _SKIP_SUFFIXES = (".db-wal", ".db-shm")  # subsumed by the SQLite snapshot
 _SKIP_NAMES = {"secrets.json", "secrets.json.tmp", "google-credentials.json"}  # secrets never travel in a bundle
 _TIER1 = "duck.db"  # the frequent small Tier-1 object
+_MEDIA_IN_BACKUP = 256 * 10**6  # Media bytes the in-memory state bundle takes at most
 _TIER2 = "state.tar"  # the on-shutdown warm bundle (ledgers + registries + a duck.db snapshot)
 
 
@@ -108,13 +109,42 @@ def checkpoint_full(root: Path, backup_uri: str | None, driver=None) -> bool:
 
             logging.getLogger(__name__).warning("Apps' state left out of the state checkpoint: %s", exc)
 
+    # Records (plans/records-and-media.md): a pg_dump in place of the cluster's files, which can't be copied while it
+    # runs. Media goes in up to _MEDIA_IN_BACKUP bytes: this bundle is built in memory, so more is left out (keep
+    # Media in an object store on a host whose disk doesn't last).
+    import tempfile
+
+    records_tmp = tempfile.mkdtemp(prefix="duckstring-records-")
+    records_dump = Path(records_tmp) / "records.dump"
+    skip_media = False
+    if driver is not None:
+        try:
+            if getattr(driver, "records", None) is not None and driver.records.dump(records_dump):
+                app_files = [*app_files, (records_dump, "records/records.dump")]
+        except Exception as exc:
+            import logging
+
+            logging.getLogger(__name__).warning("Records left out of the state checkpoint: %s", exc)
+    media_dir = root / "media"
+    if media_dir.is_dir():
+        size = sum(f.stat().st_size for f in media_dir.rglob("*") if f.is_file())
+        if size > _MEDIA_IN_BACKUP:
+            import logging
+
+            skip_media = True
+            logging.getLogger(__name__).warning(
+                "Media (%d MB) left out of the state checkpoint, which holds at most %d MB of it: keep Media in an "
+                "object store (duckstring catchment media --use s3://...) where the disk doesn't last",
+                size // 10**6, _MEDIA_IN_BACKUP // 10**6)
+
     try:
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w") as tar:
             for path in sorted(root.rglob("*")):
                 if not path.is_file() or path.name.endswith(_SKIP_SUFFIXES) or path.name in _SKIP_NAMES:
                     continue
-                if is_app_file(path.relative_to(root).parts):
+                rel = path.relative_to(root).parts
+                if is_app_file(rel) or rel[:1] == ("records",) or (skip_media and rel[:1] == ("media",)):
                     continue
                 arc = path.relative_to(root).as_posix()
                 if path.suffix == ".db":  # SQLite → consistent snapshot
@@ -136,10 +166,11 @@ def checkpoint_full(root: Path, backup_uri: str | None, driver=None) -> bool:
         logging.getLogger(__name__).warning("Tier-2 state checkpoint failed: %s", exc)
         return False
     finally:
-        if app_tmp is not None:
-            import shutil
+        import shutil
 
+        if app_tmp is not None:
             shutil.rmtree(app_tmp, ignore_errors=True)
+        shutil.rmtree(records_tmp, ignore_errors=True)
 
 
 def _pull_state(storage, root: Path) -> bool:

@@ -16,6 +16,7 @@ duckstring --install-completion   # enable shell completion
 | Command | Purpose |
 |---|---|
 | [`status`](data.md#status) | Every Pond's state, freshness and recurring Refreshes. |
+| [`runs`](data.md#runs) | Recent Pond Runs and their Ripple Runs, with errors. |
 | [`query`](data.md#query) | Read-only SQL across the catalog, or a table's first rows. |
 | [`get`](data.md#get) | Download a table's files or an Object. |
 | [`refresh`](refresh.md) | Refresh a Pond now, every N, at set times, continuously, or when it's queried (Taps). |
@@ -28,7 +29,8 @@ duckstring --install-completion   # enable shell completion
 | [`spout`](spout.md) | Deliver tables to external systems. |
 | [`secret`](secret.md) | The Catchment's write-only secret store. |
 | [`alert`](alert.md) | Failure and freshness notifications. |
-| [`app`](app.md) | An App's instances and their output, and restarting it. |
+| [`app`](app.md) | An App's instances, output and scaling, and its data across major versions. |
+| [`install`](install.md) | PostgreSQL, DuckDB's extensions and Duckstring's extras for this machine. |
 
 Tables and Objects are named `POND.NAME`, as in the Python API, for example `reports.monthly_summary`.
 
@@ -47,14 +49,31 @@ Commands that act on one Pond take:
 
 [`control`](control.md#choosing-ponds) also accepts several Ponds, each as `name` or `name@major`.
 
-## Live status
+## Following a request
 
-`refresh now`, `control wake` and `control force` open the live status view after sending the request, and close it once the Pond settles (idle, failed, killed or blocked). `refresh add` opens it and leaves it open until you press `Ctrl+C`; the recurring Refresh keeps going after the view closes.
+`refresh now`, `control wake` and `control force` follow the request they send. In a terminal they open the live status view and close it once the Pond settles (idle, failed, killed or blocked); `refresh add` opens it and leaves it open until you press `Ctrl+C`, and the recurring Refresh keeps going after the view closes.
+
+When the output isn't a terminal (a script, a pipe, an agent), the one-shot commands wait for the outcome instead, as with `--wait`, and `refresh add` and `status` print once and exit.
 
 | Option | Description |
 |---|---|
-| `--silent` | Send the request without opening the status view. |
+| `--silent` | Send the request and return. |
 | `--watch` | Keep the view open after the Pond settles (one-shot commands only). |
+| `--wait` | Wait until the Pond has done what was asked and settled, then exit with its outcome (below). |
+| `--timeout` | With `--wait`: give up after this [duration](../formats.md#durations), such as `10m`. Without it, waiting has no limit. |
+| `--view` | Open the live status view even when the output isn't a terminal. |
+
+`control rebuild` and `pond deploy` also take `--wait` and `--timeout`. They change what the next Run does rather than starting one, so they wait for that Run: something has to ask for it, such as a recurring Refresh or a `refresh now`.
+
+A command that waits exits with:
+
+| Code | Meaning |
+|---|---|
+| `0` | The Pond reached what was asked, and every Run it caused, upstream included, succeeded. It prints the Pond's new freshness. |
+| `1` | A Run it caused failed, or the Pond is failed, killed or blocked. It prints each failed Run's Pond, freshness, Ripple and error. |
+| `2` | `--timeout` passed first. |
+
+`duckstring runs POND --ripples` then shows the Runs in detail.
 
 ## Access levels
 

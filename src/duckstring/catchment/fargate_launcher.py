@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import os
 
-from ..keys import split_pond_key
+from ..keys import split_pond_key, worker_module
 
 log = logging.getLogger("duckstring.fargate")
 
@@ -179,7 +179,7 @@ class FargateLauncher:
         cpu = str(pool.get("cpu") or dc.get("cpu") or os.environ.get("DUCKSTRING_FARGATE_CPU") or 1024)
         memory = str(pool.get("memory") or dc.get("memory") or os.environ.get("DUCKSTRING_FARGATE_MEMORY") or 4096)
         command = [
-            "duckstring.duck", "--pond", name, "--major", str(major), "--version", version,
+            worker_module(duck), "--pond", name, "--major", str(major), "--version", version,
             "--catchment", self.remote_base_url, f"--token={self.token}",
             "--root", _REMOTE_ROOT, "--source-path", source_path, f"--data-root={self.data_root or ''}",
         ]

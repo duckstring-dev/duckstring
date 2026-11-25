@@ -12,10 +12,12 @@ Inside the App's process, :func:`pond` gives a read-only handle on its Sources::
     rel = pond.read_table("reports.monthly_summary")
 
 The process gets ``PORT`` (where to listen), ``DUCKSTRING_APP_PATH`` (the base path it serves under),
-``DUCKSTRING_APP_STATE`` (a durable directory, with ``state = "local"``) and ``DUCKSTRING_APP`` (JSON describing
-the App, read by :func:`pond`). Requests arrive with the base path removed and named in ``X-Forwarded-Prefix``
-(the convention ``uvicorn --root-path`` and WSGI servers follow), or, with ``strip_path = false``, with the full
-path (what Streamlit's ``baseUrlPath`` and Dash's path prefixes expect).
+``DUCKSTRING_APP_STATE`` (a durable directory, with ``state = "local"``), ``DUCKSTRING_RECORDS_URL`` and
+``DUCKSTRING_MEDIA_URL`` (its Records and Media, with ``records``/``media = true``; :func:`records_url`,
+:func:`media`) and ``DUCKSTRING_APP`` (JSON describing the App, read by :func:`pond`). Requests arrive with the
+base path removed and named in ``X-Forwarded-Prefix`` (the convention ``uvicorn --root-path`` and WSGI servers
+follow), or, with ``strip_path = false``, with the full path (what Streamlit's ``baseUrlPath`` and Dash's path
+prefixes expect).
 """
 
 from __future__ import annotations
@@ -29,6 +31,11 @@ from itertools import count
 from pathlib import Path
 
 ENV = "DUCKSTRING_APP"  # the JSON the runtime hands an App's process, read by pond()
+RECORDS_ENV = "DUCKSTRING_RECORDS_URL"  # the line's Records: a libpq URL signing its role in
+MEDIA_ENV = "DUCKSTRING_MEDIA_URL"  # the line's Media: a local directory or an object-store URI
+# An App with Records names a PostgreSQL schema and role ``{name}_v{major}``: a lower-case identifier that never
+# needs quoting, well inside PostgreSQL's 63-byte limit.
+RECORDS_NAME = re.compile(r"[a-z_][a-z0-9_]{0,47}")
 
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 DEFAULT_IDLE_TIMEOUT = "30m"
@@ -61,7 +68,9 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
     command = section.get("command")
     if command is not None and (not isinstance(command, str) or not command.strip()):
         raise ValueError("pond.toml [app] command: expected a command line")
-    unknown = set(section) - {"command", "static", "idle_timeout", "state", "health", "strip_path", "download"}
+    unknown = set(section) - {"command", "static", "idle_timeout", "state", "health", "strip_path", "download",
+                              "records", "media", "migrate", "instances", "min_instances", "concurrency",
+                              "connections", "stop_grace", "scale"}
     if unknown:
         raise ValueError(f"pond.toml [app]: unknown {', '.join(sorted(unknown))}")
     static = section.get("static")
@@ -82,13 +91,38 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
     strip_path = section.get("strip_path", True)
     if not isinstance(strip_path, bool):
         raise ValueError("pond.toml [app] strip_path: expected true or false")
+    # Records and Media (plans/records-and-media.md): the line's tables in the Catchment's PostgreSQL and its
+    # files, which Ponds and other Apps can read.
+    records, media = section.get("records", False), section.get("media", False)
+    for key, value in (("records", records), ("media", media)):
+        if not isinstance(value, bool):
+            raise ValueError(f"pond.toml [app] {key}: expected true or false")
+    if records:
+        if pond.get("name") is not None and not RECORDS_NAME.fullmatch(str(pond["name"])):
+            raise ValueError("pond.toml [app] records: an App with Records needs a name of lower-case letters, digits "
+                             "and underscores, starting with a letter or underscore, at most 48 characters")
+    migrate = section.get("migrate")
+    if migrate is not None:
+        if not isinstance(migrate, str) or not migrate.strip():
+            raise ValueError("pond.toml [app] migrate: expected a command line")
+        if not (records or media):
+            raise ValueError("pond.toml [app] migrate: only an App with Records or Media is migrated")
+    # Several instances on the Catchment's machine (plans/records-and-media.md): shared data lives in Records and
+    # Media, so a private state directory, which concurrent processes would share, is refused.
+    instances = section.get("instances", 1)
+    if isinstance(instances, bool) or not isinstance(instances, int) or not 1 <= instances <= 64:
+        raise ValueError("pond.toml [app] instances: expected a number from 1 to 64")
+    if instances > 1 and state == "local":
+        raise ValueError('pond.toml [app] instances: several instances can\'t share a private state directory; set '
+                         'state = "none" and keep shared data in Records and Media')
+    scaling = _scaling(section, instances)
     health = section.get("health")
     if health is not None and (not isinstance(health, str) or not health.startswith("/")):
         raise ValueError('pond.toml [app] health: expected a path starting with "/"')
     from .core import parse_size
 
     try:
-        memory = parse_size(pond.get("memory"))  # held outside DuckDB: sizes the App's memory slots
+        memory = parse_size(pond.get("memory"))  # the whole App's, DuckDB included
     except ValueError as exc:
         raise ValueError(f"pond.toml [pond] memory: {exc}") from exc
     return {
@@ -100,12 +134,86 @@ def app_config(info: dict, source_dir: Path | None = None) -> dict | None:
         "health": health,
         "strip_path": strip_path,
         "download": download,
+        "records": records,
+        "media": media,
+        "migrate": migrate,
+        "instances": instances,
+        **scaling,
     }
+
+
+# Scaling (plans/app-scaling.md): the defaults of what `[app]` and `[app.scale]` leave out. An App deployed before
+# these existed has none of them in its stored configuration, so readers go through scale_settings().
+DEFAULT_CONCURRENCY = 4
+DEFAULT_STOP_GRACE_S = 10.0
+SCALE_DEFAULTS = {"requests": 0.7, "cpu": 0.7, "memory": 0.8, "load": 0.7, "after_s": 10.0, "socket_idle_s": 5.0}
+
+
+def scale_settings(cfg: dict) -> dict:
+    """An App's scaling settings with every default filled in: ``instances`` (the maximum), ``min_instances``,
+    ``concurrency``, ``connections``, ``stop_grace_s`` and ``scale`` (the default scaler's thresholds)."""
+    concurrency = cfg.get("concurrency") or DEFAULT_CONCURRENCY
+    return {
+        "instances": cfg.get("instances", 1),
+        "min_instances": cfg.get("min_instances", 0),
+        "concurrency": concurrency,
+        "connections": cfg["connections"] if cfg.get("connections") is not None else concurrency,
+        "stop_grace_s": cfg.get("stop_grace_s") or DEFAULT_STOP_GRACE_S,
+        "scale": {**SCALE_DEFAULTS, **(cfg.get("scale") or {})},
+    }
+
+
+def _scaling(section: dict, instances: int) -> dict:
+    def count(key: str, low: int, high: int, default):
+        value = section.get(key, default)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise ValueError(f"pond.toml [app] {key}: expected a number from {low} to {high}")
+        return value
+
+    min_instances = count("min_instances", 0, 64, 0)
+    if min_instances > instances:
+        raise ValueError(f"pond.toml [app] min_instances: {min_instances} is more than instances ({instances})")
+    concurrency = count("concurrency", 1, 10_000, DEFAULT_CONCURRENCY)
+    connections = count("connections", 0, 10_000, None)
+    stop_grace_s = _duration_s(section.get("stop_grace", "10s"), "[app] stop_grace")
+    scale = section.get("scale", {})
+    if not isinstance(scale, dict):
+        raise ValueError("pond.toml [app.scale]: expected a table")
+    unknown = set(scale) - {"requests", "cpu", "memory", "load", "after", "socket_idle"}
+    if unknown:
+        raise ValueError(f"pond.toml [app.scale]: unknown {', '.join(sorted(unknown))}")
+    out: dict = {}
+    for key in ("requests", "cpu", "memory", "load"):
+        if key in scale:
+            value = scale[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
+                raise ValueError(f"pond.toml [app.scale] {key}: expected a share above 0, at most 1 (0.7 is 70%)")
+            out[key] = float(value)
+    for key in ("after", "socket_idle"):
+        if key in scale:
+            out[f"{key}_s"] = _duration_s(scale[key], f"[app.scale] {key}")
+    return {"min_instances": min_instances, "concurrency": concurrency, "connections": connections,
+            "stop_grace_s": stop_grace_s, "scale": out}
 
 
 def base_path(name: str, major: int) -> str:
     """The path an App's major line serves under, without a trailing slash."""
     return f"/apps/{name}/v{major}"
+
+
+def static_file(static_dir: Path, path: str) -> Path | None:
+    """The file under an App's ``static`` directory that ``path`` (below the App's base path) names, its
+    ``index.html`` for a directory. ``None`` when there is none, or the path leads out of the directory. Used by the
+    Catchment's forwarding and by ``pond run``, so a path serves the same file in both."""
+    base = Path(static_dir).resolve()
+    target = (base / path).resolve()
+    if target != base and base not in target.parents:
+        return None
+    if target.is_dir():
+        target = target / "index.html"
+    return target if target.is_file() else None
 
 
 def app_stop_message(reason: str | None, exit_code: int | None) -> str:
@@ -151,22 +259,26 @@ def _pond_class():
             return source, name
 
         def freshness(self) -> dict:
-            """The App's freshness and each Source's, as the Catchment last reported them:
-            ``{"freshness": datetime | None, "sources": {name: datetime}}``. Empty outside a Catchment."""
+            """The App's freshness and each Source's, as the Catchment last reported them, and when each Source's
+            data last changed: ``{"freshness": datetime | None, "sources": {name: datetime}, "changed": {name:
+            datetime}}``. A Source's freshness moves on every Run, including Runs that changed nothing; ``changed``
+            moves only when its data did. Empty outside a Catchment."""
             from datetime import datetime
 
+            empty = {"freshness": None, "sources": {}, "changed": {}}
             if self._runtime is None:
-                return {"freshness": None, "sources": {}}
+                return empty
             try:
                 raw = json.loads((self._runtime / "freshness.json").read_text())
             except (OSError, ValueError):
-                return {"freshness": None, "sources": {}}
+                return empty
 
             def when(iso):
                 return datetime.fromisoformat(iso) if iso else None
 
             return {"freshness": when(raw.get("freshness")),
-                    "sources": {k: when(v) for k, v in raw.get("sources", {}).items()}}
+                    "sources": {k: when(v) for k, v in raw.get("sources", {}).items()},
+                    "changed": {k: when(v) for k, v in raw.get("changed", {}).items()}}
 
         @contextmanager
         def hold(self):
@@ -217,6 +329,9 @@ def _pond_class():
         def skip(self) -> None:
             raise TypeError("an App has no Pond Run to skip")
 
+        def report(self, reports: dict) -> None:
+            raise TypeError("an App has no Pond Run to report on")
+
     return AppPond
 
 
@@ -227,13 +342,107 @@ _hold_ids = count(1)
 
 def pond():
     """The App's read-only Pond handle: :meth:`~duckstring.Pond.read_table`, ``count_table``, ``read_object``,
-    ``object_path`` and ``con`` over its declared Sources, at their newest published data,
+    ``object_path``, ``reports`` and ``con`` over its declared Sources, at their newest published data,
     plus ``freshness()`` and ``hold()``. One handle per process; each thread gets its own cursor."""
     global _handle
     with _handle_lock:
         if _handle is None:
             _handle = _make_handle()
         return _handle
+
+
+def records_url() -> str:
+    """The App line's Records as a standard PostgreSQL URL: its own role and password on the Catchment's database,
+    searching its own schema first, so unqualified table names are its own. Every App line's tables are readable as
+    ``{name}_v{major}.{table}``; only its own are writable. Use it with any driver (psycopg, SQLAlchemy with
+    ``postgresql+psycopg://``, asyncpg). Needs ``[app] records = true``."""
+    url = os.environ.get(RECORDS_ENV)
+    if not url:
+        raise RuntimeError(f"{RECORDS_ENV} isn't set: declare [app] records = true in pond.toml")
+    return url
+
+
+def records(**kwargs):
+    """A psycopg connection to the App line's Records (:func:`records_url`); keyword arguments go to
+    ``psycopg.connect``. Needs psycopg in the App's environment (``uv add 'psycopg[binary]'``); any other driver
+    can use :func:`records_url` instead."""
+    try:
+        import psycopg
+    except ImportError:
+        raise RuntimeError("duckstring.app.records() needs psycopg in the App's environment: "
+                           "uv add 'psycopg[binary]' (or connect to records_url() with another driver)") from None
+    return psycopg.connect(records_url(), **kwargs)
+
+
+def records_pool(**kwargs):
+    """A ``psycopg_pool`` connection pool to the App line's Records, holding at most the instance's ``[app]
+    connections`` (``DUCKSTRING_APP_CONNECTIONS``; default ``concurrency``, 4), which the line's role enforces.
+    Keyword arguments go to ``ConnectionPool``, such as ``open=True``. Needs ``psycopg_pool`` in the App's
+    environment (``uv add 'psycopg[binary]' psycopg_pool``)."""
+    try:
+        from psycopg_pool import ConnectionPool
+    except ImportError:
+        raise RuntimeError("duckstring.app.records_pool() needs psycopg_pool in the App's environment: "
+                           "uv add 'psycopg[binary]' psycopg_pool") from None
+    size = max(1, int(os.environ.get("DUCKSTRING_APP_CONNECTIONS") or 4))
+    kwargs.setdefault("min_size", 1)
+    kwargs.setdefault("max_size", size)
+    return ConnectionPool(records_url(), **kwargs)
+
+
+def report_load(load: float) -> None:
+    """Tell the Catchment how busy this instance is, from 0 (idle) to 1 (full), for what no outside measure sees
+    (a lock, a queue of its own): above ``[app.scale] load`` (0.7) for ``after``, the App gets another instance.
+    A report counts for 30 seconds; a response header ``X-Duckstring-Load`` does the same. Does nothing outside a
+    Catchment."""
+    instance = os.environ.get("DUCKSTRING_APP_INSTANCE")
+    raw = os.environ.get(ENV)
+    if not instance or not raw:
+        return
+    runtime = json.loads(raw).get("runtime")
+    if not runtime:
+        return
+    path = Path(runtime) / "load" / instance
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(f"{max(0.0, min(1.0, float(load)))}")
+    tmp.replace(path)
+
+
+def media_url() -> str:
+    """Where the App line's Media lives: a local directory, or an object-store URI when the Catchment keeps Media
+    there. Needs ``[app] media = true``."""
+    url = os.environ.get(MEDIA_ENV)
+    if not url:
+        raise RuntimeError(f"{MEDIA_ENV} isn't set: declare [app] media = true in pond.toml")
+    return url
+
+
+def media_path() -> Path:
+    """The App line's Media as a local directory, for libraries that want a path. Raises ``RuntimeError`` when
+    the Catchment keeps Media in an object store: use :func:`media` there."""
+    url = media_url()
+    if "://" in url:
+        raise RuntimeError(f"this Catchment keeps Media in an object store ({url.split('://')[0]}://): use media()")
+    return Path(url)
+
+
+def media():
+    """An fsspec filesystem rooted at the App line's Media, the same wherever the Catchment keeps it: paths are
+    relative (``fs.open("uploads/a.png", "wb")``, ``fs.ls("uploads")``). Needs fsspec in the App's environment,
+    and the object store's own package (s3fs, gcsfs, adlfs) when Media is in one."""
+    try:
+        import fsspec
+        from fsspec.implementations.dirfs import DirFileSystem
+    except ImportError:
+        raise RuntimeError("duckstring.app.media() needs fsspec in the App's environment: uv add fsspec "
+                           "(or use media_path() for files on the Catchment's disk)") from None
+    url = media_url()
+    if "://" in url:
+        fs, path = fsspec.core.url_to_fs(url)
+    else:
+        fs, path = fsspec.filesystem("file", auto_mkdir=True), url  # parents made, as an object store needs none
+    return DirFileSystem(path, fs)
 
 
 def _make_handle():
@@ -247,8 +456,22 @@ def _make_handle():
     con = duckdb.connect()
     if cfg.get("memory_limit"):  # the App's [pond] memory (at least 256MB), set aside while it runs
         con.execute(f"SET memory_limit = '{cfg['memory_limit']}'")
+    source_dirs = None
+    if cfg.get("source_dirs"):  # a local serve's Puddle working copies (duckstring.local.app)
+        from .storage import get_storage
+
+        source_dirs = {s: get_storage(uri) for s, uri in cfg["source_dirs"].items()}
+    remote_sources = None
+    if cfg.get("remote_sources"):  # a local serve's live Puddles, read through their Catchment's query API
+        from .remote_source import HttpTransport, RemoteSource
+
+        remote_sources = {
+            s: RemoteSource(s, r["major"], HttpTransport.registered(r.get("catchment")), queries=r.get("queries"),
+                            kinds={t: (m, tuple(pk)) for t, (m, pk) in (r.get("kinds") or {}).items()})
+            for s, r in cfg["remote_sources"].items()}
     return _pond_class()(
         cfg["name"], cfg.get("version", "0.0.0"), con, cfg["root"],
         source_majors=cfg.get("source_majors") or None, data_root=cfg.get("data_root"),
-        sources=list(cfg.get("sources", [])), runtime=runtime,
+        sources=list(cfg.get("sources", [])), runtime=runtime, source_dirs=source_dirs,
+        remote_sources=remote_sources,
     )

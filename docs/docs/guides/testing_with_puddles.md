@@ -5,7 +5,7 @@ description: Run a Pond on your machine against sample data before deploying it.
 
 # Testing with Puddles
 
-Deploying to find out whether a Ripple works is slow, and running against full production data is slower still. A Puddle is a small, code-defined sample of a Source table. `duckstring pond run` runs your Pond against its Puddles on your machine, with no Catchment, in seconds.
+Deploying to find out whether a Ripple works is slow. A Puddle is a code-defined stand-in for a Source table: generated sample data, or the real Source read from a Catchment, whole or filtered. `duckstring pond run` runs your Pond against its Puddles on your machine, with no Catchment, in seconds.
 
 The loop is:
 
@@ -34,7 +34,7 @@ def product(p):
     """)
 ```
 
-A returned relation is written as the target table, and a returned path is copied in as a file. `p.con` is a scratch DuckDB connection.
+A returned relation is written as the target table, and a returned path is copied in as a file. `p.con` is an in-memory DuckDB connection for building the data; make any scratch tables on it `TEMP`.
 
 Keep generated data deterministic, so a test gives the same answer every time. The demo `sales` Pond seeds its random generator for exactly this reason:
 
@@ -83,6 +83,52 @@ def products(p):
 
 A Source with no Puddle is skipped with a warning when you hydrate. `duckstring pond hydrate --from-catchment` fills those Sources with a full copy of their tables from the default Catchment instead, which is convenient for small Sources.
 
+## Testing against real data
+
+Sample data shows that a Ripple runs. Whether its numbers mean anything usually needs the real data. `p.read_source()` reads the Source's published table on the Catchment you hydrate from, so a Puddle can be a filter over the real thing:
+
+```python
+@puddle("transactions.transaction")
+def transactions(p):
+    return p.read_source().filter("store_id IN (1, 2)")
+```
+
+The definition isn't run against the data here. It becomes a query, which runs on the Catchment through its [query API](../reference/cli/data.md#query), so only the rows the filter keeps come back. That works for anything you can express with DuckDB relations over `read_source`: filters, projections, joins between the Source's tables, aggregates and samples by key hash. A definition that fetches rows into Python first can't be sent to the Catchment, and hydrating refuses it. Reading needs a key for the Catchment that can read its tables.
+
+For a large Source, copying even a filtered sample can be slow. `duckstring pond hydrate --live` copies nothing:
+
+```bash
+duckstring pond hydrate --live
+duckstring pond run
+```
+
+A Source with no Puddle is then read whole, and a Puddle that uses `read_source` is read through its query, each time a run reads the Source. Nothing is written locally. The hydration time is recorded, and runs read each live Source as it stood then, so results stay close to stable until you hydrate again. Nothing on the Catchment changes because you are reading it. If the Catchment has since dropped a plain table's version from then, its newest stands in, with a warning. When the data must not move under you, copy it instead (without `--live`).
+
+`--as-at` hydrates as of an earlier time, which is useful for reproducing a result someone saw yesterday.
+
+## Puddle sets
+
+A Pond often wants more than one set of Puddles: a tiny one for checking that the code runs, and a real week for checking the numbers. Label definitions with `set`:
+
+```python
+@puddle("transactions.transaction")
+def transactions(p):
+    return p.con.sql("SELECT ...")             # the default set
+
+@puddle("transactions.transaction", set="week")
+def transactions_week(p):
+    return p.read_source().filter("created_at >= DATE '2026-11-10'")
+```
+
+`duckstring pond hydrate --set week` uses the `week` definitions, and the default set's for any Source or table `week` doesn't define. To pick a set per Source, list them in a `puddles.toml` beside `pond.toml`:
+
+```toml
+[local]
+transactions = "week"
+```
+
+`puddles.toml` isn't part of the Pond's version, so it can change as often as you like, and can stay out of version control.
+
 ## Running
 
 ```bash
@@ -98,7 +144,7 @@ To work on one step, rerun just that Ripple against the output already there:
 duckstring pond run --ripple join_lines
 ```
 
-`hydrate --source products` rebuilds only one Source's Puddles.
+`hydrate --source products` rebuilds only one Source's Puddles. Hydrating sets the baseline that every plain `pond run` starts from.
 
 ## Inspecting results
 
@@ -112,9 +158,47 @@ Every Puddle and output table is available as `"{pond}"."{table}"`, or by bare n
 
 ## Testing incremental Ponds
 
-A Ripple that reads changes with `read_delta` or the Trickle builder behaves differently on its first run than on later ones. By default every `pond run` starts from an empty `puddles/out/`, so it always tests the first-run path.
+A Ripple that reads changes with `read_delta` or the Trickle builder behaves differently on its first run than on later ones. A plain `pond run` is always a baseline run: it starts from an empty `puddles/out/` and reads every Source in full, which tests the first-run path. `pond run --incremental` goes on from the last run, as a Refresh would on a Catchment, so its Ripples read only what changed in between:
 
-To test a later run, give the Pond a Puddle of its own previous output. A Puddle can target the Pond's own name, and `pond run` copies it into place before running, so each run starts from the same prior state:
+```bash
+duckstring pond hydrate --as-at 2026-11-17T00:00:00Z
+duckstring pond run                        # the baseline, as of the 17th
+duckstring pond run --incremental          # the next change after it
+duckstring pond run --incremental          # and the one after that
+duckstring pond run                        # back to the baseline
+```
+
+The changes come from one of two places.
+
+**Real history.** `--as-at` copies each Source's state at that time and every change since (through the query of a Puddle that uses `read_source`, so the copy holds only what it keeps). With `--live`, a Source's history is read from the Catchment instead, each run asking for the change since the last, and keeps growing as the Catchment runs, so incremental runs can follow production forward.
+
+**Steps.** A new pipeline has no history to replay. `@puddle.step` writes a Source's next window instead:
+
+```python
+@puddle("orders.order_line")
+def orders(p):
+    p.append_table(p.con.sql("SELECT range AS order_id, 1 AS quantity FROM range(100)"), pk="order_id")
+
+
+@puddle.step("orders.order_line")
+def more_orders(p):
+    p.append_table(p.con.sql(f"SELECT {p.step} * 1000 + range AS order_id, 2 AS quantity FROM range(10)"),
+                   pk="order_id")
+```
+
+A step runs when the target lies beyond the history a Source's Puddle holds, so steps also carry a replay on past the end of real data. Seed anything random with `p.step`, so a rerun from the baseline writes the same rows. Write a Trickle Source's Puddle with `append_table` or `merge_table`, as the Source itself does, so a Pond reading its deltas sees each step's change. A step that writes nothing still counts as a run of that Source. Steps apply only to copied Puddles.
+
+### Choosing the next window
+
+Like a Refresh, an incremental run first brings every Source up to a target freshness. The default, `--next-change`, is the next time any Source changed. `--next-run` replays the windows the Pond itself ran in production, `--most-recent` goes as far as every Source has reached, and `--to` names a time. Each Source is then read as it stood when the last of them got there, and the run's freshness is the oldest of theirs, as it would be on a Catchment.
+
+A copied Source runs out of history at some point. From then on only a step can bring it further, and once no Source has history left, steps are stamped with the current time. That is a jump in time: a Ripple working relative to `pond.f` ("the last 24 hours") or a retention window sees it. A step can give its rows timestamps within its own window (`p.previous_f` to `p.f`) to keep them plausible.
+
+Replaying a definition through history, and following a live one, both compare what it gives at one position with what it gave at the last. A definition has to give the same rows for the same data: a filter, a join, or a sample by a hash of the key, never a random sample.
+
+### The Pond's own previous output
+
+A Puddle can also target the Pond's own name. `pond run` copies it into place before a baseline run, so the baseline starts from a prior state rather than nothing:
 
 ```python
 @puddle("priced")
@@ -124,12 +208,10 @@ def previous_output(p):
 
 `duckstring pond run --fresh` ignores this Puddle and starts from nothing.
 
-A Source that is itself a Trickle needs its change history, not just a table, for `read_delta` to return a window of changes. A plain table Puddle, or one copied from a Catchment with `get()`, is read as a full table, which tests the full-recompute path. To test the incremental path, build the Source Puddle with the Trickle write functions, as the demo `priced` Pond does in `src/puddles.py` (`duckstring pond demo --trickle`).
-
 ## What a local run doesn't do
 
-A local run is a single Pond Run of one Pond. It doesn't involve freshness, Refreshes, retries or other Ponds. `pond.sources_changed()` always returns `True` and `pond.skip()` does nothing.
+A local run is a Pond Run of one Pond. It doesn't involve retries, alerts or other Ponds, and an incremental run's target stands in for a Refresh. `pond.sources_changed()` always returns `True` and `pond.skip()` does nothing.
 
-`pond.changed()` works on the Pond's own tables and Objects as it does in a deployed run, so you can check that a Ripple asking it before `pond.skip()` sees what you expect. Asked about a Source, it reports `True` on a first run (every full `pond run` without a Puddle of the Pond's own output). A full run starts from an empty `puddles/out/`, so `pond.detect_change` and `if_changed=True` have nothing published to compare with, and always write. For the full behaviour, deploy to a Catchment on your own machine; see [Local Execution](../concepts/management_and_execution.md#local-execution).
+`pond.changed()` works on the Pond's own tables and Objects as it does in a deployed run, so you can check that a Ripple asking it before `pond.skip()` sees what you expect. Asked about a Source, it reports `True` on a baseline run, and in an incremental run whether the Source changed in the window. A baseline run starts from an empty `puddles/out/`, so `pond.detect_change` and `if_changed=True` have nothing published to compare with, and always write. For the full behaviour, deploy to a Catchment on your own machine; see [Local Execution](../concepts/management_and_execution.md#local-execution).
 
 The `puddles/` directory is for your machine only. The scaffolded `.gitignore` keeps it out of version control, and `.pondignore` keeps it out of deployments.

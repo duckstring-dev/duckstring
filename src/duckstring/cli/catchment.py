@@ -436,6 +436,154 @@ def settings(
         typer.echo("note:       the data root is now set-once (the Catchment has published data).")
 
 
+records_app = typer.Typer(help="Show or set where Apps' Records live, or move them.", invoke_without_command=True)
+media_app = typer.Typer(help="Show or set where Apps' Media lives, or move it.", invoke_without_command=True)
+
+
+@records_app.callback()
+def records(
+    ctx: typer.Context,
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
+    use: Optional[str] = typer.Option(
+        None, "--use", help="Where Records live: managed (a PostgreSQL the Catchment runs) or a postgres:// URI "
+                            "(credentials as ${secret:NAME} or ${env:NAME})."),
+    memory: Optional[str] = typer.Option(None, "--memory", help="A managed PostgreSQL's memory, such as 1GB."),
+    listen: Optional[str] = typer.Option(
+        None, "--listen", help="A managed PostgreSQL's listen address (127.0.0.1 unless something on another "
+                               "machine needs it; beyond this machine connections must use TLS)."),
+    host: Optional[str] = typer.Option(None, "--host", help="The address another machine reaches it at."),
+    tls_cert: Optional[str] = typer.Option(
+        None, "--tls-cert", help="A certificate to serve TLS with (a path on the Catchment's machine); without one a "
+                                 "self-signed certificate is made."),
+    tls_key: Optional[str] = typer.Option(None, "--tls-key", help="The certificate's key."),
+    reader_url: bool = typer.Option(
+        False, "--reader-url", help="Print a read-only connection URL for a client on another machine (a BI tool)."),
+) -> None:
+    """Show or set where Apps' Records live.
+
+    Records are each App line's tables, in PostgreSQL. By default the Catchment runs its own (install it with
+    `duckstring install postgres`), started the first time an App needs it. Where Records live can't change once
+    an App line holds Records.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    from . import _http
+    from .config import resolve_catchment
+
+    _, cfg = resolve_catchment(catchment)
+    if reader_url:
+        typer.echo(_http.get(f"{cfg['url']}/api/catchment/records/reader", auth=cfg).json()["url"])
+        return
+    changes = {"target": use, "memory": memory, "listen": listen, "host": host, "tls_cert": tls_cert,
+               "tls_key": tls_key}
+    if any(v is not None for v in changes.values()):
+        body = {k: v for k, v in changes.items() if v is not None}
+        got = _http.put(f"{cfg['url']}/api/catchment/records", auth=cfg, json=body).json()
+    else:
+        got = _http.get(f"{cfg['url']}/api/catchment/records", auth=cfg).json()
+    if got["target"] == "managed":
+        state = "running" if got.get("running") else ("stopped" if got.get("initialised") else "not started yet")
+        version = f", PostgreSQL {got['postgres_major']}" if got.get("postgres_major") else ""
+        typer.echo(f"records:  managed ({state}{version})")
+        typer.echo(f"memory:   {got['memory'] / 10**6:.0f} MB")
+        typer.echo(f"listen:   {got['listen']}" + (f":{got['port']}" if got.get("port") else ""))
+        tls = got.get("tls") or {}
+        if tls.get("on"):
+            typer.echo(f"host:     {got.get('host')}")
+            typer.echo(f"tls:      {tls.get('certificate')}" +
+                       (f", SHA-256 {tls['fingerprint']}" if tls.get("fingerprint") else ""))
+    else:
+        typer.echo(f"records:  {got['host']}:{got['port']}/{got['database']}")
+    if got.get("in_use"):
+        typer.echo("note:     App lines hold Records here, so where they live is now fixed.")
+
+
+@media_app.callback()
+def media(
+    ctx: typer.Context,
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
+    use: Optional[str] = typer.Option(
+        None, "--use", help="Where Media lives: local (the Catchment's own directory) or an object store "
+                            "(s3://, gs://, az://, abfss://)."),
+) -> None:
+    """Show or set where Apps' Media (their files) lives. Once an App line holds Media, `move` changes it."""
+    if ctx.invoked_subcommand is not None:
+        return
+    from . import _http
+    from .config import resolve_catchment
+
+    _, cfg = resolve_catchment(catchment)
+    if use is not None:
+        got = _http.put(f"{cfg['url']}/api/catchment/media", auth=cfg, json={"target": use}).json()
+    else:
+        got = _http.get(f"{cfg['url']}/api/catchment/media", auth=cfg).json()
+    typer.echo(f"media:    {got['target']}")
+    if got.get("in_use"):
+        typer.echo("note:     App lines hold Media here, so where it lives is now fixed.")
+
+
+def _move(kind: str, target: str, catchment: Optional[str], postgres_version: Optional[int], yes: bool) -> None:
+    import time
+
+    from . import _http
+    from .config import resolve_catchment
+
+    cname, cfg = resolve_catchment(catchment)
+    ident = _http.get(f"{cfg['url']}/api/catchment/identity", auth=cfg).json()
+    if not yes:
+        typer.confirm(f"Move {kind.title()} on '{cname}' to {target}? Apps with {kind.title()} stop while it copies, "
+                      f"and the old store is deleted once the copy is verified.", default=False, abort=True)
+    body = {"target": target, "postgres_version": postgres_version, "confirm": ident.get("name") or ident.get("id")}
+    _http.post(f"{cfg['url']}/api/catchment/{kind}/move", auth=cfg, json=body)
+    last = None
+    while True:
+        got = _http.get(f"{cfg['url']}/api/catchment/move", auth=cfg).json()
+        line = f"{got['state']}" + (f": {got['detail']}" if got.get("detail") else "")
+        if line != last:
+            typer.echo(line)
+            last = line
+        if got["state"] in ("done", "failed"):
+            break
+        time.sleep(1)
+    if got["state"] == "failed":
+        typer.echo(f"Error: {got.get('error')}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"{kind.title()} moved to {target}.")
+
+
+@records_app.command("move")
+def records_move(
+    target: str = typer.Argument(..., help="managed (a PostgreSQL the Catchment runs) or a postgres:// URI."),
+    postgres_version: Optional[int] = typer.Option(
+        None, "--postgres-version", help="Move a managed PostgreSQL to this major (install it first with "
+                                         "`duckstring install postgres --postgres-version N`)."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
+) -> None:
+    """Move every App line's Records to another PostgreSQL, or a managed one to another major.
+
+    Apps with Records answer 503 and Spouts into Records wait while the database is copied (dump and restore);
+    row counts are compared, the Catchment switches, and the old store is deleted. A failure before the switch
+    leaves the old store as it was.
+    """
+    _move("records", target, catchment, postgres_version, yes)
+
+
+@media_app.command("move")
+def media_move(
+    target: str = typer.Argument(..., help="local (the Catchment's own directory) or an object store (s3://, gs://, "
+                                           "az://, abfss://)."),
+    catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to use (default if omitted)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
+) -> None:
+    """Move every App line's Media to another place.
+
+    Files are copied while Apps run; then Apps with Media stop while what changed is copied, the listings are
+    compared, the Catchment switches, and the old files are deleted.
+    """
+    _move("media", target, catchment, None, yes)
+
+
 @app.command()
 def reset(
     catchment: Optional[str] = typer.Option(None, "--catchment", "-c", help="Catchment to reset (default if omitted)."),
@@ -687,3 +835,7 @@ def set_default(
         raise typer.Exit(1)
     set_default_catchment(name)
     typer.echo(f"Default catchment set to '{name}'.")
+
+
+app.add_typer(records_app, name="records")
+app.add_typer(media_app, name="media")

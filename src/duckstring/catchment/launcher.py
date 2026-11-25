@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ..keys import split_pond_key
+from ..keys import split_pond_key, worker_module
 
 
 def load_launcher_class(spec: str):
@@ -86,7 +86,7 @@ class SubprocessLauncher:
             env[REEXEC_ENV] = "1"
         self._procs[pond_key] = subprocess.Popen(
             [
-                python, "-m", "duckstring.duck",
+                python, "-m", worker_module(duck),
                 "--pond", name,
                 "--major", str(major),
                 "--version", version,
@@ -283,6 +283,25 @@ class DispatchingLauncher:
         if self.local.is_running(pond_key):
             return True
         return any(r.is_running(pond_key) for r in self.remotes.values())
+
+    def on_this_machine(self, duck: dict | None) -> bool:
+        """Whether a Pond with this compute runs its Duck on the Catchment's own machine (a ``local`` Pool
+        included), so it can reach what only this machine has: a Records PostgreSQL on loopback, Media on its disk.
+        Decided as :meth:`_backend_for` routes, without making a Pool."""
+        if not duck or not duck.get("remote"):
+            return True
+        if self.pool_identity(duck) is not None:
+            return ((duck.get("pool") or {}).get("provider") or self.default_provider) == "local"
+        return self._remote_for(duck) is None
+
+    def max_lifetime(self, duck: dict | None) -> float | None:
+        """How long the backend ``duck`` routes to lets one spawn run (a jobs backend's execution limit), or
+        ``None``: an App instance there is replaced before it (plans/app-scaling.md)."""
+        try:
+            backend = self._backend_for(duck)
+        except Exception:
+            return None
+        return getattr(backend, "max_lifetime_s", None)
 
     def placed_elsewhere(self, pond_key: str, duck: dict | None) -> bool:
         """Whether the Pond's Duck is alive on another backend than ``duck`` now routes to (its compute changed).

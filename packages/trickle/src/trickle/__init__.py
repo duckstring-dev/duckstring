@@ -35,6 +35,7 @@ from .io import (
     checkpoint,
     current_state,
     incremental_tables,
+    is_new,
     landed_after,
     load_sidecar,
     merge_table,
@@ -65,7 +66,7 @@ __all__ = [
     "Delta", "DeltaError",
     "append_table", "append_zset", "apply_zset", "merge_table", "apply_aggregate", "agg_rebuild_select",
     "checkpoint", "reconstruct_current", "reconstruct_sql", "current_state",
-    "read_delta", "read_registry_delta", "read_meta", "normalize_pk", "changelog_name", "unique_name",
+    "read_delta", "read_registry_delta", "read_meta", "is_new", "normalize_pk", "changelog_name", "unique_name",
     # io: sidecar / cross-catchment draw (per-run parts)
     "write_sidecar", "load_sidecar", "sidecar_tables", "landed_after", "incremental_tables",
     "part_name", "part_f", "table_parts", "part_tables",

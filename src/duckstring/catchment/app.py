@@ -19,6 +19,19 @@ from .routes import router
 _STATIC_DIR = Path(__file__).parent / "static"
 
 
+class _UIFiles(StaticFiles):
+    """The web UI's files, with caching browsers can't get wrong. Without a ``Cache-Control`` header a browser
+    guesses how long to keep the page, and after an upgrade kept running the old UI. The page and its data files
+    are checked on every load (``no-cache``: a 304 when unchanged); the build's assets are content-hashed, so
+    they never change under their name and are kept for good."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        immutable = path.replace("\\", "/").startswith("_next/static/")
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable" if immutable else "no-cache"
+        return response
+
+
 async def _scheduler(driver: Driver) -> None:
     """Drive clock processes (recurring Refreshes, window boundaries) at next_wake."""
     while True:
@@ -139,8 +152,24 @@ async def _lifespan(app: FastAPI):
     # forwards requests to them.
     import httpx
 
+    from .app_lifecycle import Lifecycle
     from .app_supervisor import AppSupervisor, run_app_supervisor
+    from .media import Media
+    from .records import Records
     from .state_sync import checkpoint_full, run_checkpoint_worker
+
+    # Records and Media (plans/records-and-media.md): App lines' data. A managed Records PostgreSQL starts the
+    # first time something needs it and stops with the Catchment.
+    driver.records = Records(app.state.root, driver.db, reserve=driver.records_reserve,
+                             release=driver.records_release)
+    driver.media = Media(app.state.root, driver.db)
+    from ..egress.records import set_records
+
+    set_records(driver.records)  # Spouts into Records (records:) deliver through it
+    driver.lifecycle = Lifecycle(driver, app.state.root)
+    from .moves import Moves
+
+    driver.moves = Moves(driver)  # moving Records or Media (catchment records|media move)
 
     app.state.app_supervisor = AppSupervisor(driver, app.state.root, app.state.data_root)
     app.state.app_supervisor.close_orphans()
@@ -166,6 +195,9 @@ async def _lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Before the loops stop: the App supervisor's pass may still be running in its thread after its task is
+        # cancelled, and must not take the instances shutdown stops for Apps exiting on their own.
+        app.state.app_supervisor.closing = True
         for task in tasks:
             task.cancel()
             try:
@@ -191,6 +223,8 @@ async def _lifespan(app: FastAPI):
             from fastapi.concurrency import run_in_threadpool
 
             await run_in_threadpool(checkpoint_full, app.state.root, app.state.state_backup, driver)
+        # Last, after the state backup has dumped Records: stop their PostgreSQL.
+        await asyncio.to_thread(driver.records.shutdown)
 
 
 def create_app(
@@ -258,6 +292,10 @@ def create_app(
     # means full access. The tiered read/demand/full keys live in `catchment_key` (see auth.py); either
     # may gate the API. With neither configured, the Catchment is fully open.
     app.state.api_key = api_key or os.environ.get("DUCKSTRING_API_KEY") or None
+    if app.state.api_key and auth.hash_key(app.state.api_key) in auth.key_hashes(con).values():
+        # One of the tiered keys (`catchment start` passes the registration's full key): the database is its
+        # authority, so `rotate-keys` revokes it. Held here as well, it stayed valid until a restart.
+        app.state.api_key = None
     # The internal token Ducks present on the duck channel (persisted, decoupled from the user keys).
     app.state.duck_token = auth.ensure_duck_token(con)
     # The write-only secret store (at the root, archive-excluded). Injected into the egress credential
@@ -300,6 +338,6 @@ def create_app(
     app.include_router(app_proxy_router)
 
     if _STATIC_DIR.exists():
-        app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="frontend")
+        app.mount("/", _UIFiles(directory=_STATIC_DIR, html=True), name="frontend")
 
     return app

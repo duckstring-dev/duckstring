@@ -255,6 +255,10 @@ def fetch_model(pond):
 
 Objects are compared by a SHA-256 of their content, so there's no fingerprint to configure.
 
+## Data collected by Apps
+
+Data people enter through an [App](building_apps.md), such as form entries or uploaded files, is kept by the Catchment as the App's Records and Media. A Ripple reads it with `pond.read_records("feedback@1.ratings")` and `pond.media("feedback@1")`; see [Records and Media](records_and_media.md#reading-them-in-a-pond).
+
 ## When it runs
 
 An Inlet runs when demand from downstream reaches it. Put [Refreshes](scheduling.md) on the Outlets that consume the data, and the Inlets run as often as those consumers need. The [Playground](https://playground.duckstring.com) shows this on the demo pipeline in the browser.

@@ -173,6 +173,12 @@ function AppPanel({ pond, canDemand, canControl, onOptions, mobile }: {
       <div style={{ fontSize: 12, color: '#a1a1aa', lineHeight: 1.7 }}>
         <div>
           <span style={{ color: THEME_BRAND, fontWeight: 700 }}>{state === 'running' ? 'Running' : 'Starting'}</span>
+          {inst.count > 1 && <span style={{ color: '#a1a1aa' }}> {inst.count} instances</span>}
+          {inst.elsewhere > 0 && (
+            <span style={{ color: '#71717a' }}>
+              {inst.count > 1 ? ` (${inst.elsewhere === inst.count ? 'all' : inst.elsewhere} elsewhere)` : ' elsewhere'}
+            </span>
+          )}
           <span style={{ color: '#52525b' }}> · </span>since {clock(inst.readyAt ?? inst.startedAt)}
         </div>
         {state === 'running' && (
@@ -183,6 +189,9 @@ function AppPanel({ pond, canDemand, canControl, onOptions, mobile }: {
                 ? `Stops when idle in ${formatAge(now, Math.max(idleAt, now))}`  // the time from now to idleAt
                 : app?.idleTimeoutS === 0 ? 'Keeps running until stopped' : 'Idle'}
           </div>
+        )}
+        {inst.pressed && (
+          <div style={{ color: THEME_AMBER }} title={inst.pressed}>At its maximum instances under load</div>
         )}
       </div>
     );
@@ -898,7 +907,7 @@ export function TracePanel() {
   );
 }
 
-export function Sidebar({ mobile = false }: { mobile?: boolean }) {
+export function Sidebar({ mobile = false, short = false }: { mobile?: boolean; short?: boolean }) {
   const ponds = useLiveStore((s) => s.ponds);
   const ripples = useLiveStore((s) => s.ripples);
   const pondViews = useLiveStore((s) => s.pondViews);
@@ -934,15 +943,15 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
   // the reason in place of its controls.
   const halted = !!selectedInfo && (selectedInfo.isFailed || selectedInfo.isKilled || selectedInfo.isBlocked);
 
-  // Mobile: the sidebar is a collapsible bottom sheet; selecting a node opens it
-  // (state adjusted during render, like the budget inputs above).
+  // Mobile: the sidebar is a collapsible bottom sheet; a short screen (a phone held landscape) folds it into a
+  // strip at the right. Selecting a node opens either (state adjusted during render, like the budget inputs above).
   const [collapsed, setCollapsed] = useState(true);
   const selectionKey = selectedRippleId ?? selectedPondId;
   const [prevSelectionKey, setPrevSelectionKey] = useState(selectionKey);
   if (selectionKey !== prevSelectionKey) {
     setPrevSelectionKey(selectionKey);
     setOptionsOpen(false); // a new selection closes a stale Options modal
-    if (mobile && selectionKey) setCollapsed(false);
+    if ((mobile || short) && selectionKey) setCollapsed(false);
   }
 
   const headerContext = selectedRipple
@@ -1154,10 +1163,26 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
     );
   }
 
+  const fold = { background: 'transparent', border: 'none', color: '#a1a1aa', fontSize: 18, cursor: 'pointer',
+    fontFamily: 'inherit', padding: '6px 10px' } as const;
+  if (short && collapsed) {
+    return (
+      <div
+        onClick={() => setCollapsed(false)}
+        title="Show the sidebar"
+        style={{ width: 30, minWidth: 30, background: '#15151a', borderLeft: '1px solid #27272a', cursor: 'pointer',
+          display: 'flex', justifyContent: 'center', paddingTop: 10 }}
+      >
+        <span style={{ ...fold, padding: 0 }}>‹</span>
+      </div>
+    );
+  }
+
   return (
     <div
       className="ds-sidebar"
       style={{
+        position: 'relative',
         width: 320,
         minWidth: 320,
         background: '#15151a',
@@ -1170,6 +1195,10 @@ export function Sidebar({ mobile = false }: { mobile?: boolean }) {
         fontFamily: 'inherit',
       }}
     >
+      {short && (
+        <button onClick={() => setCollapsed(true)} title="Hide the sidebar"
+                style={{ ...fold, position: 'absolute', top: 6, right: 6 }}>›</button>
+      )}
       {content}
     </div>
   );

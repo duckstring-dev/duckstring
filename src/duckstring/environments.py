@@ -19,7 +19,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-ENV_MARKER = ".duckstring_env"  # written into a deployed Pond's source dir: the hash of its environment
 _COMPLETE = ".complete"          # written into an environment once it's fully built
 
 
@@ -174,18 +173,15 @@ class _FileLock:
 def ensure_env(root: Path, source_dir: Path, *, check_lock: bool = True) -> Path:
     """The Python interpreter a Pond runs in, building its environment first if it isn't built yet.
     ``sys.executable`` for the default environment. Raises :class:`EnvError` on a missing/stale lock or a
-    failed build (with uv's output). Also records the environment in the Pond's source dir
-    (:data:`ENV_MARKER`), for :func:`python_for`.
+    failed build (with uv's output).
 
     ``check_lock`` (deploy) builds with ``uv sync --locked``, refusing a lock that no longer matches
     ``pyproject.toml``. Without it (a Duck on another machine, for a Pond whose lock was checked when it
     was deployed) the build is ``--frozen``: exactly what the lock says, without re-reading any source
     it names, such as a local Duckstring checkout that exists only on the developer's machine."""
     source_dir = Path(source_dir)
-    marker = source_dir / ENV_MARKER
     spec = pond_env(source_dir)
     if spec is None:
-        marker.unlink(missing_ok=True)
         return Path(sys.executable)
     digest = env_hash(spec)
     env_dir = Path(root) / "envs" / digest
@@ -201,20 +197,26 @@ def ensure_env(root: Path, source_dir: Path, *, check_lock: bool = True) -> Path
             _run_uv(["pip", "install", "--quiet", "--python", str(_python_in(env_dir)), *duckstring_requirement()],
                     cwd=source_dir)
             (env_dir / _COMPLETE).write_text(digest)
-    marker.write_text(digest)
     return _python_in(env_dir)
 
 
 def python_for(root: Path, source_path: str | Path) -> str:
-    """The interpreter a deployed Pond's Duck runs with: its built environment's, or the Catchment's own
-    for the default environment (or an environment that isn't built on this machine)."""
+    """The interpreter a deployed Pond's Duck runs with: the environment for its lock *and this Catchment's own
+    Duckstring* when that is built here, else the Catchment's own Python (the default environment, or one not
+    built yet, which the Duck then builds and switches to itself, as a remote Duck does: :func:`duck_python`).
+
+    Computed at each spawn: before 2026-11-21 it read the environment recorded at deploy, which after an upgrade
+    of the Catchment's Duckstring still held the old one, and a Duck in it read data the new one wrote (the
+    attention showcase)."""
     source_dir = Path(root) / source_path
-    marker = source_dir / ENV_MARKER
-    if marker.is_file():
-        env_dir = Path(root) / "envs" / marker.read_text().strip()
-        if (env_dir / _COMPLETE).exists():
-            return str(_python_in(env_dir))
-    return sys.executable
+    try:
+        spec = pond_env(source_dir) if source_dir.is_dir() else None
+    except EnvError:
+        return sys.executable  # its Duck reports why when it tries to build
+    if spec is None:
+        return sys.executable
+    env_dir = Path(root) / "envs" / env_hash(spec)
+    return str(_python_in(env_dir)) if (env_dir / _COMPLETE).exists() else sys.executable
 
 
 REEXEC_ENV = "DUCKSTRING_IN_POND_ENV"  # set on a re-executed local command, so it never re-executes again

@@ -24,6 +24,8 @@ import logging
 import math
 import uuid
 
+from ..trickle_io import temp_view
+
 log = logging.getLogger("duckstring.flock.verify")
 
 DEFAULT_KEYS = 1_000
@@ -63,9 +65,9 @@ def verify(job, result, *, keys: int, accept=()) -> str | None:
     con = job.ctx.con
     tag = uuid.uuid4().hex[:8]
     out, sample, src = f"_ds_verify_out_{tag}", f"_ds_verify_keys_{tag}", f"_ds_verify_leaf_{tag}"
-    result.create_view(out, replace=True)
+    temp_view(con, result, out)
     key_list = ", ".join(_q(c) for c in cols)
-    job.ctx.read_table(leaf.ref).create_view(src, replace=True)
+    temp_view(con, job.ctx.read_table(leaf.ref), src)
     picked = ", ".join(f"{_q(lc)} AS {_q(c)}" for lc, c in zip(leaf_cols, cols, strict=True))
     con.execute(f"CREATE TEMP TABLE {_q(sample)} AS SELECT DISTINCT * FROM (SELECT {picked} FROM {_q(src)} "
                 f"WHERE {' AND '.join(f'{_q(c)} IS NOT NULL' for c in leaf_cols)} USING SAMPLE {int(keys)} ROWS)")
@@ -73,7 +75,7 @@ def verify(job, result, *, keys: int, accept=()) -> str | None:
         views = {}
         for i, lf in enumerate(job.leaves()):
             name = f"_ds_verify_src_{tag}_{i}"
-            job.ctx.read_table(lf.ref).create_view(name, replace=True)
+            temp_view(con, job.ctx.read_table(lf.ref), name)
             views[id(lf)] = name
 
         def read(lf) -> str:
