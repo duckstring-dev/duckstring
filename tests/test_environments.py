@@ -58,6 +58,19 @@ def test_duckstring_requirement_is_the_catchments_own():
     assert req[2] == "-e" and req[3].split("[")[0] == str(Path(__file__).parent.parent)
 
 
+
+def test_a_pond_environment_gets_the_catchments_cloud_extras(monkeypatch):
+    """A Catchment with Azure's or Google's storage packages gives them to every Pond environment: before, only
+    aws was carried, so an App with Media on an abfss:// Catchment failed at import (first Azure run, 2026-11-25)."""
+    import importlib.util
+
+    present = {"adlfs", "azure.identity", "gcsfs", "google.auth"}
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name, *a: object() if name in present else (None if name in ("s3fs", "boto3", "sqlglot")
+                                                                            else real(name, *a)))
+    assert envs._extras() == ["azure", "gcp"]
+
 # ── where a deployed Pond's Duck runs ──────────────────────────────────────────
 
 

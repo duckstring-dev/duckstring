@@ -56,6 +56,12 @@ def _extras() -> list[str]:
     extras = []
     if find_spec("s3fs") and find_spec("boto3"):
         extras.append("aws")
+    # Azure's and Google's storage too: without them a Pond environment built on such a Catchment couldn't reach
+    # its abfss:// or gs:// data root or Media (an App with Media on Azure failed at import, 2026-11-25).
+    if find_spec("adlfs") and find_spec("azure.identity"):
+        extras.append("azure")
+    if find_spec("gcsfs") and find_spec("google.auth"):
+        extras.append("gcp")
     if find_spec("sqlglot"):
         extras.append("lineage")
     return extras
