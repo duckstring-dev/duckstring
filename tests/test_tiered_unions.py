@@ -186,6 +186,7 @@ def _merge_run(con, data, state, i, **kw):
     ParquetDataPlane().export(con, data, f=ts(i), **kw)
 
 
+@pytest.mark.timeout(30)  # 30 Runs, each published: up to 2.6 s on a laptop, past the 5 s default on CI
 def test_a_merge_change_log_is_unioned_and_reads_match(tmp_path):
     con = duckdb.connect(str(tmp_path / "reg.duckdb"))
     data = tmp_path / "data"
