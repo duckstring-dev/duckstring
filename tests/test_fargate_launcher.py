@@ -80,6 +80,21 @@ def test_ensure_registers_task_def_and_runs_task(tmp_path):
     assert lch.is_running("sales@2")
 
 
+
+def test_an_app_instance_is_tagged_with_characters_aws_accepts(tmp_path):
+    """An App instance's key is feedback~3@1; AWS refuses "~" in a tag, so its RunTask failed every time."""
+    import re
+
+    ecs = FakeEcs()
+    lch = _fargate(ecs)
+    duck = {**_duck("M", cpu=1024, memory=4096), "app_instance": 3}
+    lch.ensure("feedback~3@1", "1.0.0", "ponds/feedback/1.0.0", duck=duck)
+    tags = {t["key"]: t["value"] for t in ecs.ran[0]["tags"]}
+    assert tags["duckstring:pond"] == "feedback@1" and tags["duckstring:instance"] == "3"
+    assert all(re.fullmatch(r"[\w .:/=+@-]*", v) for v in tags.values())
+    cmd = ecs.ran[0]["overrides"]["containerOverrides"][0]["command"]
+    assert cmd[0] == "duckstring.app_agent" and "feedback~3" in cmd
+
 def test_task_def_carries_arch_and_region_logs(tmp_path, monkeypatch):
     monkeypatch.setenv("AWS_REGION", "ap-southeast-2")
     monkeypatch.setenv("DUCKSTRING_FARGATE_CPU_ARCH", "arm64")

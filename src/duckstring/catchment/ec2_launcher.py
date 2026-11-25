@@ -39,6 +39,7 @@ import shlex
 from pathlib import Path
 
 from ..keys import split_pond_key, worker_module
+from .fargate_launcher import _tags
 
 log = logging.getLogger("duckstring.ec2")
 
@@ -218,10 +219,8 @@ class Ec2Launcher:
             "TagSpecifications": [{
                 "ResourceType": "instance",
                 "Tags": [
-                    {"Key": "Name", "Value": f"duckstring-{name}@{major}"},
-                    {"Key": "duckstring:pond", "Value": f"{name}@{major}"},
-                    {"Key": "duckstring:target", "Value": target or "pool"},
-                    {"Key": "duckstring:pool", "Value": target if target not in (None, "dedicated") else ""},
+                    {"Key": "Name", "Value": f"duckstring-{name.replace('~', '-')}@{major}"},
+                    *({"Key": k, "Value": v} for k, v in _tags(name, major, target)),
                 ],
             }],
         }

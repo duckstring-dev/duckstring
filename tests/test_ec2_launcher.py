@@ -481,3 +481,15 @@ def test_release_forgets_the_instance_without_terminating_it(tmp_path):
     assert not lch.is_running("a@1") and ec2.terminated == []
     lch.ensure("a@1", "1", "ponds/a/1", duck=_duck("heavy", pool={"instance_type": "m6i.large"}))
     assert len(ec2.launched) == 2
+
+
+def test_an_app_instance_is_tagged_with_characters_aws_accepts(tmp_path):
+    """An App instance's key is feedback~3@1: tagged as its App's line and instance number, never with "~"."""
+    ec2 = FakeEc2()
+    lch = _launcher(tmp_path, ec2, instance_profile="ds-worker")
+    lch.ensure("feedback~3@1", "1.0.0", "ponds/feedback/1.0.0",
+               duck={**_duck("heavy", pool={"instance_type": "c6i.2xlarge"}), "app_instance": 3})
+    _, kw = ec2.launched[0]
+    tags = {t["Key"]: t["Value"] for t in kw["TagSpecifications"][0]["Tags"]}
+    assert tags["duckstring:pond"] == "feedback@1" and tags["duckstring:instance"] == "3"
+    assert not any("~" in v for v in tags.values())

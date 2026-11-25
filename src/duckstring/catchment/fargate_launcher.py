@@ -193,11 +193,7 @@ class FargateLauncher:
                 "subnets": subnets, "securityGroups": security_groups,
                 "assignPublicIp": assign_public_ip,
             }},
-            "tags": [
-                {"key": "duckstring:pond", "value": f"{name}@{major}"},
-                {"key": "duckstring:target", "value": target or "pool"},
-                {"key": "duckstring:pool", "value": target if target not in (None, "dedicated") else ""},
-            ],
+            "tags": [{"key": k, "value": v} for k, v in _tags(name, major, target)],
         }
         try:
             resp = self._ecs().run_task(**kwargs)
@@ -298,6 +294,19 @@ class FargateLauncher:
         for pond_key in list(self._tasks):
             self.terminate(pond_key)
         self._pending.clear()
+
+
+def _tags(name: str, major: int, target: str | None) -> list[tuple[str, str]]:
+    """The task's tags. An App instance's name (``feedback~3``) is tagged as its App's line and its instance number:
+    AWS refuses ``~`` in a tag ("Some tags contain invalid characters"), so no App instance ever started on Fargate."""
+    from ..keys import split_instance
+
+    base, instance = split_instance(name)
+    tags = [("duckstring:pond", f"{base}@{major}"), ("duckstring:target", target or "pool"),
+            ("duckstring:pool", target if target not in (None, "dedicated") else "")]
+    if instance is not None:
+        tags.append(("duckstring:instance", str(instance)))
+    return tags
 
 
 def _csv(value: str | None) -> list[str]:
