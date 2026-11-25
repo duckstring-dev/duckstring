@@ -4,6 +4,7 @@ or a lost machine ends it. Against a live Catchment; the "machine" is a subproce
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import duckdb
@@ -12,6 +13,8 @@ import pytest
 from app_remote_launcher import FakeRemoteLauncher
 from test_app import _SOURCE_PY, _SOURCE_TOML, _zip
 from test_runtime import _free_port, _serve
+
+from duckstring.catchment.db import locked
 
 pytestmark = pytest.mark.timeout(120)
 
@@ -243,18 +246,34 @@ def test_an_instance_elsewhere_outlives_a_catchment_crash(tmp_path, monkeypatch)
     monkeypatch.setenv("DUCKSTRING_APP_ORPHAN_MINUTES", "0.15")
     monkeypatch.setenv("DUCKSTRING_DATA_ROOT", str(tmp_path / "data-root"))
     monkeypatch.setenv("DUCKSTRING_CATCHMENT_URL", url)
+    # An agent that takes a few seconds to dial back, as over a real network: the warm floor must wait for it.
+    adopt = AppSupervisor.adopt
+
+    async def slow_adopt(self, *args, **kwargs):
+        await asyncio.sleep(3)
+        return await adopt(self, *args, **kwargs)
+
+    monkeypatch.setattr(AppSupervisor, "adopt", slow_adopt)
     try:
         assert first.is_running("dash~1@1")
         server, thread = _serve(root, port)
         app = server.config.app
         second = FakeRemoteLauncher(url, app.state.duck_token, tmp_path / "machines2", str(tmp_path / "data-root"))
         app.state.driver.launcher = second
+        # A request while the instance is on its way back waits for it, rather than starting another elsewhere.
+        assert httpx.get(f"{url}/apps/dash/v1/healthz", timeout=60).status_code == 200
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and not app.state.app_supervisor._of("dash@1"):
             time.sleep(0.2)
         assert app.state.app_supervisor._of("dash@1")[0].adopted
         assert httpx.get(f"{url}/apps/dash/v1/healthz", timeout=30).status_code == 200
         assert not second.spawned  # served by the adopted instance
+        # Nor did the warm floor start a replacement while the instance was on its way back: it waits for the
+        # instances a previous process left running (before, one extra started and was drained again).
+        db = app.state.driver.db
+        with locked(db):
+            ids = [r[0] for r in db.execute("SELECT id FROM app_instance ORDER BY id").fetchall()]
+        assert ids == [1], ids
         server.should_exit = True
         thread.join(timeout=30)
         deadline = time.monotonic() + 30

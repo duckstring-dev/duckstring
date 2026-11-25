@@ -273,6 +273,11 @@ Found and fixed:
 - **`app.media()` handed the URL to fsspec**, whose registry may not know `abfss://`; it now goes through
   `storage.get_storage`, as the Catchment and Ponds do.
 
-Seen, not changed: after a restart, a hold or warm floor starts a replacement before the instances elsewhere dial
-back (one extra instance, drained shortly after), as on Google. The first Azure setup takes about half an hour
-(the Container Apps environment alone 20 minutes).
+- **After a restart, a hold or warm floor started a replacement** before the instances elsewhere dialled back (one
+  extra instance, drained shortly after; on Google too). Scaling now waits while an App's deploy has instances a
+  previous process left running (`_awaiting_adoption`: `_orphans`, until adopted or expired at 120 s), and a request
+  that would start one elsewhere waits for them too (`_await_adoption`); with `min_instances = 0` a request still
+  starts on the Catchment. Cost: if the machine died with the Catchment, a new instance elsewhere starts up to 120 s
+  later. `test_an_instance_elsewhere_outlives_a_catchment_crash` delays adoption by 3 s to cover both.
+
+The first Azure setup takes about half an hour (the Container Apps environment alone 20 minutes).

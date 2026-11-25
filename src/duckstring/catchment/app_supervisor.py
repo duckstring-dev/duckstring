@@ -234,6 +234,11 @@ class AppSupervisor:
             if not view["app"]["command"]:
                 raise AppUnavailable(404, "not found")  # a static-only App: nothing to start
             duck = self._placement(view, request=True)
+            if duck is not None and self._awaiting_adoption(view):  # seconds for those coming back, not a new start
+                inst = await self._await_adoption(key, prefer)
+                if inst is not None:
+                    return inst
+                view = self.driver.app_view(key) or view
             starting = [i for i in self._of(key) if not i.ready and not i.stopping and i.ready_event is not None
                         and (duck is not None or not i.remote)]
             if starting:  # one is on its way (the warm floor, the scaler): wait for it rather than start another
@@ -363,6 +368,8 @@ class AppSupervisor:
             self.pressed.pop(key, None)
         if len(live) >= desired or any(not i.ready for i in live) or key in self._growing:
             return
+        if self._awaiting_adoption(view):
+            return  # instances a previous process left running are dialling back: they count first
         if time.monotonic() < self._grow_after.get(key, 0.0):
             return
         why = decision.reason if len(live) >= sc["min_instances"] else "the warm floor (min_instances)"
@@ -1195,6 +1202,24 @@ class AppSupervisor:
             self._instances.setdefault(key, []).append(inst)
         log.info("adopted %s instance %s, left running by the previous Catchment process", key, iid)
         return session
+
+    async def _await_adoption(self, key: str, prefer: int | None) -> Instance | None:
+        """Wait for an instance left running by a previous process to dial back and be adopted (until none of this
+        deploy's is still expected): it serves in seconds, where a new one elsewhere takes a minute."""
+        while True:
+            view = self.driver.app_view(key)
+            if view is None:
+                return None
+            inst = self._pick(key, view, prefer)
+            if inst is not None or not self._awaiting_adoption(view):
+                return inst
+            await asyncio.sleep(0.25)
+
+    def _awaiting_adoption(self, view: dict) -> bool:
+        """Whether instances elsewhere of this App's deploy, left running by a previous Catchment process, may still
+        dial back (until adopted or expired, ``REMOTE_SILENCE_S`` x 2). Scaling waits for them: before, a warm floor
+        or held count started a replacement in the first second after a restart, drained again once they returned."""
+        return any(o["version_id"] == view["version_id"] for o in list(self._orphans.values()))
 
     def _close_orphan(self, iid: int, reason: str) -> None:
         db = self.driver.db
