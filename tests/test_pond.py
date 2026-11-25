@@ -138,7 +138,7 @@ def test_trickle_demo_runs_locally(runner, tmp_path, monkeypatch):
     want = sorted(con.sql(
         f"SELECT o.order_id, p.unit_price, o.quantity * p.unit_price FROM ({orders}) o JOIN ({products}) p "
         "USING (product_id)").fetchall())
-    assert len(got) == 8 and got == pytest.approx(want)
+    assert len(got) == 8 and got == want  # exact: DECIMAL prices (pytest.approx refuses tuples)
 
 
 def test_sql_demo_runs_locally(runner, tmp_path, monkeypatch):

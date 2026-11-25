@@ -27,7 +27,8 @@ def at(con, f, previous_f=NEVER):
 
 def rows(con, table: str, proj: str = "*") -> list:
     """``proj`` over ``table``'s current state (system columns stripped), sorted."""
-    return sorted(T.current_state(con, table).query("t", f"SELECT {proj} FROM t").fetchall())
+    # Not aliased "t": a table of that name makes DuckDB 1.5 bind the alias to itself ("infinite recursion").
+    return sorted(T.current_state(con, table).query("_rows", f"SELECT {proj} FROM _rows").fetchall())
 
 
 def values(rows_: list, cols: str, types: str | None = None) -> str:

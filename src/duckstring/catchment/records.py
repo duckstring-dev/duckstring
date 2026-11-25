@@ -436,10 +436,13 @@ class Records:
         """Cap the connections an App line's role may hold at once: its instances' budget (plans/app-scaling.md),
         so one App's pools can't take every connection."""
         role = line_role(name, major)
-        if self._limits.get(role) == limit:
-            return
-        self.psql(f'ALTER ROLE "{role}" CONNECTION LIMIT {int(limit)}')
-        self._limits[role] = limit
+        # Under the lock provision() holds: two sessions altering one role at once fail with "tuple concurrently
+        # updated" (an instance starting while the supervisor set its line's limit).
+        with self._lock:
+            if self._limits.get(role) == limit:
+                return
+            self.psql(f'ALTER ROLE "{role}" CONNECTION LIMIT {int(limit)}')
+            self._limits[role] = limit
 
     def remote_ca(self) -> str | None:
         """The certificate something elsewhere trusts to verify the managed PostgreSQL (PEM): the self-signed one

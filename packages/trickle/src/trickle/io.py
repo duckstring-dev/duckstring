@@ -319,6 +319,10 @@ def temp_view(con, rel, name: str) -> None:
     except duckdb.InvalidInputException as exc:
         if "Values were not provided" not in str(exc):
             raise
+    except duckdb.ParserException:
+        # DuckDB 1.5 gives such a relation's SQL as a dump of its rows ("ColumnDataCollection - [...]"), and an
+        # Arrow one's as arrow_scan(0x...) pointers: neither parses, and the copy below keeps the rows.
+        pass
     held = unique_name("_trickle_bound")
     rel.create_view(held, replace=True)
     try:

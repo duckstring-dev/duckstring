@@ -19,6 +19,7 @@ def _at(i: int):
     return F1 + timedelta(minutes=i)
 
 
+@pytest.mark.timeout(30)  # dozens of publishes: over 5 s on a slow CI runner
 def test_a_merge_table_that_never_changes_keeps_one_marker_part(tmp_path):
     prod = Producer(tmp_path)
     for i in range(40):
@@ -33,6 +34,7 @@ def test_a_merge_table_that_never_changes_keeps_one_marker_part(tmp_path):
     assert sorted(sink.read_table("src.timetable").fetchall())[0] == (0, "stop 0")
 
 
+@pytest.mark.timeout(30)  # dozens of publishes: over 5 s on a slow CI runner
 def test_the_marker_survives_a_change_and_a_quiet_spell_after_it(tmp_path):
     """After a real change the change log has parts again; once retention folds them, the newest stays, so the
     export never needs to write a marker per Run again."""

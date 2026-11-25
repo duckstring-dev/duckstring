@@ -334,8 +334,8 @@ def test_a_definition_that_leaves_the_query_is_refused(tmp_path, prod):
 
         @puddle("tx.event")
         def fetched(p):
-            df = p.read_source().df()
-            return p.con.from_df(df.head(1))
+            rows = p.read_source().to_arrow_table()  # Arrow, not .df(): numpy isn't a dependency
+            return p.con.from_arrow(rows.slice(0, 1))
     """
     project = load_project(make_pond(tmp_path, puddles))
     results, _ = hydrate(project, live=True)
