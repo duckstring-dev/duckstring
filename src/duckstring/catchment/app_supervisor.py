@@ -485,7 +485,9 @@ class AppSupervisor:
         try:
             value = float(path.read_text().strip())
             when = path.stat().st_mtime
-            inst.load = (max(0.0, min(1.0, value)), time.monotonic() - max(0.0, time.time() - when))
+            at = time.monotonic() - max(0.0, time.time() - when)
+            if inst.load is None or at > inst.load[1]:  # a newer X-Duckstring-Load header stands
+                inst.load = (max(0.0, min(1.0, value)), at)
         except (OSError, ValueError):
             pass
 
@@ -823,7 +825,9 @@ class AppSupervisor:
         elif kind == "metrics":
             inst.cpu, inst.memory = message.get("cpu"), message.get("memory")
             if message.get("load") is not None:
-                inst.load = (float(message["load"]), time.monotonic())
+                at = time.monotonic() - float(message.get("load_age") or 0.0)
+                if inst.load is None or at > inst.load[1]:  # a newer X-Duckstring-Load header stands
+                    inst.load = (float(message["load"]), at)
         elif kind == "failed":
             inst.error = message.get("error")
         elif kind == "exited":

@@ -363,8 +363,10 @@ class Agent:
                 pass
         path = self.runtime / "load" / str(self.instance)
         try:
-            if time.time() - path.stat().st_mtime <= 30:
+            age = time.time() - path.stat().st_mtime
+            if age <= 30:
                 out["load"] = max(0.0, min(1.0, float(path.read_text().strip())))
+                out["load_age"] = max(0.0, age)  # so a newer X-Duckstring-Load header isn't overwritten
         except (OSError, ValueError):
             pass
         return out

@@ -232,6 +232,19 @@ def test_an_app_redeploys_its_running_version_in_place(catchment_client):
     assert inst.proc.poll() is not None and "dash@1" not in supervisor._instances
 
 
+def test_an_app_that_has_run_is_removed_with_wipe(catchment_client):
+    # Its instance rows hang off the version, so --wipe deletes them with it (before, the version's delete
+    # failed on the foreign key with a 500).
+    client = catchment_client
+    _deploy_pipeline(client)
+    assert client.get("/apps/dash/v1/hello").status_code == 200
+    assert client.post("/api/ponds/dash/sleep").status_code == 200
+    r = client.delete("/api/ponds/dash", params={"wipe": True})
+    assert r.status_code == 200, r.text
+    assert all(p["name"] != "dash" for p in client.get("/api/status").json()["ponds"])
+    assert client.get("/apps/dash/v1/hello").status_code == 404
+
+
 def test_an_app_that_exits_fails_until_woken(catchment_client):
     client = catchment_client
     _deploy_pipeline(client, {"pond.toml": _app_toml(command="python -c 'import sys; sys.exit(3)'"),

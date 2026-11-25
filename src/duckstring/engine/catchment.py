@@ -1138,6 +1138,8 @@ def tick(now: datetime, state: EngineState) -> EngineState:
     for pid, ps in s.pond_states.items():
         if not ps.standing_wake or ps.is_failed or ps.is_killed or ps.is_blocked:
             continue
+        if not s.ponds[pid].sources:
+            continue  # an App reading no Source has nothing to follow: it would pass at `now` every tick
         if ps.start_f == ps.end_f and not ps.demand and not any_ripple_busy(s, pid):
             f, _ = pond_source_f(s, pid, now)
             _local_demand(s, pid, f)

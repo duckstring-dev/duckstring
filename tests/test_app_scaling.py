@@ -339,3 +339,60 @@ def test_scaling_down_drains_the_catchments_instance_first(live):
                  == [("catchment", True), ("remote", True)], timeout=90)
     httpx.post(f"{url}/api/ponds/web/app/scale", json={"to": 1, "hold_s": 600}, timeout=30)
     assert _wait(lambda: [r["where"] for r in _rows(url)["instances"]] == ["remote"], timeout=60)
+
+
+def test_a_newer_load_header_isnt_overwritten_by_an_older_report_load_file(tmp_path):
+    """An App reporting load both ways: each tick re-read the file, replacing a newer header's value with its own."""
+    import os
+    import subprocess
+    import sys
+    from types import SimpleNamespace
+
+    from duckstring.catchment.app_supervisor import AppSupervisor
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        log = tmp_path / "logs" / "1.log"
+        (tmp_path / "load").mkdir()
+        load = tmp_path / "load" / "1"
+        load.write_text("0.95")
+        old = time.time() - 5
+        os.utime(load, (old, old))
+        inst = SimpleNamespace(id=1, proc=proc, samplers={}, log_path=log, cpu=None, memory=None,
+                               load=(0.2, time.monotonic()))  # the header, just now
+        view = {"app": {"memory": None}}
+        AppSupervisor._sample(None, inst, view)
+        assert inst.load[0] == 0.2
+        load.write_text("0.6")  # report_load, now: newer than the header
+        AppSupervisor._sample(None, inst, view)
+        assert inst.load[0] == 0.6
+        inst.load = None
+        load.write_text("0.4")
+        AppSupervisor._sample(None, inst, view)
+        assert inst.load[0] == 0.4
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_an_agents_load_report_carries_its_age(tmp_path):
+    """An instance elsewhere: the agent re-sent the file's value every 2 s as new, so it always beat the header."""
+    import os
+    from types import SimpleNamespace
+
+    from duckstring.app_agent import Agent
+    from duckstring.catchment.app_supervisor import AppSupervisor
+
+    (tmp_path / "load").mkdir()
+    load = tmp_path / "load" / "3"
+    load.write_text("0.95")
+    old = time.time() - 5
+    os.utime(load, (old, old))
+    agent = SimpleNamespace(proc=None, runtime=tmp_path, instance=3)
+    sent = Agent._metrics(agent)
+    assert sent["load"] == 0.95 and 4 <= sent["load_age"] <= 30
+    inst = SimpleNamespace(cpu=None, memory=None, load=(0.2, time.monotonic()))  # the header, just now
+    AppSupervisor._remote_control(None, inst, {"type": "metrics", **sent})
+    assert inst.load[0] == 0.2
+    AppSupervisor._remote_control(None, inst, {"type": "metrics", "load": 0.6, "load_age": 0.0})
+    assert inst.load[0] == 0.6

@@ -1504,6 +1504,7 @@ class Driver(TapsMixin, PuddlesMixin):
                         f"DELETE FROM ripple_to_ripple WHERE sink_id IN "
                         f"(SELECT id FROM ripple WHERE pond_version_id IN ({ph}))", vids)
                     self.db.execute(f"DELETE FROM ripple WHERE pond_version_id IN ({ph})", vids)
+                    self.db.execute(f"DELETE FROM app_instance WHERE pond_version_id IN ({ph})", vids)
                     self.db.execute(f"DELETE FROM pond_version WHERE id IN ({ph})", vids)
                 # Drop the pond_name once its last major is gone and no live sink still sources it —
                 # its served-major pointer (pond_serve, an FK on pond_name) goes with it.
