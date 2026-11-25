@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
 import sys
@@ -236,12 +237,13 @@ class Agent:
             sep = "&" if "?" in env[RECORDS_ENV] else "?"
             env[RECORDS_ENV] += f"{sep}sslrootcert={path}"
         app = dict(config.get("app") or {})
-        app.update({"root": str(self.root), "runtime": str(self.runtime)})
+        app.update({"root": str(self.root), "runtime": str(self.runtime), "spill": str(self.runtime / "spill")})
         env[ENV] = json.dumps(app)
         return env
 
     async def _serve(self, config: dict, python: Path) -> int:
         self.runtime.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(self.runtime / "spill", ignore_errors=True)  # a previous App process's (one runs per agent)
         self._write_json("freshness.json", config.get("freshness") or {})
         self.port = _free_port()
         self.stop_grace = float(config.get("stop_grace") or self.stop_grace)

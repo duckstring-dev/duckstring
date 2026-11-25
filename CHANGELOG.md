@@ -154,6 +154,10 @@ table's whole history was in both: after two days of page views, 3.7 GB in the w
 
 ### Fixes
 
+- **An App's spill filled the disk.** The App handle's DuckDB spilled into `.tmp` in the deployed version's
+  directory, and a stopped App left its files there: 51 GB across one showcase App's versions. Each instance now
+  spills in its own directory under the line's runtime, removed when it stops, and the spill earlier processes left
+  in the line's version directories is removed when the App next starts.
 - **A Ripple's error was replaced by "stuck" 30 seconds after its Run gave up.** The Ripples below the failed one
   kept waiting for the Run, so the Duck never went idle, its watchdog reported the Run as stuck, and that message
   replaced the Ripple's own error on the Pond. They now stop waiting when the Run gives up; Runs pipelined behind

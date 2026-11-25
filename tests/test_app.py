@@ -54,6 +54,11 @@ def mem():
     return {"limit": pond.con.execute("SELECT current_setting('memory_limit')").fetchall()[0][0]}
 
 
+@api.get("/spill")
+def spill():
+    return {"dir": pond.con.execute("SELECT current_setting('temp_directory')").fetchall()[0][0]}
+
+
 @api.websocket("/ws")
 async def ws(socket: WebSocket):
     await socket.accept()
@@ -197,6 +202,27 @@ def test_an_idle_instance_stops_and_the_next_request_starts_another(catchment_cl
     assert client.get("/apps/dash/v1/hello").status_code == 200
     instances = client.get("/api/ponds/dash/app/instances").json()["instances"]
     assert [i["stop_reason"] for i in instances] == [None, "idle"]
+
+
+def test_an_instance_spills_under_the_runtime_and_its_spill_goes_when_it_stops(catchment_client):
+    """DuckDB's default spill is ``.tmp`` in the working directory, the deployed version's, and a killed process
+    leaves its files there: 51 GB across a showcase App's versions. Each instance spills in its own directory
+    under the line's runtime, removed at its stop; what earlier processes left in the versions is swept."""
+    client = catchment_client
+    _deploy_pipeline(client)
+    root = client.app.state.root
+    old = root / "ponds" / "dash" / "1.0.0" / ".tmp"
+    old.mkdir()
+    (old / "duckdb_temp_123_0_storage_DEFAULT-0.tmp").write_bytes(b"x" * 10)
+    (old / "notes.txt").write_text("the App's own")
+    spill = Path(client.get("/apps/dash/v1/spill").json()["dir"])
+    supervisor = client.app.state.app_supervisor
+    inst = supervisor._instances["dash@1"][0]
+    assert spill == root / "ponds" / "dash" / "m1" / "app" / "spill" / str(inst.id) and spill.is_dir()
+    assert sorted(p.name for p in old.iterdir()) == ["notes.txt"]  # DuckDB's files swept, the App's kept
+    inst.last_used -= 3600
+    supervisor.reconcile()
+    assert inst.proc.poll() is not None and not spill.exists()
 
 
 def test_a_redeploy_replaces_the_instance(catchment_client):

@@ -65,6 +65,31 @@ def app_runtime_dir(root: Path, name: str, major: int) -> Path:
     return pond_major_dir(root, name, major) / "app"
 
 
+def app_spill_dir(runtime: Path, instance: int | str | None = None) -> Path:
+    """Where an App's DuckDB spills (the handle's ``temp_directory``): one directory per instance under the line's
+    runtime, removed when the instance stops. DuckDB leaves its files behind when a process is killed, and its
+    default (``.tmp`` in the working directory, the deployed version's) was never cleaned: 51 GB in one showcase."""
+    base = runtime / "spill"
+    return base if instance is None else base / str(instance)
+
+
+def sweep_version_spill(version_dir: Path) -> None:
+    """Remove the DuckDB spill an App process left in a deployed version's ``.tmp`` (where it went before
+    :func:`app_spill_dir`). Only DuckDB's own files: anything else there is the App's."""
+    tmp = version_dir / ".tmp"
+    if not tmp.is_dir():
+        return
+    for path in tmp.glob("duckdb_temp_*"):
+        try:
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
+        except OSError:
+            pass
+    try:
+        tmp.rmdir()  # only if empty
+    except OSError:
+        pass
+
+
 def app_state_dir(root: Path, name: str, major: int) -> Path:
     """An App line's durable state directory (``state = "local"``)."""
     return root / "apps" / name / f"m{major}" / "state"
@@ -696,10 +721,12 @@ class AppSupervisor:
         env[ENV] = json.dumps({
             "name": name, "major": major, "version": view["version"], "root": str(self.root),
             "data_root": self.data_root, "sources": list(view["sources"]), "source_majors": view["sources"],
-            "runtime": str(runtime), "memory_limit": memory_limit,
+            "runtime": str(runtime), "memory_limit": memory_limit, "spill": str(app_spill_dir(runtime, iid)),
         })
         if not any(not i.stopping for i in self._of(view["key"])):
             shutil.rmtree(runtime / "holds", ignore_errors=True)  # a previous instance's (none runs beside it)
+            shutil.rmtree(app_spill_dir(runtime), ignore_errors=True)
+            self._sweep_old_spill(name, major)
         self._write_freshness(view["key"], runtime, force=True)
         with open(log_path, "ab") as log:
             log.write(f"[duckstring] starting {name}@{major} {view['version']} on port {port}\n".encode())
@@ -718,6 +745,18 @@ class AppSupervisor:
         with self._mu:
             self._instances.setdefault(view["key"], []).append(inst)
         return inst
+
+    def _sweep_old_spill(self, name: str, major: int) -> None:
+        """The spill earlier processes left in this line's deployed version directories (see
+        :func:`sweep_version_spill`). Called with no instance of the line running here."""
+        db = self.driver.db
+        with locked(db):
+            rows = db.execute(
+                "SELECT pv.source_path FROM pond_version pv JOIN pond_name pn ON pn.id = pv.pond_name_id "
+                "WHERE pn.name = ? AND pv.major = ?", (name, major)).fetchall()
+        for (source_path,) in rows:
+            if source_path:
+                sweep_version_spill(self.root / source_path)
 
     # ─── instances on other machines (plans/app-scaling.md) ──────────────────
 
@@ -1050,6 +1089,7 @@ class AppSupervisor:
             inst.leases.clear()
         if last:
             shutil.rmtree(inst.log_path.parent.parent / "holds", ignore_errors=True)
+        shutil.rmtree(app_spill_dir(inst.log_path.parent.parent, inst.id), ignore_errors=True)  # its process has gone
         self.driver.app_release(inst.reserve_key or inst.key, process=process)
         db = self.driver.db
         with locked(db):

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -37,8 +38,10 @@ def app_env(project: Project, port: int) -> dict[str, str]:
         media = project.puddles_dir / "app" / "media"
         media.mkdir(parents=True, exist_ok=True)
         env[MEDIA_ENV] = str(media)
+    spill = project.puddles_dir / "app" / "spill"
+    shutil.rmtree(spill, ignore_errors=True)  # a previous serve's (DuckDB leaves it behind when killed)
     env[ENV] = json.dumps({"name": project.name, "major": int(project.version.split(".")[0]),
-                           "version": project.version, "root": str(project.puddles_dir),
+                           "version": project.version, "root": str(project.puddles_dir), "spill": str(spill),
                            "sources": list(project.sources), **_sources(project)})
     return env
 

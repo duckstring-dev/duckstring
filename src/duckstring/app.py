@@ -459,6 +459,9 @@ def _make_handle():
     cfg = json.loads(raw)
     runtime = Path(cfg["runtime"]) if cfg.get("runtime") else None
     con = duckdb.connect()
+    if cfg.get("spill"):  # under the line's runtime, removed when the instance stops (never the deployed code's .tmp)
+        Path(cfg["spill"]).mkdir(parents=True, exist_ok=True)
+        con.execute("SET temp_directory = ?", [cfg["spill"]])
     if cfg.get("memory_limit"):  # the App's [pond] memory (at least 256MB), set aside while it runs
         con.execute(f"SET memory_limit = '{cfg['memory_limit']}'")
     source_dirs = None
