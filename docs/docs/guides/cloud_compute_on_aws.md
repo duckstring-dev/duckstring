@@ -222,6 +222,13 @@ The Duck's role, which dispatches the work, also needs Athena and Glue access, p
 
 DuckDB stays the authority on results: Athena only gets constructs measured to agree with DuckDB, and every result is cast to DuckDB's schema and checked against a local recompute of a sample before it's used. Anything else runs in the Duck. [Offloading Large Recomputes](offloading_large_recomputes.md#accuracy-on-other-engines) has the detail.
 
+## Apps on cloud compute
+
+An App whose `pond.toml` sets `duck` runs its extra instances on Fargate or EC2, as a Pond's Ducks do (see [Scaling Apps](scaling_apps.md#instances-on-other-compute)). Instances need the same routes as Ducks, plus their App's data:
+
+- Media in S3, set before any App keeps Media: `duckstring catchment media --use s3://acme-lake/media`.
+- Records they can reach. With the Catchment's own PostgreSQL, set `duckstring catchment records --listen 0.0.0.0 --host` to the Catchment's private address, and allow `sg-duck` into `sg-catchment` on the Records port, which `duckstring catchment records` shows. Alternatively, keep Records in Amazon RDS, reachable from `sg-duck`.
+
 ## Where data goes
 
 A Pond running on the Catchment's own machine publishes locally first, then copies its output to S3 in the background. A Pond on a cloud Duck publishes straight to S3. A Pond downstream on a different machine waits until its Source's output has reached S3, never reading output that isn't there yet.

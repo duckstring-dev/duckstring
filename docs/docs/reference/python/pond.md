@@ -158,6 +158,47 @@ def score(pond):
     ...
 ```
 
+## App data
+
+An App's [Records and Media](../../guides/records_and_media.md) are read with these. An App line is named `name@major`, as in `"feedback@1"`. Neither is a Source, so nothing tells the engine when they change: an Inlet reading them always runs when asked, and in a Pond with Sources the Ripple reading them sets [`always_run=True`](decorators.md#ripple). Under `pond run`, they're read from the Puddles: a Records table from `puddles/records/{name}_v{major}/{table}.parquet` and Media from `puddles/media/{name}/m{major}/`.
+
+### `read_records`
+
+```python
+pond.read_records(ref) -> duckdb.DuckDBPyRelation
+```
+
+Returns an App line's Records table as a relation, read when the relation runs. To keep a history of what the App changed, [`merge_table`](trickle_io.md#merge_table) the result with its key.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `ref` | `str` | `"name@major.table"`, such as `"feedback@1.ratings"`. |
+
+### `media`
+
+```python
+pond.media(line, folder="") -> MediaInput
+```
+
+Returns an App line's Media, or a folder of it, as this Ripple's Run sees it.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `line` | `str` | `"name@major"`, such as `"feedback@1"`. |
+| `folder` | `str` | A folder within the line's Media, such as `"attachments"`. By default, all of it. |
+
+A `MediaInput` has:
+
+| Member | Description |
+|---|---|
+| `files()` | Every file, as `{"path", "size", "modified"}` dictionaries sorted by path. Paths are relative to the line's Media, and `modified` is an ISO 8601 time. |
+| `added()` | The files new or changed since this Ripple's previous completed Run. Every file on a first Run or after a Rebuild. |
+| `removed()` | The paths of files gone since this Ripple's previous completed Run. |
+| `open(path, mode="rb")` | A file, opened for reading. |
+| `path(path)` | A file as a local path, fetched into scratch space when Media is in an object store. |
+| `version` | A digest of every file's path, size and modification time. |
+| `changed` | Whether `version` differs from what this Ripple's previous completed Run read. Always `True` on a first Run and after a Rebuild. |
+
 ## Change detection
 
 Duckstring skips a Pond Run when none of its Sources changed since the last run. These methods let a Ripple take part in that decision, and find out which tables and Objects changed so it can skip just the work that depends on the rest.

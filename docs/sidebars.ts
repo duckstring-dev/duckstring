@@ -59,7 +59,12 @@ const sidebars: SidebarsConfig = {
         {
           type: 'category',
           label: 'Getting Data Out',
-          items: ['guides/querying', 'guides/serving_apps_with_taps', 'guides/building_apps', 'guides/delivering_with_spouts'],
+          items: ['guides/querying', 'guides/serving_apps_with_taps', 'guides/delivering_with_spouts'],
+        },
+        {
+          type: 'category',
+          label: 'Apps',
+          items: ['guides/building_apps', 'guides/records_and_media', 'guides/scaling_apps'],
         },
         {
           type: 'category',
@@ -115,6 +120,7 @@ const sidebars: SidebarsConfig = {
             'reference/cli/secret',
             'reference/cli/alert',
             'reference/cli/app',
+            'reference/cli/install',
           ],
         },
         'reference/http_api',

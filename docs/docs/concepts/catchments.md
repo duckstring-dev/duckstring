@@ -28,6 +28,8 @@ The Catchment stores each Pond's published tables, either on local disk or in ob
 
 Lineage can also be sent to other catalogs as OpenLineage events.
 
+Apps that collect data, such as ratings or uploaded files, keep it in the Catchment too, as **Records** (tables in a PostgreSQL database the Catchment runs or connects to) and **Media** (files). Unlike published tables, nothing can recompute them, so each App's major version keeps its own, and Ponds read them back into the pipeline. See [Records and Media](../guides/records_and_media.md).
+
 ## Querying
 
 You can run read-only SQL over the catalog from the CLI (`duckstring query`), from the web UI's data viewer, or from Python. Access is controlled by API keys, and a Pond can choose which of its tables are exposed to users with read-only access.

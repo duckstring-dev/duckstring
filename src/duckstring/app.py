@@ -363,8 +363,9 @@ def records_url() -> str:
 
 
 def records(**kwargs):
-    """A psycopg connection to the App line's Records (:func:`records_url`). Needs psycopg in the App's
-    environment (``uv add 'psycopg[binary]'``); any other driver can use :func:`records_url` instead."""
+    """A psycopg connection to the App line's Records (:func:`records_url`); keyword arguments go to
+    ``psycopg.connect``. Needs psycopg in the App's environment (``uv add 'psycopg[binary]'``); any other driver
+    can use :func:`records_url` instead."""
     try:
         import psycopg
     except ImportError:
@@ -374,9 +375,10 @@ def records(**kwargs):
 
 
 def records_pool(**kwargs):
-    """A ``psycopg_pool`` connection pool to the App line's Records, sized for this instance: up to its
-    ``connections`` budget (``DUCKSTRING_APP_CONNECTIONS``; plans/app-scaling.md), which the line's role enforces.
-    Needs ``psycopg_pool`` in the App's environment (``uv add psycopg_pool``)."""
+    """A ``psycopg_pool`` connection pool to the App line's Records, holding at most the instance's ``[app]
+    connections`` (``DUCKSTRING_APP_CONNECTIONS``; default ``concurrency``, 4), which the line's role enforces.
+    Keyword arguments go to ``ConnectionPool``, such as ``open=True``. Needs ``psycopg_pool`` in the App's
+    environment (``uv add 'psycopg[binary]' psycopg_pool``)."""
     try:
         from psycopg_pool import ConnectionPool
     except ImportError:
@@ -390,9 +392,9 @@ def records_pool(**kwargs):
 
 def report_load(load: float) -> None:
     """Tell the Catchment how busy this instance is, from 0 (idle) to 1 (full), for what no outside measure sees
-    (a lock, a queue of its own): above ``[app.scale] load`` (0.7) for a while, the App gets another instance
-    (plans/app-scaling.md). A report counts for 30 seconds; a response header ``X-Duckstring-Load`` does the same.
-    Does nothing outside a Catchment."""
+    (a lock, a queue of its own): above ``[app.scale] load`` (0.7) for ``after``, the App gets another instance.
+    A report counts for 30 seconds; a response header ``X-Duckstring-Load`` does the same. Does nothing outside a
+    Catchment."""
     instance = os.environ.get("DUCKSTRING_APP_INSTANCE")
     raw = os.environ.get(ENV)
     if not instance or not raw:
@@ -417,7 +419,8 @@ def media_url() -> str:
 
 
 def media_path() -> Path:
-    """The App line's Media as a local directory (when the Catchment keeps Media on its own disk)."""
+    """The App line's Media as a local directory, for libraries that want a path. Raises ``RuntimeError`` when
+    the Catchment keeps Media in an object store: use :func:`media` there."""
     url = media_url()
     if "://" in url:
         raise RuntimeError(f"this Catchment keeps Media in an object store ({url.split('://')[0]}://): use media()")

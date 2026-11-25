@@ -20,13 +20,13 @@ duckstring spout add POND --to URI [--table TABLE | --all] [--mode MODE] [--name
 
 | Option | Default | Description |
 |---|---|---|
-| `--to`, `-t` | required | The destination URI. Its scheme picks how data is written: `file://`, `s3://`, `gs://`, `az://`, `abfss://`, a `/Volumes/...` path, `postgres://`, `ducklake:` or `databricks://`. Credentials are written as `${env:NAME}` or `${secret:NAME}` references and resolved only at delivery, and a single reference can be the whole destination. See [Destination URIs](../formats.md#destination-uris). |
+| `--to`, `-t` | required | The destination URI. Its scheme picks how data is written: `file://`, `s3://`, `gs://`, `az://`, `abfss://`, a `/Volumes/...` path, `postgres://`, `records:`, `ducklake:` or `databricks://`. Credentials are written as `${env:NAME}` or `${secret:NAME}` references and resolved only at delivery, and a single reference can be the whole destination. See [Destination URIs](../formats.md#destination-uris). |
 | `--table`, `-T` | all tables | Deliver only this table. |
 | `--all` | | Deliver every table (the default, stated explicitly). |
 | `--mode` | `auto` | `auto`: send only changes where the destination supports it, otherwise the whole table. `full`: always write the whole table. `append`: for an object store, copy each run's new files, keeping the destination in Duckstring's file layout. `changes`: for a file, Volume or object-store destination, write each delivery's changes as files with a manifest; see [Change files](../formats.md#change-files). |
 | `--name`, `-n` | the table name, or the scheme for all tables | The Spout's name. A suffix such as `-2` is added if it's taken. |
 
-Postgres and DuckLake delivery are incremental and exactly-once. A merge Trickle's changed rows are deleted and re-inserted by its primary key, an append Trickle's new rows are inserted, and a plain table is replaced whole. Each delivery is one transaction, with its progress recorded in a `_duckstring_egress` table in the destination, and each DuckLake delivery adds one snapshot to the lake.
+Postgres, Records and DuckLake delivery are incremental and exactly-once. A merge Trickle's changed rows are deleted and re-inserted by its primary key, an append Trickle's new rows are inserted, and a plain table is replaced whole. Each delivery is one transaction, with its progress recorded in a `_duckstring_egress` table in the destination, and each DuckLake delivery adds one snapshot to the lake.
 
 The destination is validated when the Spout is added, but credentials aren't checked until the first delivery. Use the UI's **Test** button to check them beforehand.
 

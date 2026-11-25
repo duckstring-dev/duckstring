@@ -210,6 +210,10 @@ table's whole history was in both: after two days of page views, 3.7 GB in the w
 - **`pond run` on an App with both `command` and `static` served no static files**: only the command ran, so every
   file was a 404 locally while a Catchment served it. The files are now served beside the command, as on a
   Catchment.
+- **An App with no Sources recorded a Run every second.** Its standing Wake asked for "now" on every tick, so each
+  tick passed it as a no-change Run and its run history filled. It now runs only when asked.
+- **`pond remove --wipe` on an App that had ever started failed** with a database error, leaving the removal half
+  done: its instances' records weren't deleted with its versions.
 
 ### Integer sums published exactly
 
@@ -405,6 +409,14 @@ with 246M rows changed since its last compaction, each page took 30 seconds to 3
   revalidates them after a redeploy.
 - **An App's `pond.freshness()` has `changed`:** when each Source's data last changed. A Source's freshness moves
   on every Run, so an App rebuilding a cache on it rebuilt every Run.
+
+### Documentation
+
+Apps have their own section in the Guides: Building Apps, Records and Media (keeping an App's data, reading it in
+Ponds, handing it to a new major version, and running the PostgreSQL behind it) and Scaling Apps. The Reference
+covers the new `[app]` keys and `[app.scale]`, the App handle's Records and Media functions, `pond.read_records` and
+`pond.media`, `duckstring app scale|drain|migrate|purge`, `duckstring catchment records|media`, the new
+`duckstring install`, the `records:` Spout destination, and the new routes, metrics and environment variables.
 
 ## 0.8.0 — 2026-11-11
 

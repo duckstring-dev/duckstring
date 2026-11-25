@@ -17,6 +17,7 @@ Alert channels send notifications to a webhook or email address when Ponds fail,
 | `spout` | A Spout delivery fails. |
 | `freshness` | A Pond has been staler than the channel's `--stale` limit. |
 | `recovery` | A failed Pond or Spout recovers, or a stale Pond becomes fresh again. |
+| `app_scale` | An App's number of instances changes, with the reason. Not included in `all`: name it explicitly. |
 
 Failures are only reported for the Pond where they happened: Ponds blocked downstream aren't alerted separately, and are listed in the failure's message instead. Each failure is sent once, however many times the run is retried. A channel subscribed to `failure` also receives the matching `recovery`. Killing a Pond doesn't send a recovery.
 

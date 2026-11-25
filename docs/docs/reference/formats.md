@@ -177,6 +177,14 @@ postgres://loader:${secret:PG_PASSWORD}@db.internal:5432/analytics?schema=duckst
 
 A standard libpq connection URI (`postgresql://` also works). Tables are created in the `schema` query parameter (default `public`), and delivery progress is recorded in a `_duckstring_egress` table there. Any table can be delivered: a merge Trickle by its primary key, an append Trickle's new rows, and a plain table replaced whole.
 
+### `records:`
+
+```text
+records:
+```
+
+The Catchment's own [Records](../guides/records_and_media.md). Tables are created in a schema named after the Pond's line, `{name}_v{major}`, readable by every App. Delivery is as for `postgres://`. The Pond's name must be lower-case letters, digits and underscores, starting with a letter or underscore, and `mode=changes` isn't available.
+
 ### `ducklake:`
 
 ```text

@@ -242,6 +242,13 @@ When no Databricks credentials are set (`DATABRICKS_TOKEN`, or `DATABRICKS_CLIEN
 
 DuckDB stays the authority on results: Databricks only gets constructs measured to agree with DuckDB, and every result is cast to DuckDB's schema and checked against a local recompute of a sample before it's used. [Offloading Large Recomputes](offloading_large_recomputes.md#databricks) has the detail.
 
+## Apps on cloud compute
+
+An App whose `pond.toml` sets `duck` runs its extra instances on Container Apps or VMs, as a Pond's Ducks do (see [Scaling Apps](scaling_apps.md#instances-on-other-compute)). Instances need the same routes as Ducks, plus their App's data:
+
+- Media in Azure storage, set before any App keeps Media, such as `duckstring catchment media --use abfss://apps@acmelake.dfs.core.windows.net/media`.
+- Records they can reach. A Catchment running as a Container App serves only its HTTP port, so keep Records in Azure Database for PostgreSQL there, reachable from the Ducks' environment or subnet. A Catchment on a VM can serve its own: set `duckstring catchment records --listen 0.0.0.0 --host` to the VM's private address, and allow the Ducks' subnet in on the Records port, which `duckstring catchment records` shows.
+
 ## Where data goes
 
 A Pond running on the Catchment's own machine publishes locally first, then copies its output to the data root in the background. A Pond on a cloud Duck publishes straight to the data root. A Pond downstream on a different machine waits until its Source's output has reached the data root, never reading output that isn't there yet.

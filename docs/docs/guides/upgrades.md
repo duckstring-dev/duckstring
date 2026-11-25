@@ -131,3 +131,5 @@ duckstring pond promote sales --major 2
 ```
 
 Promotion is refused if v2 doesn't publish every table currently served. Consumers that name the version explicitly are unaffected either way.
+
+An App that keeps Records or Media hands its data over to a new major version instead of running beside it: the new version is a trial with a migrated copy of the data, and `pond promote` makes it the one live version. See [New major versions](records_and_media.md#new-major-versions).

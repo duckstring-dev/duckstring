@@ -52,7 +52,7 @@ Ponds can have **Sources** (parents) and **Sinks** (children). By position in th
 - **Pond**: both Sources and Sinks.
 - **Outlet**: no Sinks. Outlets produce the final data products that applications and analysts consume.
 
-An **App** is an Outlet that holds a web app, such as a dashboard, instead of transformations. It declares the Ponds it reads as Sources, and the Catchment serves it, starting it when someone opens it and stopping it when nobody is using it. See [Building Apps](../guides/building_apps.md).
+An **App** is an Outlet that holds a web app, such as a dashboard, instead of transformations. It declares the Ponds it reads as Sources, and the Catchment serves it, starting it when someone opens it and stopping it when nobody is using it. Data an App collects is kept by the Catchment as its Records and Media, which Ponds can read. See [Building Apps](../guides/building_apps.md).
 
 These are more guidelines than hard rules. However, if a Pond was built as an Outlet, typically it is worth remaking as a new Pond if a need
 arises for another Pond to draw from it. Building for consumers typically comes with quite different design considerations than building for

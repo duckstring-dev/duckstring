@@ -77,6 +77,14 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 | POST | `/api/catchment/reset` | full | Reset every Pond. |
 | GET | `/api/catchment/usage` | full | Size of the state directory. |
 | GET | `/api/catchment/archive` | full | Download the state directory as a tar stream. |
+| GET | `/api/catchment/records` | read | Where Apps' Records live, and the managed PostgreSQL's state. |
+| PUT | `/api/catchment/records` | full | Change it. Body: any of `target`, `memory`, `listen`, `host`, `tls_cert`, `tls_key`. |
+| GET | `/api/catchment/records/reader` | full | A read-only connection URL for a client on another machine. |
+| GET | `/api/catchment/media` | read | Where Apps' Media lives. |
+| PUT | `/api/catchment/media` | full | Change it. Body: `target`. |
+| POST | `/api/catchment/records/move` | full | Move Records. Body: `target`, `postgres_version`, `confirm` (the Catchment's name). Runs in the background. |
+| POST | `/api/catchment/media/move` | full | Move Media. Body: `target`, `confirm`. |
+| GET | `/api/catchment/move` | read | A move's progress: `state` (ending `done` or `failed`), `detail`, `error`. |
 
 ### Deploying and removing
 
@@ -185,7 +193,17 @@ A connection test (`/spouts/test`, `/alerts/{name}/test`) that fails returns `20
 |---|---|---|---|
 | GET | `/api/ponds/{name}/app/instances` | read | An App's recent instances, newest first. `limit` (default 20). |
 | GET | `/api/ponds/{name}/app/logs` | full | An instance's output as text. `instance` (default the newest), `tail` (bytes from the end, default 65536) or `offset` (bytes from there on). The `x-log-offset` header is where the next read starts. |
-| POST | `/api/ponds/{name}/app/restart` | full | Stop an App's instance and start a fresh one, clearing a failure or a Kill first. Returns once the restart has begun. |
+| POST | `/api/ponds/{name}/app/restart` | full | Stop an App's instances and start a fresh one, clearing a failure or a Kill first. Returns once the restart has begun. |
+| GET | `/api/ponds/{name}/app/scale` | read | Scaling settings and where each comes from, running instances, and recent decisions. |
+| POST | `/api/ponds/{name}/app/scale` | full | Override settings or set the count, as [`app scale`](cli/app.md#scale). Body: any of `min_instances`, `max_instances`, `concurrency`, `connections`, `requests`, `cpu`, `memory`, `load`, `to`, `hold_s`, `release`, `clear`. |
+| POST | `/api/ponds/{name}/app/instances/{instance}/drain` | full | Send no new sessions to an instance; it stops once its work is done. |
+| POST | `/api/ponds/{name}/app/migrate` | full | Migrate a trial major again from the live one. `major` names the trial. |
+| GET | `/api/app-data` | read | Every App line holding Records or Media: its state, Records tables, and Media file count and size. |
+| GET | `/api/app-data/{name}/{major}/media` | read | A line's Media files. `prefix` narrows to a folder. |
+| GET | `/api/app-data/{name}/{major}/media/file` | read | Download a file. `path` names it. |
+| POST | `/api/app-data/{name}/{major}/media/file` | full | Upload a file to `path`, as the request body or a multipart `file`, replacing one there. Refused on a retired line. |
+| DELETE | `/api/app-data/{name}/{major}/media/file` | full | Delete the file at `path`. Refused on a retired line. |
+| POST | `/api/app-data/{name}/{major}/purge` | full | Delete a line's Records and Media for good. Body: `confirm` (the Catchment's name). |
 
 Requests to an App itself go to `/apps/{name}/v{major}/...` on the Catchment's port, outside `/api`; see [`[app]`](pond_toml.md#app). A Tap added to an App has no key (`"key": null`): requests to the App run it.
 
@@ -236,6 +254,13 @@ The `/api/draw/*` routes that ducts use to transfer data, and the `/api/duck/*` 
 | `duckstring_alert_deliveries_total` | counter | Alert deliveries, by `status`. |
 | `duckstring_flock_dispatched_total` | counter | Computations sent to the Flock, per Pond. |
 | `duckstring_flock_dispatch_failures_total` | counter | Flock dispatches that failed and ran in the Duck instead. The only sign that a Flock is misconfigured. |
+| `duckstring_app_instances` | gauge | Running instances of each App, labelled `place` (`catchment` or `elsewhere`). |
+| `duckstring_app_active` | gauge | Active requests and WebSockets across an App's instances. |
+| `duckstring_app_cpu_share`, `duckstring_app_memory_share` | gauge | Mean CPU and memory of an App's instances, as shares of their cores and limit. |
+| `duckstring_app_reported_load` | gauge | Mean load an App's instances report themselves. |
+| `duckstring_app_at_maximum` | gauge | 1 while an App is held at its maximum instances under pressure. |
+| `duckstring_app_instance_starts_total` | counter | App instances started, by `place`. |
+| `duckstring_app_instance_stops_total` | counter | App instances stopped, by `reason`. |
 | `duckstring_tap_queries_total` | counter | Queries through each Tap, labelled `pond`, `major` and `tap`. |
 | `duckstring_tap_refreshes_total` | counter | Refreshes sent by each Tap's queries. |
 

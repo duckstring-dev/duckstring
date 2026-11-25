@@ -70,6 +70,8 @@ Download while no runs are in progress. Secrets aren't included, so set them aga
 
 **Back it up continuously.** Set `DUCKSTRING_STATE_BACKUP_URI` to an object-store location. The Catchment copies its database there every minute (`DUCKSTRING_CHECKPOINT_INTERVAL`), and its full state when it shuts down cleanly. A Catchment starting with an empty state directory restores from it automatically. This suits platforms with no persistent disk, such as scale-to-zero containers.
 
+Apps' [Records and Media](records_and_media.md) need care on a platform. The Catchment's own PostgreSQL needs the server installed in the app's environment, and between full-state copies its data lives only on the app's disk. Point Records at a PostgreSQL database you run or the platform provides, with [`catchment records --use`](../reference/cli/catchment.md#records), and Media at object storage with [`catchment media --use`](../reference/cli/catchment.md#media), before any App keeps data.
+
 ## Keeping data
 
 Published tables are stored under the state directory by default, which makes them part of every download. On a platform, point `DUCKSTRING_DATA_ROOT` at object storage instead:
