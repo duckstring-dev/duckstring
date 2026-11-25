@@ -201,6 +201,9 @@ table's whole history was in both: after two days of page views, 3.7 GB in the w
 - **Deploying a fix for a failed Pond left it showing running for good,** and re-ran only the Ripple that had
   failed, on output the broken version wrote. The Duck took the earlier version's completed Ripples as its own
   (the Run ledger is the major line's); a new version now runs every Ripple of the Run.
+- **A Pond environment on an Azure or Google Catchment lacked its cloud's storage packages.** It got only the
+  Catchment's `aws` and `lineage` extras, so a Ripple or App reaching an `abfss://` or `gs://` location through
+  fsspec (an App's Media) failed. It now gets `azure` and `gcp` too.
 - **Stopping the Catchment could fail an App**, which the restarted Catchment then showed failed until woken.
 - **Less log noise:** with the Flock off, no engine is looked for (`flock: engine 'starrocks' could not be
   checked` repeated through every Run), an engine that can't be checked is reported once, and a first Run's

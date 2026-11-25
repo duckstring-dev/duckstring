@@ -242,3 +242,37 @@ the Catchment's first); the sidebar counted down to an idle stop a timed hold su
 changed: after a `kill -9`, the new process's Pond Ducks fail to open their registries while the old process's
 Ducks (which outlive it by design) still hold them; the old ones carry on and the Ponds stay healthy.
 Everything was deleted after (VMs, service accounts, bindings, the run's bucket prefix).
+
+## The AWS and Azure runs (2026-11-25)
+
+Both with this branch's wheels (as `0.9.0.dev0`) and a test image built from them, the same App (`scaleapp`:
+Records, Media, `reports` as its Source; `instances = 3`, `concurrency = 2`, `duck = "S"`) and the same driver:
+ten concurrent slow requests, then `--to 3 --hold`, `--to 1`, `kill -9` and restart of the Catchment, `--to 2
+--hold`, SIGTERM. The Catchment ran on Ubuntu 24.04 as a non-root user (`duckstring install postgres` refuses
+Amazon Linux: no PGDG packages for it), Records on its own PostgreSQL listening on the private address.
+
+- **AWS**: Catchment on EC2 (t3.large) in the smoke-test VPC; Fargate instances (preset S) from an ECR image; data
+  root and Media on S3; a test security group on the Catchment letting `sg-duck` in on TCP (the Records port).
+  Growth decided 10 s after the load began, the first Fargate instance served 55 s after its start; probes on it
+  saw Records over `verify-full`, Media on S3 and `reports` from the data root. `--to 1` drained the Catchment's
+  instance first. After `kill -9` the new process adopted the Fargate instance (which kept serving). At SIGTERM the
+  instance the Catchment had started stopped through its launcher; the adopted one exited by its orphan timer 5
+  minutes later.
+- **Azure**: Catchment on a VM (D4s_v5) in a VNet with a Container Apps environment (workload profiles) on a
+  delegated subnet; instances as Container Apps job executions (preset S) from an ACR image pulled with `ds-duck`;
+  data root and Media on ADLS (`abfss://`). The same sequence and results: ready 65 s after the start, 16 probes
+  without an error, the adopted execution `Succeeded` 5 minutes after SIGTERM. The VNet's default rules let the
+  environment's subnet reach the Records port.
+
+Found and fixed:
+- **Fargate and EC2 tagged App instances with the launcher key** (`scaleapp~2@1`); AWS refuses `~` in a tag, so no
+  App instance ever started on Fargate. Tags are now the App's line plus `duckstring:instance`.
+- **Pond environments got only the `aws` and `lineage` extras**: on an Azure or Google Catchment an App's
+  environment had no `adlfs`/`gcsfs`, so an App with Media failed at import. `environments._extras` adds `azure`
+  and `gcp`. (The Google run's instances had `gcsfs` in their `pip_spec`, which hid it there.)
+- **`app.media()` handed the URL to fsspec**, whose registry may not know `abfss://`; it now goes through
+  `storage.get_storage`, as the Catchment and Ponds do.
+
+Seen, not changed: after a restart, a hold or warm floor starts a replacement before the instances elsewhere dial
+back (one extra instance, drained shortly after), as on Google. The first Azure setup takes about half an hour
+(the Container Apps environment alone 20 minutes).
