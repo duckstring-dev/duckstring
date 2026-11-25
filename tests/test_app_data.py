@@ -742,6 +742,11 @@ def test_an_app_grows_to_several_instances_that_share_its_records(tmp_path, monk
         target = [i for i in supervisor._instances["busy@1"] if i.ready][-1]
         target.last_used -= 3600
         supervisor.reconcile()
+        # The supervisor's own loop reconciles too: if it reached the instance first, it is stopping it (SIGTERM,
+        # then waiting for the process), and this pass skipped it. Either way it goes.
+        deadline = time.monotonic() + 15
+        while target in supervisor._instances.get("busy@1", []) and time.monotonic() < deadline:
+            time.sleep(0.1)
         left = [i.id for i in supervisor._instances["busy@1"]]
         assert target.id not in left and left
         assert httpx.get(f"{url}/apps/busy/v1/pid", timeout=30).status_code == 200
