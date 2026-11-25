@@ -2,7 +2,7 @@
 
 Notable changes per release. Versions before 0.5.0 are recorded in the git history and the `v*` tags.
 
-## Unreleased
+## 0.9.0 — 2026-11-26
 
 Records and Media, the data Apps keep, and fixes from two showcase pipelines run unattended on 0.8.0: Melbourne's
 trains every 31 seconds, and a dozen Ponds over Wikipedia page views, news and Bluesky. Needs `duckstring-trickle`
